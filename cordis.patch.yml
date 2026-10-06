@@ -1,0 +1,27 @@
+# dsh-git bundle patch(npm 包名 @linxueyuan/dsh-git):在 profile 里插入「dsh-git」双半插件行。
+#
+# 双半:node 半(exports ".")在 host 进程跑 git(subprocess)+ /dsh-git/* HTTP 路由
+# + DSH 模型生成 commit message;浏览器半(exports "./client")由 client-modules
+# 从本包 dsh.client 声明加载,注册官方右侧栏 tab。
+#
+# `id` 是 profile 内的实例 id(与 src/client/index.ts 注册的席位 id 一致),刻意保持短名
+# 不变;`name` 必须是完整的 npm 包名,scoped 包要连 scope 一起写。
+- insert:
+    - id: dsh-git
+      name: '@linxueyuan/dsh-git'
+      # ----------------------------------------------------------------------
+      # 可选配置。
+      #
+      # clientId:GitHub OAuth App 的 Client ID,**只有填了才启用「设备码登录」**。
+      #   不填不影响使用:设置里仍可用 Personal Access Token 登录(细粒度 Token 需要
+      #   Contents R / Issues RW / Pull requests RW / Actions RW;经典 Token 用 repo)。
+      #
+      #   自己建一个 OAuth App 即可(免费,不需要 Copilot):
+      #     https://github.com/settings/developers → New OAuth App
+      #     任意填 Homepage URL;勾选 "Enable Device Flow";Callback URL 可留空/随便填。
+      #   设备码流程**不需要 client secret**,所以只把 Client ID 放这里没有泄密风险。
+      #   然后取消下面两行的注释并填入:
+      #
+      # config:
+      #   clientId: Ov23liXXXXXXXXXXXXXXXX
+      # ----------------------------------------------------------------------

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="dsh-git">
+  <title>dsh-git</title>
+  <!-- 主题色回退：内联进页面时 currentColor 继承父级文字色（深色主题自动变亮）；
+       作为 <img src> 独立引用时（宿主图标、README、应用图标）落到品牌蓝。 -->
+  <style>:root{color:#4d6bfe}</style>
+  <!-- 干线 + 分支曲线：两笔同宽 2、圆头，接头落在节点圆内，避免叠色接缝。 -->
+  <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+    <path d="M7.5 5.3v13.4"/>
+    <path d="M7.5 11.8c0 2.2 1.6 3.8 3.8 3.8h1.5"/>
+  </g>
+  <!-- 干线两端的提交节点：实心，圆心压在笔画端点。 -->
+  <g fill="currentColor">
+    <circle cx="7.5" cy="5" r="2.35"/>
+    <circle cx="7.5" cy="19" r="2.35"/>
+  </g>
+  <!-- 分支末端：空心环 = 尚未落到本地的远端提交（图标语言里的 hollow commit）。 -->
+  <circle cx="15.5" cy="15.6" r="2.05" fill="none" stroke="currentColor" stroke-width="1.7"/>
+</svg>
