@@ -8,9 +8,7 @@
        alt="dsh-git：把本地 Git 工作台和 GitHub 远端页签一起装进 DeepSeek Harness 的官方右侧栏">
 </p>
 
-**把本地 Git 装进 [DeepSeek Harness](https://github.com/deepseek-ai) 的官方右侧栏**：多仓库下拉、Changes / History 本地操作、Code / Issues / Pull requests / Actions 远端页签，提交信息由 DSH 模型列表里的模型生成 —— **不使用任何 Copilot 付费能力**。
-
-布局参考 [dsh-github-workbench](https://github.com/meyaomiao/dsh-github-workbench)，工作流照 GitHub Desktop：左上角仓库下拉、工具栏同步/分支、Changes 的「文件列表 + diff + 提交区」。（上图是 DSH 窗口的结构示意；**真实界面见下**。）
+**把本地 Git 装进 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的官方右侧栏**：多仓库下拉、Changes / History 本地操作、Code / Issues / Pull requests / Actions 远端页签，提交信息由 DSH 模型列表里的模型生成。
 
 <p align="center">
   <img src="./assets/readme/Changes.png" width="100%"
