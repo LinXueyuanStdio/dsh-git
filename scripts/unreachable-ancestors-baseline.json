@@ -1,0 +1,440 @@
+{
+  "ancestors": {
+    "diff-line-gutter": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter *",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter .hunk-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter .hunk-expander",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter .hunk-expander.hunk-expand-up-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter .hunk-expander.hunk-expand-down-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter .hunk-expander.hunk-expand-whole-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter:not(.includeable) .hunk-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.expandable-both .hunk-expand-whole-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter:not(.diff-hunk) .hunk-expand-whole-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter:not(.expandable-both) .hunk-expand-up-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter:not(.expandable-both) .hunk-expand-down-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter:not(.diff-hunk) .hunk-expand-up-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter:not(.diff-hunk) .hunk-expand-down-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk .hunk-expand-up-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk .hunk-expand-down-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk .hunk-expand-whole-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk .hunk-expand-icon",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk:not(.expandable-up) .hunk-expand-whole-handle #hunk-expand-up-icon",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk:not(.expandable-down) .hunk-expand-whole-handle #hunk-expand-down-icon",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk:not(.expandable-short) .hunk-expand-whole-handle #hunk-expand-short-icon",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-up :hover",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-down :hover",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-short :hover",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-both :hover",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-up :hover:last-child",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-down :hover:last-child",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-short :hover:last-child",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-both :hover:last-child",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter .before",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter .after",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter .diff-line-number",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-add:not(.read-only) *",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-delete:not(.read-only) *",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.read-only .after",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-add .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-add .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-delete .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-delete .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-context .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-context .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-hunk .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-hunk .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-selected .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-selected .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover:not(.diff-line-selected).diff-add .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover:not(.diff-line-selected).diff-add .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover:not(.diff-line-selected).diff-add .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover:not(.diff-line-selected).diff-add .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover:not(.diff-line-selected).diff-delete .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover:not(.diff-line-selected).diff-delete .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover:not(.diff-line-selected).diff-delete .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover:not(.diff-line-selected).diff-delete .diff-line-number:last-child"
+      ]
+    },
+    "CodeMirror": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror span",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror pre",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror pre.CodeMirror-line",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror pre.CodeMirror-line-like",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror pre.CodeMirror-line.diff-hunk-expandable-both",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror pre.CodeMirror-line-like.diff-hunk-expandable-both",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror pre.CodeMirror-line.diff-hunk:not(.diff-hunk-expandable-both)",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror pre.CodeMirror-line-like.diff-hunk:not(.diff-hunk-expandable-both)",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror pre.CodeMirror-line svg.no-newline",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror pre.CodeMirror-line-like svg.no-newline",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-code",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-gutters",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-gutter-wrapper",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-gutter-elt",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .diff-gutter",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-search-dialog",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-search-dialog .CodeMirror-search-label",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-search-dialog .CodeMirror-search-hint",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-search-dialog input.CodeMirror-search-field",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-search-dialog .buttons",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .popover-component.whitespace-hint",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-add",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-add .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-add .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-delete",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-delete .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-delete .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-context",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-context .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-context .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-hunk",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-hunk .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-hunk .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-hunk.expandable-up:hover",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-hunk.expandable-down:hover",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-hunk.expandable-short:hover",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-hunk.expandable-up:hover:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-hunk.expandable-down:hover:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-hunk.expandable-short:hover:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-selected .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-selected .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover:not(.diff-line-selected).diff-add .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover:not(.diff-line-selected).diff-add .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover:not(.diff-line-selected).diff-add .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover:not(.diff-line-selected).diff-add .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover:not(.diff-line-selected).diff-delete .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover:not(.diff-line-selected).diff-delete .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover:not(.diff-line-selected).diff-delete .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover:not(.diff-line-selected).diff-delete .diff-line-number:last-child"
+      ]
+    },
+    "CodeMirror-lines": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter *",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter .hunk-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter .hunk-expander",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter .hunk-expander.hunk-expand-up-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter .hunk-expander.hunk-expand-down-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter .hunk-expander.hunk-expand-whole-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter:not(.includeable) .hunk-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.expandable-both .hunk-expand-whole-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter:not(.diff-hunk) .hunk-expand-whole-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter:not(.expandable-both) .hunk-expand-up-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter:not(.expandable-both) .hunk-expand-down-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter:not(.diff-hunk) .hunk-expand-up-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter:not(.diff-hunk) .hunk-expand-down-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-add",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-delete",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk .hunk-expand-up-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk .hunk-expand-down-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk .hunk-expand-whole-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk .hunk-expand-icon",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk:not(.expandable-up) .hunk-expand-whole-handle #hunk-expand-up-icon",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk:not(.expandable-down) .hunk-expand-whole-handle #hunk-expand-down-icon",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk:not(.expandable-short) .hunk-expand-whole-handle #hunk-expand-short-icon",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-up :hover",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-down :hover",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-short :hover",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-both :hover",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-up :hover:last-child",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-down :hover:last-child",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-short :hover:last-child",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-both :hover:last-child",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter .before",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter .after",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter .diff-line-number",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-add:not(.read-only) *",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-delete:not(.read-only) *",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.read-only .after"
+      ]
+    },
+    "diff-code-mirror": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror span",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror pre",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror-lines",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror pre.CodeMirror-line",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror pre.CodeMirror-line-like",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror pre.CodeMirror-line.diff-hunk-expandable-both",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror pre.CodeMirror-line-like.diff-hunk-expandable-both",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror pre.CodeMirror-line.diff-hunk:not(.diff-hunk-expandable-both)",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror pre.CodeMirror-line-like.diff-hunk:not(.diff-hunk-expandable-both)",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror pre.CodeMirror-line svg.no-newline",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror pre.CodeMirror-line-like svg.no-newline",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-code",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-gutters",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-gutter-wrapper",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-gutter-elt",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .diff-gutter",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-search-dialog",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-search-dialog .CodeMirror-search-label",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-search-dialog .CodeMirror-search-hint",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-search-dialog input.CodeMirror-search-field",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-search-dialog .buttons",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .popover-component.whitespace-hint"
+      ]
+    },
+    "diff-hunk": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk .hunk-expand-up-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk .hunk-expand-down-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk .hunk-expand-whole-handle",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk .hunk-expand-icon",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk:not(.expandable-up) .hunk-expand-whole-handle #hunk-expand-up-icon",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk:not(.expandable-down) .hunk-expand-whole-handle #hunk-expand-down-icon",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk:not(.expandable-short) .hunk-expand-whole-handle #hunk-expand-short-icon",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-up :hover",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-down :hover",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-short :hover",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-both :hover",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-up :hover:last-child",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-down :hover:last-child",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-short :hover:last-child",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-both :hover:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-hunk .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-hunk .diff-line-number:last-child"
+      ]
+    },
+    "platform-win32": {
+      "reason": "Desktop 在 `app/src/lib/platform.ts` 把 `platform-win32` / `platform-darwin` / `platform-linux` 加到 `document.body` 上;\n我们的移植层**没有做这件事**(全仓 grep `platform-` 在 `src/**` 里 0 命中)⇒ 这些规则(win32 滚动条、ahead/behind 徽标行高)永不生效。\n修法:在 client 入口按 `navigator.platform`/UA 给 `document.body` 补平台类(与上游同形),或删掉这些规则。",
+      "kind": "class",
+      "selectors": [
+        "body.platform-win32 .gw-repo-list .repository-list .ahead-behind",
+        "body.platform-win32 .gw-repo-list .repository-list-item-tooltip .ahead-behind",
+        ".gw-repo-list body.platform-win32 .list",
+        ".gw-repo-list body.platform-win32 .list .ReactVirtualized__Grid::-webkit-scrollbar",
+        ".gw-repo-list body.platform-win32 .list .fake-scroll",
+        ".gw-repo-list body.platform-win32 .list:hover .fake-scroll",
+        ".gw-repo-list body.platform-win32 ::-webkit-scrollbar",
+        ".gw-repo-list body.platform-win32 ::-webkit-scrollbar-thumb",
+        ".gw-repo-list body.platform-win32 ::-webkit-scrollbar-thumb:active",
+        ".gw-repo-list body.platform-win32 ::-webkit-scrollbar-thumb:hover"
+      ]
+    },
+    "diff-add": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-add:not(.read-only) *",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-add .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-add .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover:not(.diff-line-selected).diff-add .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover:not(.diff-line-selected).diff-add .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover:not(.diff-line-selected).diff-add .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover:not(.diff-line-selected).diff-add .diff-line-number:last-child"
+      ]
+    },
+    "diff-delete": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-delete:not(.read-only) *",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-delete .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-delete .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover:not(.diff-line-selected).diff-delete .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover:not(.diff-line-selected).diff-delete .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover:not(.diff-line-selected).diff-delete .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover:not(.diff-line-selected).diff-delete .diff-line-number:last-child"
+      ]
+    },
+    "diff-line-hover": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover:not(.diff-line-selected).diff-add .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover:not(.diff-line-selected).diff-add .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover:not(.diff-line-selected).diff-delete .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-hover:not(.diff-line-selected).diff-delete .diff-line-number:last-child"
+      ]
+    },
+    "includeable": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover:not(.diff-line-selected).diff-add .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover:not(.diff-line-selected).diff-add .diff-line-number:last-child",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover:not(.diff-line-selected).diff-delete .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.includeable:hover:not(.diff-line-selected).diff-delete .diff-line-number:last-child"
+      ]
+    },
+    "CodeMirror-search-dialog": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-search-dialog .CodeMirror-search-label",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-search-dialog .CodeMirror-search-hint",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-search-dialog input.CodeMirror-search-field",
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror .CodeMirror-search-dialog .buttons"
+      ]
+    },
+    "platform-linux": {
+      "reason": "Desktop 在 `app/src/lib/platform.ts` 把 `platform-win32` / `platform-darwin` / `platform-linux` 加到 `document.body` 上;\n我们的移植层**没有做这件事**(全仓 grep `platform-` 在 `src/**` 里 0 命中)⇒ 这些规则(win32 滚动条、ahead/behind 徽标行高)永不生效。\n修法:在 client 入口按 `navigator.platform`/UA 给 `document.body` 补平台类(与上游同形),或删掉这些规则。",
+      "kind": "class",
+      "selectors": [
+        ".gw-repo-list body.platform-linux ::-webkit-scrollbar",
+        ".gw-repo-list body.platform-linux ::-webkit-scrollbar-thumb",
+        ".gw-repo-list body.platform-linux ::-webkit-scrollbar-thumb:active",
+        ".gw-repo-list body.platform-linux ::-webkit-scrollbar-thumb:hover"
+      ]
+    },
+    "hunk-expand-whole-handle": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk:not(.expandable-up) .hunk-expand-whole-handle #hunk-expand-up-icon",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk:not(.expandable-down) .hunk-expand-whole-handle #hunk-expand-down-icon",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk:not(.expandable-short) .hunk-expand-whole-handle #hunk-expand-short-icon"
+      ]
+    },
+    "#repository": {
+      "reason": "这些是 **Desktop 主窗口的根 id**(`#repository`、`#repository-sidebar`),由上游 `ui/repository.tsx` 的窗口骨架产出。\n我们的仓库列表面用 `gw-*` 自己的结构(`src/client/repo-bar.tsx`)渲染,从不产出这些 id ⇒\n随 `_repository-list.scss` 一起被 import 进来的 `ui/_repository.scss` 规则永不匹配。\n修法:确认这些规则对本插件无意义后裁掉,或(若确实需要)在真实结构上补等价规则。",
+      "kind": "id",
+      "selectors": [
+        ".gw-repo-list #repository > .focus-container",
+        ".gw-repo-list #repository #no-changes"
+      ]
+    },
+    "#repository-sidebar": {
+      "reason": "这些是 **Desktop 主窗口的根 id**(`#repository`、`#repository-sidebar`),由上游 `ui/repository.tsx` 的窗口骨架产出。\n我们的仓库列表面用 `gw-*` 自己的结构(`src/client/repo-bar.tsx`)渲染,从不产出这些 id ⇒\n随 `_repository-list.scss` 一起被 import 进来的 `ui/_repository.scss` 规则永不匹配。\n修法:确认这些规则对本插件无意义后裁掉,或(若确实需要)在真实结构上补等价规则。",
+      "kind": "id",
+      "selectors": [
+        ".gw-repo-list #repository-sidebar .tab-bar",
+        ".gw-repo-list #repository-sidebar .panel"
+      ]
+    },
+    "button-with-icon": {
+      "reason": "上游靠**组件**加这个修饰类(`ui/lib/button.tsx` 的 `button-with-icon`、`ui/lib/link-button.tsx` 的 `link-with-icon`、\n`ui/repositories-list/repositories-list.tsx` 的 `merge-button`),而我们的镜像组件**不产出它**(全仓 grep 0 命中),\n于是 `_button.scss:131` 的 `.button-with-icon .octicon { margin-left }` 之类的间距规则永不生效。\n修法:在**我们自己的层**里给对应组件包一层补上修饰类(不要直接改镜像文件,见 goal 文档 §2.1)。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .button-component.button-with-icon .octicon",
+        ".gw-repo-list .button-component.button-with-icon .octicon"
+      ]
+    },
+    "diff-context": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-context .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-context .diff-line-number:last-child"
+      ]
+    },
+    "diff-line-selected": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-selected .diff-line-number",
+        ".gw-desktop-diff .CodeMirror .diff-line-gutter.diff-line-selected .diff-line-number:last-child"
+      ]
+    },
+    "expandable-down": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-down :hover",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-down :hover:last-child"
+      ]
+    },
+    "expandable-short": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-short :hover",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-short :hover:last-child"
+      ]
+    },
+    "expandable-up": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-up :hover",
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.diff-hunk.expandable-up :hover:last-child"
+      ]
+    },
+    "link-with-icon": {
+      "reason": "上游靠**组件**加这个修饰类(`ui/lib/button.tsx` 的 `button-with-icon`、`ui/lib/link-button.tsx` 的 `link-with-icon`、\n`ui/repositories-list/repositories-list.tsx` 的 `merge-button`),而我们的镜像组件**不产出它**(全仓 grep 0 命中),\n于是 `_button.scss:131` 的 `.button-with-icon .octicon { margin-left }` 之类的间距规则永不生效。\n修法:在**我们自己的层**里给对应组件包一层补上修饰类(不要直接改镜像文件,见 goal 文档 §2.1)。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .link-button-component.link-with-icon .octicon",
+        ".gw-repo-list .link-button-component.link-with-icon .octicon"
+      ]
+    },
+    "platform-darwin": {
+      "reason": "Desktop 在 `app/src/lib/platform.ts` 把 `platform-win32` / `platform-darwin` / `platform-linux` 加到 `document.body` 上;\n我们的移植层**没有做这件事**(全仓 grep `platform-` 在 `src/**` 里 0 命中)⇒ 这些规则(win32 滚动条、ahead/behind 徽标行高)永不生效。\n修法:在 client 入口按 `navigator.platform`/UA 给 `document.body` 补平台类(与上游同形),或删掉这些规则。",
+      "kind": "class",
+      "selectors": [
+        "body.platform-darwin .gw-repo-list .repository-list .ahead-behind",
+        "body.platform-darwin .gw-repo-list .repository-list-item-tooltip .ahead-behind"
+      ]
+    },
+    "selecting-after": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .side-by-side-diff-container.selecting-after .before",
+        ".gw-desktop-diff .side-by-side-diff-container.selecting-after .before *"
+      ]
+    },
+    "selecting-before": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .side-by-side-diff-container.selecting-before .after",
+        ".gw-desktop-diff .side-by-side-diff-container.selecting-before .after *"
+      ]
+    },
+    "CodeMirror-line": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror pre.CodeMirror-line svg.no-newline"
+      ]
+    },
+    "CodeMirror-line-like": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .diff-code-mirror .CodeMirror pre.CodeMirror-line-like svg.no-newline"
+      ]
+    },
+    "merge-button": {
+      "reason": "上游靠**组件**加这个修饰类(`ui/lib/button.tsx` 的 `button-with-icon`、`ui/lib/link-button.tsx` 的 `link-with-icon`、\n`ui/repositories-list/repositories-list.tsx` 的 `merge-button`),而我们的镜像组件**不产出它**(全仓 grep 0 命中),\n于是 `_button.scss:131` 的 `.button-with-icon .octicon { margin-left }` 之类的间距规则永不生效。\n修法:在**我们自己的层**里给对应组件包一层补上修饰类(不要直接改镜像文件,见 goal 文档 §2.1)。",
+      "kind": "class",
+      "selectors": [
+        ".gw-repo-list .merge-button .icon"
+      ]
+    },
+    "read-only": {
+      "reason": "CodeMirror 时代的死规则:**祖先类由 CodeMirror 自己产出,而我们不装 CodeMirror**。\n移植后的 diff 行是 `side-by-side-diff-row.tsx` 手写的 DOM(它用 `row/before/after/added/deleted/modified` 而不是 CodeMirror 的类名),\n所以这条链上的祖先(`CodeMirror*`、`diff-code-mirror`、`diff-line-gutter`、`diff-hunk`、`diff-add`/`diff-delete`/`diff-context`、\n`diff-line-hover`/`diff-line-selected`、`selecting-*`、`includeable`、`expandable-*`、`hunk-expand-*`、`read-only`)\n**永远不会出现在 DOM 里** ⇒ `ui/_diff.scss` 里挂在它们之下的规则永不匹配。\n这不是「配方缺失」(check-base-recipes 管的那类),而是「祖先不存在」;两条闸门互补。\n修法:确认该块确实不参与渲染后,在样式层把整块裁掉(缩小产物),而不是让它继续假装生效。",
+      "kind": "class",
+      "selectors": [
+        ".gw-desktop-diff .CodeMirror-lines .diff-line-gutter.read-only .after"
+      ]
+    }
+  }
+}

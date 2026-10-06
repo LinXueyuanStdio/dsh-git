@@ -1,0 +1,14 @@
+{
+  "split": {
+    "button-component": "基础配方 **已在闭包内**: `ui/_button.scss:3`(整段按钮配方,本文件早已 `@import`)。闭包之外那些命中是**别的界面的上下文规则**(account-picker / dialog / preferences / welcome 等 21 个界面里的局部尺寸覆盖),不是缺失的配方 —— check 的判据是「该类的**所有**上游定义都在闭包内」,所以只要上游还有任何别的 partial 提过这个类,它就永远留在这个桶里。",
+    "dialog-banner": "基础配方在上游 `ui/_dialog.scss`(16 KB;它的 @import 闭包是 **39 个** partial)。移植过来的 `ui/dialog/**` 现在**没有任何渲染方**(唯二的 `<Dialog>` 调用方在不可达的 `ui/changes/**` 里),而且对话框将来要挂在自己的移植面下、不在 `.gw-desktop-diff` 里面 —— 现在 import 进来是 39 个文件的死重 + 错作用域。等 dialog 面开面时一起 import。",
+    "dialog-content": "基础配方在上游 `ui/_dialog.scss`(16 KB;它的 @import 闭包是 **39 个** partial)。移植过来的 `ui/dialog/**` 现在**没有任何渲染方**(唯二的 `<Dialog>` 调用方在不可达的 `ui/changes/**` 里),而且对话框将来要挂在自己的移植面下、不在 `.gw-desktop-diff` 里面 —— 现在 import 进来是 39 个文件的死重 + 错作用域。等 dialog 面开面时一起 import。",
+    "dialog-header": "基础配方在上游 `ui/_dialog.scss`(16 KB;它的 @import 闭包是 **39 个** partial)。移植过来的 `ui/dialog/**` 现在**没有任何渲染方**(唯二的 `<Dialog>` 调用方在不可达的 `ui/changes/**` 里),而且对话框将来要挂在自己的移植面下、不在 `.gw-desktop-diff` 里面 —— 现在 import 进来是 39 个文件的死重 + 错作用域。等 dialog 面开面时一起 import。",
+    "error": "基础配方在上游 `ui/_dialog.scss`(16 KB;它的 @import 闭包是 **39 个** partial)。移植过来的 `ui/dialog/**` 现在**没有任何渲染方**(唯二的 `<Dialog>` 调用方在不可达的 `ui/changes/**` 里),而且对话框将来要挂在自己的移植面下、不在 `.gw-desktop-diff` 里面 —— 现在 import 进来是 39 个文件的死重 + 错作用域。等 dialog 面开面时一起 import。",
+    "image-wrapper": "suggested-actions 面未接线(`ui/suggested-actions/**` 不在任何渲染路径上)。按指示跳过。(该类的闭包外命中只有 `ui/suggested-actions/_suggested-action.scss:32,40`;diff 图片分支的配方在 `_diff.scss:468`,已在闭包内。)",
+    "suggested-action": "suggested-actions 面未接线(`ui/suggested-actions/**` 不在任何渲染路径上)。按指示跳过。",
+    "suggested-action-group": "suggested-actions 面未接线(`ui/suggested-actions/**` 不在任何渲染路径上)。按指示跳过。",
+    "text-wrapper": "suggested-actions 面未接线(`ui/suggested-actions/**` 不在任何渲染路径上)。按指示跳过。",
+    "warning": "基础配方在上游 `ui/_dialog.scss`(16 KB;它的 @import 闭包是 **39 个** partial)。移植过来的 `ui/dialog/**` 现在**没有任何渲染方**(唯二的 `<Dialog>` 调用方在不可达的 `ui/changes/**` 里),而且对话框将来要挂在自己的移植面下、不在 `.gw-desktop-diff` 里面 —— 现在 import 进来是 39 个文件的死重 + 错作用域。等 dialog 面开面时一起 import。"
+  }
+}

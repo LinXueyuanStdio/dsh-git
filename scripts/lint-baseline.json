@@ -1,0 +1,335 @@
+{
+  "tool": "dsh-git/scripts/check-lint.mjs",
+  "version": 1,
+  "note": "ESLint 棘轮基线:每个 (文件, 规则) 的**命中计数**。只拦上升;下降算改进。计数不含行号(行号会漂移,会把「插了一行」误报成新增违规)。实证触发方式见 docs/lint-layer.md §5。",
+  "rules": [
+    "react-proper-lifecycle-methods",
+    "react-readonly-props-and-state",
+    "insecure-random"
+  ],
+  "scannedFiles": 432,
+  "total": 1299,
+  "byFileRule": {
+    "scripts/build.mjs": {
+      "@typescript-eslint/no-unused-vars": 1,
+      "curly": 32
+    },
+    "scripts/check-all.mjs": {
+      "curly": 11
+    },
+    "scripts/check-base-recipes.mjs": {
+      "curly": 124
+    },
+    "scripts/check-generated.mjs": {
+      "curly": 28
+    },
+    "scripts/check-integration.mjs": {
+      "curly": 14
+    },
+    "scripts/check-sass-leaks.mjs": {
+      "curly": 10
+    },
+    "scripts/check-scope-roots.mjs": {
+      "curly": 10
+    },
+    "scripts/check-scripts-types.mjs": {
+      "@typescript-eslint/no-unused-vars": 1,
+      "curly": 12
+    },
+    "scripts/check-template-literals.mjs": {
+      "curly": 8
+    },
+    "scripts/check-types.mjs": {
+      "@typescript-eslint/no-unused-vars": 1,
+      "curly": 22
+    },
+    "scripts/check-unreachable-ancestors.mjs": {
+      "curly": 17
+    },
+    "scripts/gates-lib.mjs": {
+      "curly": 21
+    },
+    "scripts/probe-generate-scope.mjs": {
+      "curly": 3
+    },
+    "scripts/probe-prefs-roundtrip.mjs": {
+      "@typescript-eslint/no-unused-expressions": 1,
+      "@typescript-eslint/no-unused-vars": 1,
+      "curly": 4
+    },
+    "scripts/probe-storage-roundtrip.mjs": {
+      "@typescript-eslint/no-unused-vars": 1,
+      "curly": 4
+    },
+    "scripts/styles.mjs": {
+      "curly": 67
+    },
+    "scripts/verify-install.mjs": {
+      "curly": 2
+    },
+    "scripts/verify-mirror.mjs": {
+      "curly": 7
+    },
+    "src/client/actions-view.tsx": {
+      "curly": 5,
+      "react-hooks/exhaustive-deps": 1,
+      "react/jsx-no-bind": 5
+    },
+    "src/client/api.ts": {
+      "@typescript-eslint/naming-convention": 4
+    },
+    "src/client/bits.tsx": {
+      "curly": 3,
+      "react/jsx-boolean-value": 1,
+      "react/jsx-no-bind": 8
+    },
+    "src/client/branches-view.tsx": {
+      "@typescript-eslint/naming-convention": 1,
+      "react-hooks/exhaustive-deps": 1,
+      "react/jsx-no-bind": 3
+    },
+    "src/client/changes-view.tsx": {
+      "curly": 24,
+      "react/jsx-boolean-value": 6,
+      "react/jsx-no-bind": 33
+    },
+    "src/client/clone-dialog.tsx": {
+      "curly": 3,
+      "react/jsx-boolean-value": 1,
+      "react/jsx-no-bind": 8
+    },
+    "src/client/code-view.tsx": {
+      "@typescript-eslint/naming-convention": 1,
+      "curly": 9,
+      "react-hooks/exhaustive-deps": 2,
+      "react-readonly-props-and-state": 2,
+      "react/jsx-no-bind": 6
+    },
+    "src/client/comments.tsx": {
+      "curly": 2,
+      "react/jsx-boolean-value": 1,
+      "react/jsx-no-bind": 7,
+      "react/no-unused-prop-types": 1
+    },
+    "src/client/context-menu-host.tsx": {
+      "curly": 11
+    },
+    "src/client/desktop-diff-styles.ts": {
+      "curly": 2
+    },
+    "src/client/diff-mode.ts": {
+      "curly": 1
+    },
+    "src/client/diff-rows.ts": {
+      "curly": 4
+    },
+    "src/client/diff-settings.tsx": {
+      "curly": 2,
+      "react/jsx-no-bind": 5
+    },
+    "src/client/gh-api.ts": {
+      "@typescript-eslint/explicit-member-accessibility": 2,
+      "@typescript-eslint/naming-convention": 21,
+      "curly": 19
+    },
+    "src/client/gh.ts": {
+      "@typescript-eslint/naming-convention": 2
+    },
+    "src/client/history-view.tsx": {
+      "@typescript-eslint/naming-convention": 1,
+      "curly": 13,
+      "react/jsx-no-bind": 2
+    },
+    "src/client/icons-gh.ts": {
+      "react-readonly-props-and-state": 5
+    },
+    "src/client/icons.ts": {
+      "@typescript-eslint/no-unused-vars": 1
+    },
+    "src/client/issues-view.tsx": {
+      "@typescript-eslint/naming-convention": 1,
+      "curly": 11,
+      "react-hooks/exhaustive-deps": 2,
+      "react-readonly-props-and-state": 5,
+      "react/jsx-boolean-value": 1,
+      "react/jsx-no-bind": 21,
+      "react/no-unused-prop-types": 1
+    },
+    "src/client/local-code-view.tsx": {
+      "curly": 9,
+      "react-hooks/exhaustive-deps": 1,
+      "react/jsx-no-bind": 4
+    },
+    "src/client/polyfills.ts": {
+      "@typescript-eslint/naming-convention": 1
+    },
+    "src/client/preferences-dialog.tsx": {
+      "react/jsx-no-bind": 2
+    },
+    "src/client/pulls-view.tsx": {
+      "curly": 15,
+      "react-hooks/exhaustive-deps": 3,
+      "react/jsx-boolean-value": 1,
+      "react/jsx-no-bind": 21
+    },
+    "src/client/repo-bar.tsx": {
+      "@typescript-eslint/naming-convention": 2,
+      "@typescript-eslint/no-unused-vars": 2,
+      "curly": 18,
+      "react-hooks/exhaustive-deps": 1,
+      "react/jsx-boolean-value": 3,
+      "react/jsx-no-bind": 4
+    },
+    "src/client/settings.tsx": {
+      "curly": 12,
+      "react/jsx-boolean-value": 1,
+      "react/jsx-no-bind": 21
+    },
+    "src/client/shim-node-path.ts": {
+      "curly": 6
+    },
+    "src/client/store.ts": {
+      "@typescript-eslint/explicit-member-accessibility": 57,
+      "@typescript-eslint/member-ordering": 4,
+      "@typescript-eslint/naming-convention": 3,
+      "curly": 48
+    },
+    "src/client/styles-base.ts": {
+      "curly": 2
+    },
+    "src/client/styles.ts": {
+      "curly": 2
+    },
+    "src/client/toolbar.tsx": {
+      "@typescript-eslint/naming-convention": 1,
+      "react/jsx-no-bind": 6
+    },
+    "src/client/types.ts": {
+      "@typescript-eslint/member-ordering": 3,
+      "@typescript-eslint/naming-convention": 6,
+      "react-readonly-props-and-state": 1
+    },
+    "src/client/workbench.tsx": {
+      "@typescript-eslint/naming-convention": 1,
+      "curly": 3,
+      "react-hooks/exhaustive-deps": 1,
+      "react-readonly-props-and-state": 2,
+      "react/jsx-no-bind": 21,
+      "react/no-unused-prop-types": 2
+    },
+    "src/core/desktop/lib/file-system.ts": {
+      "curly": 2
+    },
+    "src/core/desktop/lib/get-os.ts": {
+      "curly": 5
+    },
+    "src/core/desktop/lib/git/show.ts": {
+      "curly": 2
+    },
+    "src/core/desktop/ui/branches/branch-list-item.tsx": {
+      "jsx-a11y/no-static-element-interactions": 1
+    },
+    "src/core/desktop/ui/branches/branches-container.tsx": {
+      "jsx-a11y/no-static-element-interactions": 1
+    },
+    "src/core/desktop/ui/branches/pull-request-list-item.tsx": {
+      "jsx-a11y/no-static-element-interactions": 1
+    },
+    "src/core/desktop/ui/changes/commit-message.tsx": {
+      "react-hooks/rules-of-hooks": 1
+    },
+    "src/core/desktop/ui/dialog/dialog.tsx": {
+      "jsx-a11y/no-noninteractive-element-interactions": 1
+    },
+    "src/core/desktop/ui/diff/side-by-side-diff-row.tsx": {
+      "jsx-a11y/no-static-element-interactions": 1
+    },
+    "src/core/desktop/ui/diff/side-by-side-diff.tsx": {
+      "jsx-a11y/no-static-element-interactions": 1
+    },
+    "src/core/desktop/ui/history/commit-list-item.tsx": {
+      "jsx-a11y/no-static-element-interactions": 1
+    },
+    "src/core/desktop/ui/lib/draggable.tsx": {
+      "jsx-a11y/no-static-element-interactions": 1
+    },
+    "src/core/desktop/ui/lib/focus-container.tsx": {
+      "jsx-a11y/no-static-element-interactions": 1
+    },
+    "src/core/desktop/ui/lib/list/list-item-insertion-overlay.tsx": {
+      "jsx-a11y/no-static-element-interactions": 1
+    },
+    "src/core/desktop/ui/lib/update-store.ts": {
+      "react-readonly-props-and-state": 6
+    },
+    "src/core/desktop/ui/toolbar/dropdown.tsx": {
+      "jsx-a11y/click-events-have-key-events": 1,
+      "jsx-a11y/no-static-element-interactions": 1
+    },
+    "src/core/diff-parse.ts": {
+      "@typescript-eslint/naming-convention": 4,
+      "curly": 10
+    },
+    "src/core/lib.ts": {
+      "@typescript-eslint/naming-convention": 3,
+      "curly": 30
+    },
+    "src/core/parse.ts": {
+      "@typescript-eslint/naming-convention": 2,
+      "curly": 20
+    },
+    "src/core/partial-stage.ts": {
+      "@typescript-eslint/naming-convention": 1,
+      "curly": 1
+    },
+    "src/core/status-porcelain.ts": {
+      "@typescript-eslint/naming-convention": 2,
+      "curly": 8
+    },
+    "src/core/types.ts": {
+      "@typescript-eslint/naming-convention": 14,
+      "react-readonly-props-and-state": 8
+    },
+    "src/host/auth.ts": {
+      "@typescript-eslint/explicit-member-accessibility": 13,
+      "@typescript-eslint/naming-convention": 4,
+      "curly": 24,
+      "react-readonly-props-and-state": 6
+    },
+    "src/host/commit-message.ts": {
+      "@typescript-eslint/explicit-member-accessibility": 3,
+      "@typescript-eslint/naming-convention": 5,
+      "curly": 14
+    },
+    "src/host/git-config-file.ts": {
+      "@typescript-eslint/naming-convention": 1
+    },
+    "src/host/git-runner.ts": {
+      "@typescript-eslint/naming-convention": 6
+    },
+    "src/host/git-service.ts": {
+      "@typescript-eslint/explicit-member-accessibility": 45,
+      "@typescript-eslint/naming-convention": 2
+    },
+    "src/host/repo-registry.ts": {
+      "@typescript-eslint/explicit-member-accessibility": 32,
+      "@typescript-eslint/naming-convention": 4,
+      "@typescript-eslint/no-unused-vars": 2,
+      "curly": 10,
+      "react-readonly-props-and-state": 11
+    },
+    "src/host/routes.ts": {
+      "@typescript-eslint/naming-convention": 2
+    },
+    "src/host/system-service.ts": {
+      "@typescript-eslint/explicit-member-accessibility": 5,
+      "@typescript-eslint/naming-convention": 1,
+      "curly": 2
+    },
+    "src/index.ts": {
+      "@typescript-eslint/member-ordering": 5,
+      "@typescript-eslint/naming-convention": 2,
+      "curly": 6
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "note": "由 node scripts/check-generated.mjs --write-baseline 生成。artifacts 是**规范化构建时间戳之后**的 sha256;inputsDigest 是 src/** 等输入的摘要。",
+  "recordedAt": "2026-10-06T12:34:44.245Z",
+  "inputsDigest": "sha256:d7576e32dad5e1141fc86b41db23077c4af957be7bbdec75421095cbdcf661a8",
+  "inputFiles": 606,
+  "artifacts": {
+    "src/client/desktop-diff-styles.generated.ts": "sha256:19155d75616116e75867f2efdc51fba55daccde4ca3871d4d70816ddfe9e5cd3",
+    "lib/index.js": "sha256:e9f9d5634daaaff11bd2806c52e11b7aa14e74c0ee23848188854c6db8ef8c71",
+    "lib/index.js.map": "sha256:8846f03fd7bbcd8da5ac8d16e89258e130e3459a99a8ddab9427ef6fb289f377",
+    "lib/client.js": "sha256:b0b496fd6dac7bec9a56546c1a6e19427448d401cc40081864db63a267de3260"
+  }
+}
