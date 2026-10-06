@@ -1,0 +1,32 @@
+# lint 范围之外的路径。每条的「为什么」都写在行内。
+#
+# ⚠️⚠️ 每条**必须**以 `/` 开头(根锚定)。
+# `.eslintignore` 的匹配规则与 .gitignore 同类:不带 `/` 的 `lib/` 会匹配
+# **任意深度**的 `lib/` 目录 —— 于是 `src/core/desktop/lib/**` 与
+# `src/core/desktop/ui/lib/**`(25 个 class 组件、40 处生命周期方法)会被
+# **静默**跳过,闸门照样报「通过」。这正是 H16 的教训(D1 那个引用了不存在
+# 目录的死 glob),而且**真的发生过一次**:第一版 `.eslintignore` 就是这么写的,
+# 由 `--coverage`(56/81 个 React class)与 `checkScope()` 抓出来。
+#
+# ⚠️ 不要把 `src/core/desktop/**` 加进来。它是逐字镜像,但它**必须**被 lint:
+# 我们对镜像做过 87 处 `props.dispatcher` 改写,那正是最容易打错生命周期名 /
+# 漏掉 readonly 的地方。镜像的**严格度**由 `.eslintrc.yml` 的 `overrides`
+# 分档控制,不是靠排除。
+
+# 上游 checkout(只读);它自带自己的 .eslintrc.yml,不该由我们的配置去跑它。
+/references/
+
+# 构建产物:scripts/build.mjs 生成,不是源码。
+/lib/
+
+# 第三方 vendored 源码。
+/vendor/
+
+# 设计稿 / 截图(非源码)。
+/design/
+/screenshots/
+
+# 样式表:从上游 @import 编译进来,由另一条线持有;不是 TS/TSX 源码。
+/src/client/scss/
+
+/node_modules/

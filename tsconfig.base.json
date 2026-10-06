@@ -1,0 +1,62 @@
+/**
+ * `tsconfig.base.json` 的共享编译选项 —— 逐条对照上游
+ * `references/desktop/tsconfig.json`(**GitHub Desktop 自己的 31 行配置**),
+ * 只做本仓库必需的适配。
+ *
+ * ## 为什么以上游为蓝本
+ *
+ * 上游用 **`ts-loader`**(`references/desktop/app/webpack.common.ts:32,203`,
+ * 全仓无 `transpileOnly`)编译 TS ⇒ **类型错误在上游是构建失败**,CI 也会红。
+ * 我们保留 esbuild 打包(它**只剥类型、不做检查**,`scripts/build.mjs:206`
+ * 自己写明),所以 `tsc --noEmit` 是在**补上游天然拥有的那道关卡**,
+ * 不是我们的发明。详见 `docs/type-check.md` §1。
+ *
+ * ## 与上游 tsconfig 的逐条差异(每条都必须有理由)
+ *
+ * | 上游 | 这里 | 理由 |
+ * |---|---|---|
+ * | `include: app/**` | 见 `tsconfig.json` / `tsconfig.host.json` | 我们是插件,不是 Electron app;而且 host/client 两半约束不同 |
+ * | `jsx: "react"`(经典) | `jsx: "react-jsx"`(自动) | **以 `scripts/build.mjs` 为准**:esbuild 用的是 `jsx: 'automatic'`(`:440`、`:491`),`react/jsx-runtime` 是平台种子模块(`external`)。上游经典模式是因为它的代码 `import * as React`;我们如果沿用 `"react"`,所有**不 import React** 的 `.tsx` 都会要求 `React` 在作用域里 |
+ * | `moduleResolution: "node"` | **`"bundler"`** | **以 `scripts/build.mjs` 为准**:esbuild 是 bundler,它按 `package.json#exports` 解析;`"node"` 是 node10 语义,**不看 `exports`** ⇒ 两者会在依赖的解析口径上分叉。`"bundler"` 同时实测支持显式 `.ts`/`.tsx` 扩展名 import(`allowImportingTsExtensions`)与 `paths`,所以本仓库两种特性都不受影响。⇒ 见 `docs/type-check.md` §3 的注 |
+ * | `types: ["node"]` | **host 配置**才用 `["node"]`;client 配置用 `[]` | 浏览器半**禁止** node 内置(`docs/goal-port-desktop.md` §2.3)。client 配 `[]` 之后,任何 `node:*` / `Buffer` / `process` / `setImmediate` 都会变成 TS2307/TS2591 —— 这条硬约束**第一次有了机器检查** |
+ * | `sourceMap: true` `outDir: "./out"` | 去掉,加 `noEmit: true` | 我们不用 tsc 产出(esbuild 打包);`noEmit` 也是 `allowImportingTsExtensions` 的前提 |
+ * | (无) | `skipLibCheck: true` | 第三方 `.d.ts`(`@types/react-virtualized` 等)的内部不一致不是我们的债 |
+ *
+ * 其余选项(`strict` / `noImplicitReturns` / `noFallthroughCasesInSwitch` /
+ * `noUnusedLocals` / `allowUnreachableCode:false` / `useUnknownInCatchVariables:false` /
+ * `importHelpers` / `lib` / `esModuleInterop` / `resolveJsonModule`)与上游**逐字一致**。
+ *
+ * @module dsh-git/tsconfig.base
+ */
+{
+  "compilerOptions": {
+    // ---- 上游逐字一致 ----
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "ES2022",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "importHelpers": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "strict": true,
+    "useUnknownInCatchVariables": false,
+    "lib": ["ES2023", "DOM", "DOM.Iterable", "ESNext.Array"],
+
+    // ---- 本仓库适配 ----
+    // **以 scripts/build.mjs 为准**:esbuild 用 `jsx: 'automatic'`(`:440`、`:491`),
+    // react/jsx-runtime 是平台种子模块。上游用经典 `"react"`(它的代码
+    // `import * as React`),沿用会让所有不 import React 的 .tsx 报 TS17004。
+    "jsx": "react-jsx",
+    // 类型检查只做检查,产出仍由 esbuild 负责。
+    "noEmit": true,
+    // 仓库的 import 风格是显式写扩展名(`from './x.ts'` / `'../y.tsx'`),
+    // esbuild 直接吃;TypeScript 需要这个开关(+ noEmit)。
+    "allowImportingTsExtensions": true,
+    // 第三方声明文件的内部问题不报。
+    "skipLibCheck": true
+  }
+}

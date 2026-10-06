@@ -1,0 +1,50 @@
+/**
+ * **浏览器半**的类型检查程序(默认 `npm run typecheck` 跑的就是它)。
+ *
+ * 覆盖 `src/client/**`(我们的适配层)+ `src/core/desktop/**`(GitHub Desktop 的
+ * 逐字镜像)。为什么把整片镜像都放进程序:prop 检查的**准绳**就是镜像里那些
+ * 未导出的 props 接口,而且镜像在 Desktop 的配置下本来是类型干净的
+ * —— 把它 `exclude` 掉等于关掉最有价值的检查。
+ *
+ * ## 这个程序同时是「浏览器半禁止 node 内置」的机器检查
+ *
+ * `types: []` 关掉 `node_modules/@types` 的**全局自动加载**(尤其是 `@types/node`)。
+ * 于是:
+ *   - `import { EOL } from 'os'`      → TS2307(镜像 `ui/changes/filter-changes-list.tsx:56`
+ *     就是这样,**当前确实报错** —— esbuild 也没有为 `os` 配 alias);
+ *   - `setImmediate(...)` / `Buffer`  → TS2307/TS2591(镜像 `ui/lib/list/list.tsx` 等);
+ *   - `process.env.X`                 → TS2591。
+ *
+ * 换句话说:**`types` 数组里一旦加回 `"node"`,这条机器检查就静默消失。**
+ * 不要加;host 半用 `tsconfig.host.json`(它才设 `types: ["node"]`)。
+ *
+ * `esbuild alias` 的类型层镜像在 `paths` 里(见 `scripts/build.mjs` 的 `clientAlias`)。
+ *
+ * @module dsh-git/tsconfig
+ */
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    // 关键:不要自动加载 @types/* 全局包(尤其 @types/node)。
+    "types": [],
+    // esbuild `alias` 的镜像:`scripts/build.mjs:50-54` 把这三个模块名指向浏览器替身,
+    // 镜像文件因此能一字不改地 `import * as Path from 'path'`。
+    // tsc 不认识 esbuild 的 alias,所以在这里逐条复刻。
+    "baseUrl": ".",
+    "paths": {
+      "path": ["./src/client/shim-node-path.ts"],
+      "url": ["./src/client/shim-node-url.ts"],
+      "fs/promises": ["./src/client/shim-node-fs-promises.ts"]
+    }
+  },
+  // 只看浏览器半:我们的适配层 + 它的依赖(镜像树)。host 半由 tsconfig.host.json 管。
+  "include": [
+    "src/client/**/*.ts",
+    "src/client/**/*.tsx",
+    "src/core/desktop/**/*.ts",
+    "src/core/desktop/**/*.tsx",
+    "types/desktop-globals.d.ts",
+    "types/desktop-globals-client.d.ts"
+  ],
+  "exclude": ["node_modules", "lib", "references", "vendor", "screenshots"]
+}

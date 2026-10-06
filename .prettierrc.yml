@@ -1,0 +1,23 @@
+# dsh-git 的格式约定。
+#
+# 移植自 `references/desktop/.prettierrc.yml`,三处**刻意不沿用**(理由见
+# `docs/toolchain-adoption.md` D1,以及本仓库 `docs/lint-layer.md` §6):
+#
+#   · `semi: false` → **`semi: true`**。我们自己的代码写分号,镜像树的代码
+#     不写(D1 的实证:镜像 `ui/copy-button.tsx:1-12` 无分号 vs
+#     `scripts/build.mjs` 有分号)。沿用 `false` 会把我们自己的代码全量改写。
+#     镜像树**无论如何**都不许被格式化(见 `.prettierignore`),所以 `semi`
+#     取哪个值都不影响那条不变量 —— 那就取我们自己的风格。
+#   · `arrowParens: avoid` → **不沿用**(同上:会把我们自己的代码全量改写)。
+#   · `proseWrap: always` → **不沿用**(我们的文档是中文散文,该选项无意义)。
+
+singleQuote: true
+trailingComma: es5
+semi: true
+endOfLine: auto
+
+overrides:
+  # 上游逐字保留:从上游 @import 编译进来的 SCSS 长行很多,200 才是它的原生宽度。
+  - files: '*.scss'
+    options:
+      printWidth: 200

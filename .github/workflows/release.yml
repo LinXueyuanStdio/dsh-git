@@ -1,0 +1,60 @@
+name: Release
+
+# 打 `v*` tag 才发;版本号与 tag 必须一致(下一步会硬校验)。
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  # 建 GitHub Release 要写 contents;npm 的 --provenance 要 id-token(参考稿里本来就声明了)。
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      # 发布前跑**和 CI 完全相同**的那条链:一个没构建过、没跑过闸门的树不许发出去。
+      # ⚠️ 这条现在是**硬阻塞**:`check:static` 里还有未登记的债务
+      # (check-base-recipes / check-lint / check-scripts-types / check-unreachable-ancestors),
+      # 它们红着的时候这个 release 会停在第一步 —— 这与 CI 的判据一致,不是 bug。
+      - name: 闸门(构建 + 产物语法 + 静态闸门)
+        run: |
+          set -euo pipefail
+          npm run build
+          npm run check
+          npm run check:static
+
+      # tag 与 package.json 不一致是最容易犯的发布错:它会安静地发错版本号。
+      - name: 校验 tag 与 package.json 版本一致
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag v${tag} 与 package.json 的 ${pkg} 不一致 —— 先对齐版本号再打 tag"
+            exit 1
+          fi
+
+      # `--provenance` 需要上面的 id-token: write 与**公开**仓库;若环境不允许,去掉这个参数即可。
+      - name: 发布到 npm
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: 建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true

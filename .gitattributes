@@ -1,0 +1,27 @@
+# 行尾与生成物策略(最小、不重复)。
+#
+# 为什么需要它(对应 docs/toolchain-adoption.md 的 H4):
+# `scripts/verify-mirror.mjs` 逐**字节**比对 `src/core/desktop/**` 与
+# `references/desktop/app/src/**`。只要工作区里出现一次 CRLF,整片镜像就会「不一致」,
+# 而那是**平台相关**的假缺陷 —— 一个 checkout 选项就能让核心不变量变红。
+#
+# 逐行理由:
+#
+# 1) `* text=auto eol=lf`
+#    所有文本文件在工作区一律 LF。上游 Desktop 的对象库是 LF,所以我们的镜像
+#    在 macOS/Windows/Linux 上拿到**同一份字节**,verify-mirror 的判据才成立。
+#    `text=auto` 让 git 自己识别二进制(图片/字体等不做转换)。
+#
+# 2) 刻意**不**对 `src/core/desktop/**` 用 `-text`
+#    上游 Desktop 的 `.gitattributes` 对 `app/test/fixtures/**` 用了 `-text`,那是因为
+#    它要保护**二进制夹具**。对我们恰恰相反:镜像要的是「提交进对象库的字节」在
+#    checkout 后**原样出现**,而 `-text` 只是关掉转换 —— 一旦有人在 CRLF 的工作区
+#    提交,`-text` 会把那个 CRLF 原样留下,verify-mirror 全红。`eol=lf`(第 1 条)
+#    才真正保证 LF,所以这里**不**加镜像专属的 `-text`(它会是**更弱**的规则)。
+#
+# 3) 生成物标记
+#    这两处是**生成**的,不该手改:GITHUB/评审界面会折叠它们,减少「review 生成物
+#    的 diff」这种纯噪声。对构建/比对**没有任何行为影响**,所以是零风险的一行。
+#    (`lib/**` 在 `.gitignore` 里,不需要也不该在这里出现。)
+* text=auto eol=lf
+src/client/*.generated.ts linguist-generated=true

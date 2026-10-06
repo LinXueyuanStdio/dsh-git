@@ -1,0 +1,278 @@
+# dsh-git —— ESLint 层(eslintrc 形态,ESLint 8)
+#
+# 这份配置**移植自** `references/desktop/.eslintrc.yml`(只读),不是重写。
+# 每一处「不沿用」都在这里写明上游原文与理由;总账见 `docs/lint-layer.md`。
+#
+# 为什么钉 ESLint 8 + eslintrc:
+#   上游用 `--rulesdir ./eslint-rules`(`references/desktop/package.json:41`),
+#   而 `--rulesdir` 是 **ESLint 8 的 eslintrc-only 开关**(ESLint 9 已移除,
+#   eslint/eslint#18281)。我们沿用这个机制,所以留在 8 线上。
+#
+# 为什么自定义规则用裸名(`insecure-random: error`)而不是 `plugin/rule` 形式:
+#   `--rulesdir` / `rulePaths` 注册的规则就是裸名。`scripts/check-lint.mjs`
+#   通过 Node API 的 `rulePaths` 传同一个目录 ⇒ 命令行与棘轮走的是同一份规则。
+
+root: true
+parser: '@typescript-eslint/parser'
+
+parserOptions:
+  # 上游没写 ecmaVersion(eslintrc 默认 5)。我们的源码是现代 TS/ESM,
+  # 必须显式放开,否则 `import`/可选链一律语法报错。
+  ecmaVersion: 'latest'
+  sourceType: module
+  ecmaFeatures:
+    jsx: true
+
+plugins:
+  # 上游还挂了 `json`、`jsdoc`(C13 不吸收:换 `checkJs` 更划算)与
+  # `jsx-a11y`(C18 不吸收:我们没装、也没开它的规则)。
+  - '@typescript-eslint'
+  - react
+  # `react-hooks` **不在上游配置里** —— Desktop 以 class 组件为主,几乎没有 hooks。
+  # 我们的适配层(`src/client/**`)正好相反。引入裁决与逐处抑制的处理见
+  # `docs/lint-layer.md` §3.1 / §8.5。版本选 eslint-plugin-react-hooks@5.2.0:
+  # v5/v6/v7 的 peerDependencies 都含 `^8.0.0-0`,但 v5 是 ESLint 8 + eslintrc
+  # 那条成熟线(v6 起走 flat config / react-compiler 方向)。
+  - react-hooks
+
+settings:
+  react:
+    # 上游写死 '16.3'。我们跑 **18.3.1**(宿主种子模块),所以**不能**沿用。
+    # 也**不能**写 'detect':node_modules 里的 react 是 17.0.2(由
+    # react-virtualized / react-css-transition-replace 带进来的传递依赖),
+    # 不是我们的运行时版本 —— detect 会安静地检测错版本。
+    version: '18.3'
+
+extends:
+  # 上游是 `prettier` + `prettier/react` + `prettier/@typescript-eslint`
+  # (`:16-19`)。后两个子路径在 eslint-config-prettier v8 起**已被删除**,
+  # 沿用会直接解析失败;v9 起基础入口一条就够(C10 的结论)。
+  - prettier
+
+rules:
+  ##########
+  # CUSTOM #
+  ##########
+  # 逐字挂载上游 `.eslintrc.yml:24-28` 的机制(把项目专属 bug 类变成构建失败)。
+  # 上游那 5 条里我们收录 3 条,另 2 条的理由见 eslint-rules/README.md §2。
+  insecure-random: error
+  react-readonly-props-and-state: error
+  react-proper-lifecycle-methods: error
+
+  ###########
+  # PLUGINS #
+  ###########
+
+  # TYPESCRIPT —— 全部沿用上游 `.eslintrc.yml:35-104`(C11)
+  '@typescript-eslint/naming-convention':
+    - error
+    - selector: interface
+      format:
+        - PascalCase
+      custom:
+        regex: '^I[A-Z]'
+        match: true
+    - selector: class
+      format:
+        - PascalCase
+    - selector: variableLike
+      format: null
+      custom:
+        regex: '^(any|Number|number|String|string|Boolean|boolean|Undefined|undefined)$'
+        match: false
+  '@typescript-eslint/consistent-type-assertions':
+    - error
+    - assertionStyle: 'as'
+  '@typescript-eslint/no-unused-expressions': error
+  '@typescript-eslint/explicit-member-accessibility': error
+  '@typescript-eslint/no-unused-vars':
+    - error
+    - args: 'none'
+  '@typescript-eslint/no-use-before-define':
+    - error
+    - functions: false
+      variables: false
+      typedefs: false
+  '@typescript-eslint/member-ordering':
+    - error
+    - default:
+        - static-field
+        - static-method
+        - field
+        - abstract-method
+        - constructor
+        - method
+  '@typescript-eslint/no-extraneous-class': error
+  '@typescript-eslint/no-empty-interface': error
+  '@typescript-eslint/no-redeclare': error
+
+  # 上游显式关掉的(与上游一致它们的裁决,`@typescript-eslint/ban-types` 上游有
+  # 一段「先关掉、以后再还债」的注释):
+  '@typescript-eslint/no-non-null-assertion': off
+  '@typescript-eslint/ban-types': off
+  '@typescript-eslint/no-var-requires': off
+  '@typescript-eslint/triple-slash-reference': off
+  '@typescript-eslint/explicit-module-boundary-types': off
+  '@typescript-eslint/no-explicit-any': off
+  '@typescript-eslint/no-inferrable-types': off
+  '@typescript-eslint/no-empty-function': off
+
+  # React —— 上游 `.eslintrc.yml:107-120`
+  react/jsx-boolean-value:
+    - error
+    - always
+  react/jsx-key: error
+  react/jsx-no-bind: error
+  react/no-string-refs: error
+  react/jsx-uses-vars: error
+  # ⚠️ 偏离:`react/jsx-uses-react` 上游开着(`:114`),**我们关掉**。
+  # 它要求 `React` 在作用域里(经典 JSX 转换);我们用 `jsx: "react-jsx"`
+  # (`tsconfig.base.json`、esbuild `jsx: 'automatic'`),`React` 常常不在作用域,
+  # 开着它只会在正确的代码上报错。理由与 B7 同源。
+  react/jsx-uses-react: off
+  react/no-unused-state: error
+  # 上游开着并留了注释;对我们近乎惰性(我们不用 propTypes,靠 TS)。
+  # 仍然沿用开关:零命中、零风险,且它拦的是「声明了却没读」的同族问题。
+  react/no-unused-prop-types: error
+  react/prop-types:
+    - error
+    - ignore: ['children']
+
+  # react-hooks —— **上游没有这一层**,是我们自己的适配层需要的(见文件头 plugins 的注释)。
+  # 两条都显式写出来,而不是 `extends: plugin:react-hooks/recommended`:
+  #   · 那个 preset 只做两件事(`{plugins:['react-hooks'],
+  #     rules:{'rules-of-hooks':'error','exhaustive-deps':'warn'}}`),显式写更透明;
+  #   · **刻意把它给的 `warn` 提到 `error`** —— 裁决是「这是正确性检查,不是风格」
+  #     (`docs/lint-layer.md` §3.1)。依赖数组错了 ⇒ 闭包捕获旧值 ⇒
+  #     「某个状态变了但界面不刷新」,与生命周期拼错是同一族静默缺陷,不该只是黄色。
+  react-hooks/rules-of-hooks: error
+  react-hooks/exhaustive-deps: error
+
+  # JSDoc(`jsdoc/*`,上游 `:123-131`)—— **不吸收**,C13:
+  # 我们的文档是中文散文,`jsdoc/no-undefined-types` 会与宿主 shim 类型打架。
+
+  ###########
+  # BUILTIN #
+  ###########
+  curly: error
+  no-new-wrappers: error
+  no-redeclare: off # 用 @typescript-eslint/no-redeclare(支持重载)
+  no-eval: error
+  no-sync: error
+  no-var: error
+  prefer-const: error
+  eqeqeq:
+    - error
+    - smart
+  no-buffer-constructor: error
+
+  # 上游 `strict: [error, global]`(`:148-150`)。沿用,但要知道它在 ESM 下**几乎**
+  # 是惰性的 —— 这不是猜测,是量过的:
+  #   · ESLint 的 `strict` 规则在 `Program.sourceType === 'module'` 时把模式强制成
+  #     `module`(`node_modules/eslint/lib/rules/strict.js:240-241`),于是它**不会**
+  #     再要求每个文件带 `"use strict"`;
+  #   · 用 `strict: [error, global]` 单独跑 `src/client/store.ts`、`src/client/api.ts`、
+  #     `scripts/check-lint.mjs`,零报错(见 docs/lint-layer.md §4.12)。
+  # 它**唯一**还会响的情形是「文件里写了多余的 `"use strict"`」;我们全仓
+  # `grep -rn "['\"]use strict['\"]" src scripts eslint-rules types` = **0 处**。
+  # 留着它 = 上游原样 + 拦一类将来可能溜进来的冗余指令;不需要 `:207-209` 的
+  # `.d.ts` 子豁免(`strict: never`),因为在 ESM 下那条豁免本身也是惰性的。
+  strict:
+    - error
+    - global
+
+  # 上游的 `no-restricted-imports`(`:160-182`)禁的是 `electron` 的
+  # `ipcRenderer`/`ipcMain`,我们没有 electron,逐字移植没有对象。我们的对应约束是:
+  #   · 浏览器半不得 import node 内置 / `@deepseek-ai/*`
+  #     —— **已由 `tsconfig.base.json` 的 `types: []` 机器化**(C15),不重复;
+  #   · 不得绕过 `src/client/api.ts` / `gh-api.ts` 直连
+  #     —— 用下面的 `no-restricted-syntax` 表达(内置规则,与上游同一套路)。
+  # 所以**不配这条规则**:配一条什么都不禁的规则 = 上游 `app/typings/` 那种死引用。
+
+  ###########
+  # SPECIAL #
+  ###########
+  no-restricted-syntax:
+    - error
+    # C16 沿用上游 `:187-191`,selector 与 message 逐字。
+    # ⚠️ 这条是**全局**的(含镜像树)。
+    - &noDefaultExport
+      selector: ExportDefaultDeclaration
+      message: Use of default exports is forbidden
+    # C6「改造后吸收」的 `fetch` 守卫**不在这里** —— 它是**分档**的:
+    # host 半合法使用 fetch(GitHub OAuth 等),只有浏览器半禁止。
+    # 挂载点见下方 overrides。锚点在那里定义。
+
+  ###########
+  # jsx-a11y #
+  ###########
+  # C18 不吸收:我们没装 jsx-a11y,关一条不存在的规则没有意义。
+
+overrides:
+  # --- 生成物:按路径放宽(H22 / C17,照上游 `:220-222` 的做法)--------------
+  # 上游对生成文件单独放宽命名约定,原句:
+  #   - files: 'app/src/ui/octicons/octicons.generated.ts'
+  #     rules: { '@typescript-eslint/naming-convention': off }
+  # 我们**必须**沿用这一条:`octicons.generated.ts` 是与上游一致(已 diff 验证
+  # 与上游字节一致),它导出一个叫 `number` 的图标符号(`:3763`),而
+  # `naming-convention` 的 variableLike 规则禁 `number` 这种变量名。
+  # 没有这条 override,镜像里就会有一条永远修不掉的假违规 —— 而且它正是
+  # H22 记录的那个「付过代价」的文件(曾被砍到 11 个符号而无人发现)。
+  - files:
+      - 'src/core/desktop/ui/octicons/octicons.generated.ts'
+      - 'src/client/icons.ts'
+      - 'src/client/icons-gh.ts'
+      - 'src/client/desktop-diff-styles.generated.ts'
+    rules:
+      '@typescript-eslint/naming-convention': off
+
+  # --- 浏览器半:禁绕过类型化传输层(C6 的改造版)--------------------------
+  # 上游用 `no-restricted-imports` 禁绕过强类型 IPC 助手(`:160-182`),它最聪明的
+  # 部分是**报错文本本身就是文档**(`:165-167`)。我们把同一个格式用在内置的
+  # `no-restricted-syntax` 上,守的是「浏览器半不得绕过类型化传输层直连」。
+  - files:
+      - 'src/client/**/*.ts'
+      - 'src/client/**/*.tsx'
+    # 两个传输层自己就是「直连」的合法持有者;它们保留基线的禁默认导出即可。
+    excludedFiles:
+      - 'src/client/api.ts'
+      - 'src/client/gh-api.ts'
+    rules:
+      no-restricted-syntax:
+        - error
+        - *noDefaultExport
+        # 锚点定义在这里(而不是基线 rules 里),否则 `fetch` 守卫会变成全局的,
+        # 把 host 半合法的 `fetch`(GitHub OAuth)也一并拦下。
+        - &fetchBypass
+          selector: "CallExpression[callee.name='fetch']"
+          message: >-
+            Do not call the global fetch() directly in the browser half. Route the
+            request through the typed transports: `src/client/api.ts` (host
+            `/dsh-git/*` routes) or `src/client/gh-api.ts` (GitHub REST via the host
+            proxy). They hold the JSON envelope, the error normalization and the
+            token handling; a raw fetch silently reintroduces the failure modes they
+            were written to remove. If a new transport is genuinely needed, add it to
+            one of those two files (or add an exception here, with the reason written
+            down).
+
+  # --- shim 的默认导出豁免(C16 指定的 3 处,必须写理由)---------------------
+  # `import * as Path from 'path'` 要在 `scripts/build.mjs` 的 `clientAlias`
+  # (esbuild)下成立,这三处必须提供**命名空间形状的 default**。它们是刻意做的
+  # 替身,不是错误。豁免方式照上游 `overrides` 机制(`:207-222`)。
+  - files:
+      - 'src/client/shim-node-path.ts'
+      - 'src/client/shim-node-url.ts'
+      - 'src/client/shim-node-fs-promises.ts'
+    rules:
+      no-restricted-syntax:
+        - error
+        - *fetchBypass
+
+  # --- host 半:同步 fs 合法(C14)------------------------------------------
+  # `no-sync` 对浏览器半是硬约束(同步 IO 会卡死 UI 线程);host 半跑在 node
+  # 子进程里,`git-runner` 一类同步调用是既定设计。
+  - files:
+      - 'src/host/**/*.ts'
+      - 'scripts/**/*.mjs'
+    rules:
+      no-sync: off

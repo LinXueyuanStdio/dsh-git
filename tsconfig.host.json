@@ -1,0 +1,33 @@
+/**
+ * **host 半**的类型检查程序(`src/index.ts` + `src/host/**` + `src/core/**`)。
+ *
+ * 与 `tsconfig.json`(浏览器半)是**两个独立程序**,这是刻意的:
+ * 两半的硬约束相反 —— host 必须用 node,client 必须不用 node。
+ * 用一个配置同时管两半,就只能取并集(声明 node),于是
+ * 「client 混进 node 内置」这条约束**没有任何机器检查**。
+ *
+ * 这里沿用上游 `references/desktop/tsconfig.json` 的 `types: ["node"]`
+ * (上游是 Electron app,主进程就是 node)——
+ * 因为 host 半的定位与上游主进程一致。
+ *
+ * `exclude` 掉 `src/core/desktop/**`:那是镜像树,归 client 程序管。
+ * host 确实会用到其中一个文件(`src/core/desktop/lib/sanitize-ref-name.ts`,
+ * 经 `src/host/git-service.ts:34`),但它由 **import 拉进程序**,不需要 include。
+ *
+ * @module dsh-git/tsconfig.host
+ */
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    // 上游 tsconfig 就是这一行。host 跑在 node 里,需要 node 全局与内置类型。
+    "types": ["node"]
+  },
+  "include": [
+    "src/index.ts",
+    "src/host/**/*.ts",
+    "src/core/*.ts",
+    "types/desktop-globals.d.ts",
+    "types/host-shims.d.ts"
+  ],
+  "exclude": ["node_modules", "lib", "references", "vendor", "screenshots", "src/core/desktop"]
+}

@@ -1,0 +1,34 @@
+# 哪些文件**不归格式化管**。
+#
+# 上游 `.prettierignore` 里最关键的一条是 `vendor/`(不格式化 vendored 源码)。
+# 我们有一条比上游**更强**的需求,所以必须把下面两条排在最前:
+#
+#   src/core/desktop/   —— 与上游一致上游 Desktop 的源码。本仓库的核心不变量是
+#                          「镜像与 `references/desktop` **字节一致**」,由
+#                          `scripts/verify-mirror.mjs` 逐字节比对。任何格式化器
+#                          碰它一下,`verify-mirror.mjs` 就全红。
+#   references/         —— 上游 checkout,只读。
+#
+# 注意:这两条**与 `semi` 取值无关**。即使 `.prettierrc.yml` 沿用上游的
+# `semi: false`,镜像树也必须排除 —— 排除与否取决于「谁写的这些字节」,
+# 不取决于格式选项(`docs/toolchain-adoption.md` D2)。
+
+# --- 不许碰的:字节一致性与只读上游 ---
+src/core/desktop/
+references/
+
+# --- 别人的产物 ---
+node_modules/
+lib/
+vendor/
+package-lock.json
+
+# --- 上游的分界,与上游一致(D3):文档不受格式化管 ---
+*.md
+
+# --- 上游 `.prettierignore` 里我们有对应物的条目 ---
+.DS_Store
+.idea/
+.eslintcache
+out/
+dist/
