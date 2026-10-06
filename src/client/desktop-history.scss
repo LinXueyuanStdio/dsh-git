@@ -1,0 +1,415 @@
+/**
+ * **`.gw-desktop-history` 面(History 页签:提交列表 + 提交摘要 + 变更文件列表 + diff 列)
+ * 的编译入口**(Sass)。
+ *
+ * ## 为什么需要这一面
+ *
+ * `src/client/history-view.tsx` 现在渲染的是**上游 `ui/history/**` 的组件**
+ * (`CommitList` → `CommitListItem`、`ExpandableCommitSummary`、`FileList` →
+ * `CommittedFileItem`)加上上游 `ui/diff/diff-header.tsx`,而
+ * `references/desktop/app/styles/ui/history/**` 的 6 个 partial **从来没进过任何
+ * 作用域面的闭包** —— `desktop-diff.scss` 只 import 了 diff 那几张表。所以不建这一面,
+ * 这些组件会**有 DOM、没样式**(上一版 History 用的是手写类名,没见过这个问题)。
+ *
+ * ## 与其它面完全一致的三个约定
+ *
+ * 1. **上游 partial 顶层 `@import`**(一个字不改),作用域由 `scripts/styles.mjs`
+ *    在**编译产物**上逐选择器加前缀 —— `&` 的语义因此与上游一致(见
+ *    `desktop-diff.scss` 开头那段:嵌套 `@import` 会把第二个 `&` 换成完整父选择器,
+ *    `_tab-bar.scss` 的 19 条规则就是这么静默失效的)。
+ * 2. **一个面一个入口文件**;加这一面只需要「一个入口 SCSS + `PORT_SURFACES` 一条表项」。
+ * 3. **我们自己的适配层**写在 `.<scope> { … }` 块里(前缀化认出它已带作用域根而原样保留)。
+ *
+ * ## 为什么是**逐条 import** 而不是上游的聚合表 `ui/_history.scss`
+ *
+ * 上游的聚合表是 6 条:
+ *
+ * ```
+ * @import 'history/history';                       ← 需要(#history 的 flex 列)
+ * @import 'history/commit-list';                   ← 需要(.commit-list-item 一族)
+ * @import 'history/commit-summary';                ← **不要**(见下)
+ * @import 'history/expandable-commit-summary';     ← 需要(.ecs-* 一族)
+ * @import 'history/file-list';                     ← 需要(#history .file-list)
+ * @import 'history/multiple_commits_selected';     ← 需要(多选空态)
+ * ```
+ *
+ * `history/_commit-summary.scss`(198 行)是 goal 文档 §1.3 明确点名的**死代码**:
+ * 它的规则全部挂在 `#commit-summary` / `.commit-summary` 之下,而
+ * `expandable-commit-summary.tsx` 渲染的是 `#expandable-commit-summary` +
+ * `.ecs-*`(`grep` 过它的全部 `className`:没有任何 `commit-summary` /
+ * `commit-summary-title` / `commit-summary-meta`)。它确实也定义了
+ * `.lines-added` / `.lines-deleted`,但选择器是 `.commit-summary-meta .lines-added`
+ * —— 那个祖先同样不渲染。所以按 §1.3 的要求**不 import** 它;这也避免了让
+ * `check-unreachable-ancestors` 多出一批「祖先从不渲染」的条目。
+ *
+ * ## 变量
+ *
+ * Desktop 主题变量 → DSH 令牌由 `_dsh-bridge.scss` 的 mixin 提供;本面独有的变量逐条列在
+ * 下面的作用域块里,**每条都写了上游 `file:line`**。缺一个的后果不是「那个类没样式」,
+ * 而是**那一条声明整条失效**(`var()` 指向未定义变量时 CSS 按 invalid-at-computed-value-time
+ * 丢弃)—— goal 文档 §3 失败模式 10 的 `--gw-mono` 就是这样静默失效的。
+ *
+ * `@import` 的弃用警告同其它入口:上游 partial 的 `&` 与变量可见性语义要逐字保留。
+ */
+
+// mixins 只定义 @mixin、不产出任何 CSS,放顶层导入。
+@import './scss/upstream/mixins';
+
+/*
+ * `$gray-100` / `$gray-200` / `$gray-300` —— `ui/_avatar-stack.scss:141,155,160`
+ * (`.avatar.avatar-more` 的三层「还有更多头像」幽灵圆)在 Sass 里引用它们。
+ * 上游那三个来自 `_variables.scss:3` 的
+ * `@import '~primer-support/lib/variables/color-system.scss'` —— `~` 是 webpack 的 alias,
+ * Dart Sass 解析不了;整张变量表也不可能整份 import(它是 `:root { … }` 块)。
+ * 不补就是**硬错**(Sass `Undefined variable`),不是静默失效。
+ *
+ * 取值:那三个圆是**叠在头像上的底色/描边**,语义是「由浅到深的三层中性色」。
+ * 绑 DSH 令牌而不是写死十六进制,深浅主题自动跟随。`$gray-300` 与
+ * `repository-list.scss:51` 的既有绑定保持同一口径。
+ */
+$gray-100: var(--dsw-alias-bg-layer-3);
+$gray-200: var(--dsw-alias-border-l1);
+$gray-300: var(--dsw-alias-border-l2);
+
+// 变量桥(取色/尺寸共用那一组)。
+@import 'scss/dsh-bridge';
+
+// `.sr-only` 的基础配方(`ExpandableCommitSummary` 与 List 都会渲染读屏文本;
+// `AriaLiveContainer` 也用它)。
+@import 'scss/sr-only-recipe';
+
+.gw-desktop-history {
+  // Desktop 主题变量 → DSH 令牌。
+  @include dsh-desktop-bridge;
+
+  /*
+   * ---------- 本面新增的变量 ----------
+   *
+   * 结构数值沿用上游 `_variables.scss`,颜色一律绑 DSH 令牌。
+   */
+
+  /* `_variables.scss:245` 原样(calc 形式沿用,不预先算成小数)。
+     使用方:`ui/_list.scss`(List 的行内边距)。 */
+  --spacing-third: calc(var(--spacing) / 3);
+
+  /* `_variables.scss:93`。使用方:`ui/_commit-details.scss` 的 `.file-list-header`? 不 ——
+     它是 `history/_commit-list.scss` 的 tag chip 字号(`.tag-name`)。 */
+  --font-size-xs: 9px;
+
+  /* `_variables.scss:503/505`:tag chip 的底与内边距。宿主没有等价的浅蓝底,
+     取「比页面底亮一层」的语义层。使用方:`history/_commit-list.scss:151-174`。 */
+  --path-segment-background: var(--dsw-alias-bg-layer-3);
+  --path-segment-padding: var(--spacing-third);
+
+  /*
+   * `_variables.scss:351` 的 `--drag-overlay-z-index: 15`。
+   * 使用方:`ui/_resizable.scss` 的 `.resize-handle{z-index:var(--drag-overlay-z-index)}`
+   * —— 本面里**内层**那条分隔线(文件列表 | diff)在 `.commit-details` 之内,
+   * 不在 `.gw-split` 的子树里,所以 `.gw-split` 那份声明在这里**看不见**。
+   */
+  --drag-overlay-z-index: 15;
+
+  /*
+   * `_variables.scss:180` 是 `$white`:选中且激活的文字色(「选中且激活」的强调色底上)。
+   * 使用方:`ui/_list.scss` 的 `.list-item.selected.active` 一族。
+   *
+   * ⚠️ **这一条是用户截图里那块「纯黑矩形盖住文字」的第二个成因。**
+   * 原来绑 `--dsw-alias-brand-primary-invert`,而宿主里它与 `--dsw-alias-brand-primary`
+   * **同值**(浅 `#0f1115` / 深 `#f9fafb`,见 `design-platform.css:190/192` 与 `:308/310`)——
+   * 它并不是「反色」,而是「页面底色的反色 = 品牌墨色」。底色同时绑 `brand-primary` 时,
+   * `ui/_list.scss` 的 `.list-focus-container.focus-within .list-item.selected` 会把
+   * `--text-color` 重绑到这一条 ⇒ **同色底 + 同色字**,看起来就是一块什么都没有的黑矩形。
+   * 现在底色换成中性交互层,文字取正常正文字色,深浅两主题都可读。
+   */
+  --box-selected-active-text-color: var(--dsw-alias-label-primary);
+
+  /*
+   * `ui/_list.scss` 的列表态(`.selected` / `.hoverable` 家族)。
+   * 取值与 `desktop-changes.scss` 逐字一致(同一份上游 `$blue-100` / `$blue` 的语义)。
+   *
+   * 选中行底色:上游 `_variables.scss:139` 是**字面值** `#ebeef1`(哑光蓝灰,不是蓝)。
+   * 宿主的「选中控件底色」别名 `--dsw-alias-button-ghost-active-fill` 的浅色值是 `neutral-bluish-100`
+   * = **`#ebeef2`**、深色是 `neutral-bluish-750` = `#43454a` —— 与上游 `#ebeef1` 几乎同值;
+   * 而它是宿主自己的选中态用法(`ui-primitives/Pill.module.css` 的 `.active`;
+   * `ui-settings-general/src/client/SettingsRoot.module.css:164` 的 `.navCell.active` 绑的
+   * `--dsw-specific-sidebar-nav-item-active` 与它逐主题同值,但那是 `--dsw-specific-*` 族,
+   * 构建期的宿主令牌判据只认 `--dsw-alias-*`)。
+   * 原来绑的 `--dsw-alias-bg-multi-select`(浅 `#f9fafb` / 深 `#212123`)在宿主源码里
+   * **0 个消费方**(`design-platform.css:180/298` 只声明、无人引用),徒有其名。
+   *
+   * 「选中且列表有焦点」这一级:上游是**饱和蓝** `$blue` + 白字
+   * (`_variables.scss:170` / `:180`)。宿主**没有实心蓝底令牌**(唯一的蓝色选区令牌
+   * `--dsw-alias-bg-document-selection` 是 40% 半透明,白字读不出来)⇒ 取「更强一档的
+   * 中性交互底」,保留「选中 < 选中且有焦点」的两级区别,而不是把两级压成一级。
+   * ⚠️ 冲突记账:Desktop 这一级是饱和蓝,我们这一级是中性灰;这是宿主令牌缺口,
+   * 逐条写在交付报告里,不在这里私造蓝。
+   */
+  --box-selected-background-color: var(--dsw-alias-button-ghost-active-fill);
+  --box-selected-active-background-color: var(--dsw-alias-interactive-bg-active);
+
+  /*
+   * `history/_expandable-commit-summary.scss` 用到的次要文字色。
+   * 上游没有为它单独发明变量,它直接写 `var(--text-secondary-color)` ——
+   * 那条在 `dsh-bridge` 里已经有了,不需要重复声明。
+   */
+
+  /*
+   * ---------- 列表行徽标 / 三种选中态(`ui/_list.scss`)----------
+   *
+   * 逐条与 `repository-list.scss:80-92` **同一份绑定**(那份已经过审计,不另立数值):
+   * `_list.scss` 被两个面同时编译,绑定漂移会让同一行在两个页签里颜色不同。
+   */
+  --list-item-badge-background-color: var(--dsw-alias-bg-layer-3); /* `_variables.scss:327` $gray-200 */
+  --list-item-badge-color: var(--dsw-alias-label-secondary); /* `:326` $gray-800 */
+  --list-item-selected-badge-background-color: var(--dsw-alias-border-l2); /* `:329` $gray-300 */
+  --list-item-selected-badge-color: var(--dsw-alias-label-primary); /* `:328` $gray-900 */
+  /* `:331` 是 `$white`:选中且激活那一行**上面**的芯片底色。
+     原来绑 `brand-primary-invert` = 近黑,配同行的近黑芯片文字 ⇒ 芯片整块看不见。 */
+  --list-item-selected-active-badge-background-color: var(--dsw-alias-bg-layer-1); /* `:331` $white */
+  --list-item-selected-active-badge-color: var(--dsw-alias-label-primary); /* `:330` $gray-900 */
+  --list-item-hover-background-color: var(--dsw-alias-interactive-bg-hover); /* `:332` $gray-100 */
+  --box-selected-background-color: var(--dsw-alias-button-ghost-active-fill); /* 上游 `$blue-100` 一档(= `#ebeef1` 哑光蓝灰) */
+  --box-selected-text-color: var(--dsw-alias-label-primary); /* `:160` $gray-900(深色主题是 `var(--text-color)`) */
+  --box-selected-active-background-color: var(--dsw-alias-interactive-bg-active); /* 上游 `$blue`;宿主无实心蓝底令牌,见上方冲突记账 */
+  --box-selected-active-text-color: var(--dsw-alias-label-primary); /* `:180` $white */
+
+  /* ---------- 覆盖层(`_list.scss` 的拖拽插入提示)---------- */
+  /* ⚠️ 上游 `:479` 是 `rgba(0,0,0,.4)`(半透明**黑遮罩**)。原来绑的
+   * `--dsw-alias-bg-overlay` 是宿主的**中性表面色**(浅 `#e9ecf2` / 深 `#61666b`,不透明)
+   * ⇒ 遮罩变成整块盖住。宿主的遮罩令牌是 `--dsw-alias-bg-mask-{1,2,3}`
+   * (宿主 `Modal.module.css:28` 用的就是 mask-1)。 */
+  --overlay-background-color: var(--dsw-alias-bg-mask-1); /* `:479` `$overlay-background-color` */
+
+  /*
+   * ---------- `ui/_scroll.scss`(win32/linux 原生滚动条)的 4 个变量 ----------
+   *
+   * 与 `repository-list.scss:119-123` 同一份绑定。尺寸沿用上游,颜色绑宿主令牌。
+   * 说明:我们的 DOM **从不加 `body.platform-*`**,所以这几条规则本来打不到节点;
+   * 补值是为了「声明不再静默失效」(goal §3 失败模式 10),不是视觉改动。
+   */
+  --win32-scroll-bar-size: 10px; /* `_variables.scss:335` */
+  --linux-scroll-bar-size: 10px; /* `:336` */
+  --scroll-bar-thumb-background-color: var(--dsw-alias-border-l2); /* `:101` rgba(0,0,0,.2) */
+  --scroll-bar-thumb-background-color-active: var(--dsw-alias-border-l3); /* `:109` rgba(0,0,0,.5) */
+
+  /* `_variables.scss:87`。使用方:`history/_commit-list.scss` 的 tag chip 字号。 */
+  --font-size-md: 14px;
+
+  /*
+   * ---------- `history/_expandable-commit-summary.scss` 的展开态渐隐阴影 ----------
+   *
+   * `.expanded .beneath-summary { background: var(--box-overflow-shadow-background-two) }`
+   * (`:165`)—— 它是**四层**简写的合成值,所以四个内层变量必须一起绑,否则合成值整条失效
+   * (点开「展开提交正文」后上下的渐隐条不会出现)。
+   *
+   * 上游那四层(`_variables.scss:199-202`)是 `$white` 与 `rgba($gray-200,.6)`
+   * 做的渐变。这里按「颜色只来自 DSH」的契约换成宿主令牌:不透明端 = 页面底
+   * `--dsw-alias-bg-layer-1`,渐显端 = 边框层。**语义不变**(两端之间插值),
+   * 只是把 Desktop 调色板的绝对灰值换成宿主的中性层。
+   */
+  --no-shadow-top: linear-gradient(var(--dsw-alias-bg-layer-1), transparent);
+  --no-shadow-bottom: linear-gradient(transparent, var(--dsw-alias-bg-layer-1));
+  --top-shadow: linear-gradient(0deg, transparent 0%, var(--dsw-alias-border-l1) 90%, var(--dsw-alias-border-l2) 100%);
+  --bottom-shadow: linear-gradient(180deg, transparent 0%, var(--dsw-alias-border-l1) 90%, var(--dsw-alias-border-l2) 100%) 0 100%;
+  --box-overflow-shadow-background-two: var(--no-shadow-top), var(--no-shadow-bottom) 0 100%, var(--top-shadow), var(--bottom-shadow);
+
+  /*
+   * ---------- `ui/drag-elements/_commit-drag-element.scss` 的拖拽幽灵标题 ----------
+   *
+   * 上游 `_variables.scss:540` 是 `rgb(236,236,236)`(浅灰浮层底)、`:541` 是一个灰色阴影。
+   * 底色绑「比页面底亮一层」,阴影复用变量桥里已有的 `--base-box-shadow`
+   * (`_dsh-bridge.scss:53`,`0 2px 7px rgb(0 0 0 / 25%)`)—— 阴影是**结构**不是皮肤,
+   * 与 `tooltips.scss:106` 的同一取舍一致,不新造十六进制。
+   */
+  --title-tool-tip-background-color: var(--dsw-alias-bg-layer-3);
+  --title-tool-tip-shadow: var(--base-box-shadow);
+
+  /*
+   * ---------- `history/_history.scss` 里 `#compare-view` 用的两个 ----------
+   *
+   * `#compare-view` 是**compare/分支条**的 DOM(branches 线在移植);本轮它进了包但打不到
+   * 节点(适配层没有渲染它)。值仍然要绑,否则那两条声明静默失效 ——
+   * 而等 branches 线接上 compare 条时,没人会回来补。
+   */
+  --tab-bar-background-color: var(--dsw-alias-bg-layer-2); /* `:314` $white;深色主题就是 `var(--box-background-color)` */
+  /* `:134` 是 `$blue`(强调边线)。宿主「选中页签」的边线/文字惯用色是
+     `--dsw-alias-state-business-primary`(浅 `#4176e6` / 深 `#7aaaFF`;
+     消费方 `ui-schedule/.../TaskManagerPage.module.css:625` 的 `.detailTab[aria-selected="true"]::after`
+     与 `:620` 的文字色)。`brand-primary` 在浅色下是近黑 ⇒ 那条边线是黑的,不是蓝的。 */
+  --box-border-accent-color: var(--dsw-alias-state-business-primary); /* `:134` `$blue` */
+
+  /*
+   * `.sr-only` 的**基础配方**必须补上:上游写在 `ui/_app.scss:115-123`(整个应用外壳,
+   * 不 import)。`ExpandableCommitSummary` 的 `ecs-description-text` 与 List 的
+   * `AriaLiveContainer` 都渲染 `sr-only` —— 缺配方它们会变成**可见文本**,
+   * 那条 bug 在 diff 面已经咬过一次(goal §7)。必须写在**作用域内**,
+   * 否则未作用域的顶层规则会被 `checkPortStyles` 拒绝。
+   */
+  .sr-only {
+    @include sr-only-recipe;
+  }
+
+  /*
+   * `.blankslate` 的**基础配方**同样必须就地补:上游唯一定义在
+   * `styles/_globals.scss:120-128`(Desktop 的**整个应用 globals**,不是某个界面),
+   * 而本面闭包里的 `ui/_panel.scss` 只给 `.panel`,不给 `.blankslate`
+   * —— `commit-list.tsx:569` 的空态是 `<div class="panel blankslate">`,缺这条
+   * 空态文案既不居中也不换底色(构建期 `check-base-recipes` / `requires` 都会报)。
+   *
+   * 取值逐字取自 `_globals.scss:120-128`(8 条声明),依赖的三个变量
+   * (`--box-alt-background-color` / `--text-secondary-color` / `--spacing`)都已由
+   * 上面的 `@include dsh-desktop-bridge` 绑好,所以不是新造数值。
+   * **不整份 import `_globals.scss`**:它是应用外壳(含 `body`/`html`/`#content`),
+   * 与 `.sr-only` 那次 (`ui/_app.scss`) 是同一个理由,也是同一个处置方式(goal §7)。
+   */
+  .blankslate {
+    background: var(--box-alt-background-color);
+    color: var(--text-secondary-color);
+    display: flex;
+    flex: 1;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: var(--spacing);
+  }
+}
+
+/*
+ * ==========================================================================
+ * 上游 partial —— **顶层** import(一个字不改)
+ * ==========================================================================
+ *
+ * 顺序 = 输出顺序。逐条写了「为什么需要它(哪个活着的组件要它)」,
+ * 不需要的一条都没有(见文件头对 `history/_commit-summary.scss` 的说明)。
+ */
+
+/* `#history` 的 flex 列布局(`selected-commits.tsx` 的根就是这个 id),以及
+   `#compare-view`(compare 条属于 branches 线,本轮进包但打不到节点)。 */
+@import './scss/upstream/ui/history/history';
+
+/* 提交列表:`CommitList` → `CommitListItem`(`.commit-list-item`、`.commit-indicators`、
+   `.tag-name`、`.unpushed-indicator`、`.commit-attribution` 的宿主、`.avatar` 的宿主)。 */
+@import './scss/upstream/ui/history/commit-list';
+
+/* 摘要头:`ExpandableCommitSummary`(`#expandable-commit-summary`、`.ecs-*`、
+   `.expander`、`.commits-in-diff`、`.lines-added` / `.lines-deleted`)。 */
+@import './scss/upstream/ui/history/expandable-commit-summary';
+
+/* 文件列表:`FileList` 的 `.file-list`(它自己只有一条,配 `#history`)。 */
+@import './scss/upstream/ui/history/file-list';
+
+/*
+ * **文件行本体(`.file`)的配方** —— 用户报的「History 的变更列表样式有问题」的根因。
+ *
+ * ## 为什么必须 import 这一张(而不是手写 `.file` 规则)
+ *
+ * 上游有两张**同名不同路径**的表,很容易只沿用到其中一张:
+ *
+ * | 上游文件 | 内容 | 谁渲染它 |
+ * |---|---|---|
+ * | `ui/history/_file-list.scss`(1 条) | `#history .file-list{display:flex;flex:1;border-right}` | `ui/history/file-list.tsx` |
+ * | `ui/_file-list.scss`(上面这条 + **`.file` 整段**) | `.file-list{height:100%}` / `.file-list .list-item{border-bottom}` / **`.file{…}`** / `.list-focus-container` 的状态色 | **两个** `.file` 渲染者:`ui/changes/changed-file.tsx:81` 与 `ui/history/committed-file-item.tsx:32` |
+ *
+ * `.file` 是 **History 与 Changes 共用**的类名(上游 `_ui.scss:10` 把
+ * `ui/file-list` import 进**全局**应用样式表,不是 Changes 专属),所以上游 History 的
+ * 文件行**就是**由这张表定的样式。只 import `history/file-list` 会留下一个**没有规则**的
+ * `.file`:`CommittedFileItem` 有 DOM、没有配方。
+ *
+ * ## 缺它的实测后果(修前,真 Chrome + 真产物 CSS)
+ *
+ * | 量 | 修前 | 上游配方要求 |
+ * |---|---|---|
+ * | `.file` 的 `display` | **`block`** | `flex`(`ui/_file-list.scss:24-25`) |
+ * | `.file` 的宽度 | **141.44px**(收缩到内容宽,远窄于 249px 的行) | 撑满行(`flex-grow:1`)|
+ * | `.file` 的高度 | **39px**(> 29px 的行高,溢出) | `height:100%` |
+ * | `.file` 的内边距 | **`0px`** | `0 var(--spacing)` |
+ * | `.file > PathLabel` | 266.5,136.44×18 | 与状态图标**同行** |
+ * | `.file > svg.status`(状态 Octicon) | **266.5**(`PathLabel` 的下一行,同一左边界) | 行**右端**,`flex-shrink:0`,16×16 |
+ * | `.file .octicon` | 无 `vertical-align` | `vertical-align:text-bottom` |
+ *
+ * ⇒ 用户看到的就是「路径一行、状态图标**另起一行**贴在左边缘」—— 那个 16×16 的方框
+ * 正是截图里被当成「勾选框」的东西。**它不是 Checkbox**:同一棵树上 `.file-list` 里
+ * `<input>` 计数 **0**、`.checkbox-component` 计数 **0**、`svg.octicon.status` 计数 **1**
+ * (类名 `octicon status status-modified`),按 `iconForStatus(status)` 出图标。所以
+ * **不需要换组件**(本来渲染的就是上游 `CommittedFileItem`),缺的是这条配方。
+ *
+ * `.file-list{height:100%}` 那条同样要:它自己带着上游的注释
+ * 「this value affects virtualized lists, and without it you'll see react-virtualized
+ * just skip rendering as the available vertical space is computed as zero」——
+ * 也就是 goal §3 那三个塌陷机制里的第一个。本面今天靠 `#history .file-list{flex:1}` 拿到了
+ * 确定高度(实测 522px、行数 12),但两条都在才与上游一致;`flex-basis:0%` 在前,
+ * `height:100%` 只作兜底,不会把高度算成 551.5。
+ *
+ * ## 一条已知的**跨面重复**(记账,不在这里解决)
+ *
+ * `ui/_file-list.scss` 是**全局**表,Changes 面同样需要它。`src/client/scss/desktop-changes.scss`
+ * 的闭包里今天**没有**这张表(那边 `.file` 也是空的,`changes-view.tsx` 把这条缺口
+ * 登记成「按所有权交给 `src/client/styles.ts` 那条线」)。两个面各自 import 同一个上游
+ * partial 是**允许的**(作用域不同,产物里两段互不干扰,与 `.list` / `.panel` /
+ * `.sr-only` 这几张共享表完全同构),因此这里**不**去改 `styles.mjs` 的注册表、
+ * 也**不**手写等价规则。若 `styles.ts` 那条线最终选择在 `.gw-root` 上发全局 `.file` 规则,
+ * 那两段会同时命中,优先级由特异性决定(本面是 `.gw-desktop-history .file-list .file`,
+ * 更高),不会互相打脸。
+ */
+@import './scss/upstream/ui/file-list';
+
+/* 多选空态:`#multiple-commits-selected`(适配层在选中多个提交时渲染它)。 */
+@import './scss/upstream/ui/history/multiple_commits_selected';
+
+/* 摘要头/文件列表下面的「两栏」容器:`.commit-details` 与 `.file-list-header`
+   (`N changed files` 那一行)、`.fill-window`(空文件的占位)。**注意**:它**不在**
+   `ui/_history.scss` 的聚合表里(那份表只收 `history/` 目录),所以必须单独 import ——
+   漏了它的后果是 `.commit-details` 不再是 flex row、两栏会上下堆叠。 */
+@import './scss/upstream/ui/commit-details';
+
+/* 内层那条「文件列表 | diff」的可拖拽分隔线(`Resizable` 本体,`.resizable-component`
+   的 `display:flex;flex-direction:column` 决定了 `.file-list` 能不能撑满高度)。 */
+@import './scss/upstream/ui/resizable';
+
+/* 两个列表的本体(`CommitList` 与 `FileList` 都渲染上游 `List`):
+   `.list` / `.list-item` / `.list-focus-container` / 选中态 / `.fake-scroll`。 */
+@import './scss/upstream/ui/list';
+@import './scss/upstream/ui/list-item-insertion-overlay';
+@import './scss/upstream/ui/scroll';
+
+/* 头像三件套:`CommitListItem` 的 `AvatarStack`,摘要头的 `AvatarStack` +
+   `CommitAttribution`(`.avatar` / `.avatar-stack` / `.commit-attribution`)。 */
+@import './scss/upstream/ui/avatar';
+@import './scss/upstream/ui/avatar-stack';
+@import './scss/upstream/ui/commit-attribution';
+
+/* 路径显示:`CommittedFileItem` 与 `DiffHeader` 都渲染 `PathLabel`
+   (`.path-label-component` + `.path-text`;重命名时画 `old → new`)。 */
+@import './scss/upstream/ui/path-label';
+@import './scss/upstream/ui/path-text';
+
+/* 图标基底(`svg.octicon{fill:currentColor;flex-shrink:0}`)—— 行状态图标、
+   tag/unpushed 角、摘要头的状态图标全靠它。 */
+@import './scss/upstream/ui/octicons';
+
+/* `Button` / `LinkButton` / `CopyButton`(`.button-component`,摘要头的
+   `CopyButton` 与「+N commits」的 `LinkButton` 都在这一族里)。 */
+@import './scss/upstream/ui/button';
+
+/* diff 头部(`DiffHeader` 的 `.header`)与它的容器 `.diff-container`。
+   `_diff.scss:899,906` 的选择器是 `.diff-container .header { … }` —— 也就是说
+   **`.header` 的配方要求 `.diff-container` 是它的祖先**,两个都必须在本面闭包里。 */
+@import './scss/upstream/ui/diff';
+
+/* diff 头部的齿轮弹层:`DiffOptions`(`.diff-options-component`)+ 它的两个控件
+   (Whitespace 复选框 / 统一↔并排单选)与 popover 宿主。 */
+@import './scss/upstream/ui/diff-options';
+@import './scss/upstream/ui/checkbox';
+@import './scss/upstream/ui/radio-button';
+@import './scss/upstream/ui/popover';
+
+/* 空态面板(`.panel` / `.blankslate`):`CommitList` 的空列表、未选文件、
+   「读取 diff…」、多选空态都用它。 */
+@import './scss/upstream/ui/panel';
+
+/* 提交行的拖拽幽灵(`CommitList` → `CommitDragElement`)。 */
+@import './scss/upstream/ui/drag-elements';
+
+/* `RichText` 的 emoji 占位(`.emoji`)。`gemoji` 数据集在本 checkout 里是空的,
+   但表本身要进包,否则 `:smile:` 会以纯文本渲染而**没有占位尺寸**。 */
+@import './scss/upstream/ui/emoji';
