@@ -21,6 +21,8 @@ import { ensureStyles } from './styles.ts';
 import { ensureBaseStyles } from './styles-base.ts';
 import { ensureDesktopDiffStyles } from './desktop-diff-styles.ts';
 import { WorkbenchApp } from './workbench.tsx';
+import { FrameToasts, registerToastSource } from './bits.tsx';
+import { ErrorBoundary } from './error-boundary.tsx';
 import { GitStore } from './store.ts';
 import {
   DSH_GIT_NS, DshGitSettingsCardController,
@@ -207,6 +209,94 @@ export function apply(ctx: ClientCtx): void {
       disposeType();
     };
   }, 'dsh-git: sidebar tab type + body + title');
+
+  registerToastSeat(ctx);
+}
+
+/**
+ * 把**通知面**注册进宿主的 **`shell.overlay`** 席位(2026-10,用户裁决「右下角气泡」)。
+ *
+ * ## 席位出处(逐字核对过,不是推断)
+ *
+ * · **声明**:`references/deepseek-harness/packages/client/ui-layout/src/client/index.ts:95-103`
+ *   —— `'shell.overlay': { kind: 'list'; scope: 'root' }`,文档原文点名了这个用途:
+ *   「Frame-wide floating layer, above every column and outside their scroll containers.
+ *   Deliberately generic and unowned by any feature: **a badge, a toast stack or a status
+ *   pill all belong here**, and entries order among themselves. The layer itself is
+ *   **click-through** — entries opt back into pointer events — so an occupant never blocks
+ *   the app underneath. This is the additive seat for a frame-wide surface of your own:
+ *   **a fresh `id` is added beside the shipped entries** instead of replacing them.」
+ * · **宿主自己怎么用**(注册形状照抄的就是它们):
+ *   `packages/client/ui-chat/src/client/apply.ts:268-279`(quota notice)、
+ *   `packages/client/ui-schedule/src/client/index.ts:112-115`(DeleteToast)、
+ *   `packages/client/ui-workspace/src/client/index.ts:297-309`(RowActionToast)、
+ *   `packages/client/ui-plugin-manager/src/client/index.ts:103-109`(refresh toast)。
+ *   形状都是 `ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name, id, … }, C))`,
+ *   **每个功能一个自己的 id**(所以这里用 `dsh-git.toasts`,additive,不覆盖任何既有条目)。
+ * · **帧这一侧**:`ui-layout/src/client/AppFrame.tsx:249,292-294` 渲染
+ *   `renderSlot('shell.overlay', {})` 到 `.overlayLayer`
+ *   (`AppFrame.module.css:281-290`:`position:absolute;inset:0;z-index:20;pointer-events:none`,
+ *   `> * { pointer-events:auto }`)。
+ *
+ * ## 为什么 `inject` 而不是别的写法
+ *
+ * 与下面设置卡片同一条规矩:席位**没被声明**时 `slots.inject` 是**静默 no-op**,
+ * 所以这里有一个有界(3s)一次性诊断,把「席位没落地」说清楚 —— 否则表现是
+ * 「一条通知都不出现」,而没有任何一处会报错。
+ *
+ * ## 几何:席位不负责位置(必须知道)
+ *
+ * 宿主原语把横幅 portal 到 `document.body`(`ui-primitives/src/Toast.tsx:74-76`),
+ * 所以席位那一格**不是**它的 DOM 祖先 —— 位置与夹宽由 `bits.tsx` 的
+ * `useToastBandClamp`(实测右栏矩形 → 四个 CSS 变量)加 `styles.ts` 那条带门控的规则
+ * 完成。这里注册的 `FrameToasts` 自己**不渲染任何本地 DOM**。
+ * @param ctx - 浏览器插件上下文。
+ */
+function registerToastSeat(ctx: ClientCtx): void {
+  ctx.effect(() => {
+    const slots = ctx.slots;
+    if (slots === undefined || typeof slots.register !== 'function') {
+      console.warn('[dsh-git] slots 不可用,shell.overlay 通知席位未注册(通知不会出现)');
+      return;
+    }
+    let landed = false;
+    /*
+     * `label` / `order` 都不传:`shell.overlay` 的 owner 不投影任何文字
+     * (`slot-catalog.ts` 的该席位 `ownerProps: []`),而条目之间的顺序对「一个自己定位的
+     * 浮层」没有意义 —— 宿主的四个先例也都只传 `name` / `id`(有的再传 `locale` / `inject`)。
+     *
+     * 外面那层 `ErrorBoundary` 是从 `workbench.tsx` 搬过来的(`label="提示条"`):通知面渲染
+     * 抛错时**不能**带走宿主那一层浮层树(那是整个帧),而回退是可见的、指名道姓的 ——
+     * 不静默渲染成空盒子。
+     */
+    const dispose = slots.inject('shell.overlay', () => {
+      landed = true;
+      return slots.register({
+        name: 'shell.overlay',
+        id: 'dsh-git.toasts',
+      }, () => createElement(
+        ErrorBoundary,
+        { label: '提示条' },
+        createElement(FrameToasts, null),
+      ));
+    });
+    const timer = setTimeout(() => {
+      if (landed) {
+        return;
+      }
+      console.warn('[dsh-git] shell.overlay 席位没被声明 ⇒ 通知不会出现(宿主 ui-layout 未激活?)');
+    }, 3000);
+    /*
+     * 设置卡片那棵树用的是**全局 store**(`storeFor('')`,与卡片同一个实例),它也可能报
+     * 通知 ⇒ 一并登记成帧级通知来源。
+     */
+    const unregisterSource = registerToastSource(storeFor(''));
+    return () => {
+      clearTimeout(timer);
+      unregisterSource();
+      dispose();
+    };
+  }, 'dsh-git: shell.overlay toast seat');
 }
 
 /**
@@ -424,10 +514,10 @@ function gitIcon(size: number): ReactElement {
 }
 
 /**
- * 侧栏 tab chip 的标题 = **我们的图标 + 标题文字**。
+ * 侧栏 tab chip 的标题 = **我们的图标 + 当前名字**。
  *
  * 形状照官方 `dsh-client-ui-sidebar-files` 的 `FilesTitle`:
- * `Fragment[图标, tab.title]`,而**间距与垂直对齐由宿主的 chip 容器负责**
+ * `Fragment[图标, 文字]`,而**间距与垂直对齐由宿主的 chip 容器负责**
  * (`@deepseek-ai/dsh-client-ui-sidebar-right` 的 README §1:「停靠 tab 和浮窗标题中的
  * 图标间距与垂直对齐由 dockkit 控制」)。所以这里**不带自己的 margin** ——
  * 就算想带也不该带:我们的样式全部 scope 在 `.gw-*` 作用域里,进不到 chip 里去。
@@ -437,27 +527,23 @@ function gitIcon(size: number): ReactElement {
  * 那是 CSS Module 的哈希类名,插件够不到 —— 用同一个令牌内联,是照它的角色取值,
  * 不是为了绕开作用域。
  *
- * `useTabInfo` 由宿主经 `hookContext` 注入(官方几个 title 席位组件都这么取),
- * 它给出 `tab.title`(打开时捕获的文字,即类型 `title()` 的返回值 `git`)。
- * **旧宿主不注入时退化为图标 + 同一份文案,而不是抛错** —— 这一席是增强,不该成为
- * 新的加载失败点,也不该在两套宿主上显示成两个名字。
- * @param props - 宿主注入的 `useTabInfo`。
+ * ## ⚠️ 为什么**不**回显 `tab.title`(2026-10 实测踩到)
+ *
+ * 宿主把 title **在 tab 打开时捕获**,连布局一起写进 `localStorage`
+ * (`${sidebarPersistence}.${sessionId}` 里的 `minted` 记录)。于是改名之后:重启、
+ * 刷新都不会重算那条记录,chip 一直显示旧名 —— 用户看到的就是「我重启了,还是
+ * `dsh-git`」。而契约里写着「**会变的标题只来自可选的标题席位**」,所以这一席就是
+ * 权威:直接渲染 {@link TAB_TITLE},旧记录里捕获的文字不再参与。
+ * (想走捕获值那条路也可以,代价是**每个用户都得把那个 tab 关掉再开一次**。)
+ *
+ * 因此本组件**不依赖任何 props**:宿主给不给 `useTabInfo` 都渲染同一个名字。
  * @returns 图标与标题文字两个兄弟节点。
  */
-function GitTabTitle(props: { useTabInfo?: () => { tab?: { title?: string } } }): unknown {
-  let label = TAB_TITLE;
-  try {
-    const captured = props?.useTabInfo?.()?.tab?.title;
-    if (typeof captured === 'string' && captured !== '') {
-      label = captured;
-    }
-  } catch {
-    // 取不到就沿用固定文案;图标照画。
-  }
+function GitTabTitle(): unknown {
   return createElement(Fragment, null,
     createElement('span', {
       style: { color: 'var(--dsw-alias-label-tertiary)', display: 'flex', flex: 'none' },
     }, gitIcon(16)),
-    label,
+    TAB_TITLE,
   );
 }
