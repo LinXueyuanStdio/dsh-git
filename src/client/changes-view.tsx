@@ -255,7 +255,7 @@ export function ChangesView(props: {
       {/* 左右两栏,照 Desktop 的仓库视图:左 = 列表 + 底部提交区;右 = diff / 空态。
           宽度由 `useSplitWidth()` 驱动:横排时把左栏轨道的像素宽写成行内
           `grid-template-columns`,竖排(<420px)时不写、交给 `styles.ts` 的容器查询。 */}
-      <div className="gw-split" ref={split.containerRef} style={split.containerStyle}>
+      <div className="gw-split" ref={split.attachContainerRef} style={split.containerStyle}>
         <div className="left">
           {/* 左栏整体包进移植过来的 `<Resizable>`(Desktop `repository.tsx:410-421`)。 */}
           <SplitPane split={split} id="dsh-git-changes-split" description="Changes 变更列表">
@@ -660,16 +660,62 @@ function onListKeyDown(
  */
 function DiffPane(props: { store: GitStore; snap: Snapshot }): ReactNode {
   const { snap } = props;
+  /*
+   * ⚠️ **这个 `useRef` 必须在任何提前 return 之前** —— 它是「换文件时不要把 diff 区清空」
+   * 那份缓存的载体(完整理由见下面那段注释),而它下面紧跟着
+   * `snap.selectedFiles.length === 0` 的提前 return。
+   *
+   * 2026-10 修正:`useRef` 原先写在那个提前 return **之后**,于是「没选文件 → 选中文件」
+   * 这一次渲染里 hook 的调用**多了一个** —— `react-hooks/rules-of-hooks` 报的就是这个
+   * (`React Hook "useRef" is called conditionally`)。React 要求同一次挂载内每个 hook
+   * 的调用顺序完全一致,`useRef` 不是那种「条件不成立就不需要」的东西:
+   * `lastShownRef` 的语义是「跨渲染记住上一份 diff」,而这个组件**本来就会**在
+   * 「有选中文件」与「没有选中文件」两种 props 下反复重渲染(切换仓库、清空选择、
+   * 过滤后列表变空都会走到那条空态)⇒ 顺序错位是真实可达的,不是理论问题。
+   *
+   * 提到最上面之后**行为不变**:两条提前 return 只影响「渲染什么」,
+   * 不影响这次 `useRef`(空态分支里它不会被读)。不要为了「看起来有条件」把它改成
+   * 惰性初始化或 `useState` —— 那会换掉「只建一次、换文件时复用」的语义。
+   */
+  const lastShownRef = useRef<{ diff: NonNullable<Snapshot['diff']>; entry: ChangedFile | undefined } | null>(null);
   if (snap.selectedFiles.length === 0) {
     return <Empty icon="file" title="选择一个文件查看 diff" body="在左侧列表里点一个文件。" />;
   }
   const diff = snap.diff;
+  /*
+   * **换文件时不要把 diff 区清空** —— 上游 `SeamlessDiffSwitcher` 的 `propSnapshot`
+   * (`ui/diff/seamless-diff-switcher.tsx:206`,`:380` 读它)在加载期间渲染的是
+   * **上一次成功的 props(含上一次的 diff)** + `.loading-indicator`;那个类的注释自己写着
+   * 目的是「avoiding flickering when rapidly switching between files」(`:178-182`)。
+   *
+   * 我们以前在 `diff === null` 时**提前 return** 一个「读取 diff…」空态 ⇒ `DesktopDiff`
+   * 整个被卸载 ⇒ 换文件那一瞬 diff 区**整个消失**。这在真 Chrome 里量到过
+   * (`docs/probes/changes-diff-switch-probe.mjs`,改前:`hasDesktopDiff=false`、
+   * `class=null`、`空态「读取 diff…」=true`）。
+   *
+   * 修法:**保留上一份**渲染所需的输入,加载期间照旧渲染它(头部路径换成**新选中的**文件,
+   * 与上游一致 —— `changes.tsx` 的 `DiffHeader` 拿的是新 `file.path`,而正文由 switcher
+   * 的 propSnapshot 撑着)。只有**首次**加载(还没有任何上一份)才显示那个空态。
+   *
+   * 为什么保留在这一层:上游的 switcher **收的是** `IDiff`+`ChangedFile`,所以它自己就能留;
+   * 我们这一层收的是宿主原始 `patch`(`IDiff` 由 `DesktopDiff` 现解析),所以「留一份上一个
+   * 文件的结果」只能在这里做 —— 这是**同一语义在适配层的落点**,不是第二份真源。
+   */
+  if (diff !== null) {
+    lastShownRef.current = {
+      diff,
+      entry: (snap.status?.files ?? []).find((f) => f.path === diff.path),
+    };
+  }
+  const shown = lastShownRef.current;
   // 头部**始终**渲染:隐藏空白时纯缩进改动会整个消失,此时用户更需要能点回开关
   // (Desktop 的 DiffHeader 也是常驻的)。
+  // 路径取**当前选中**的文件(加载中也是新文件),上游 `changes.tsx:110` 就是这么传的。
+  const headPath = diff?.path ?? snap.selectedFiles[0] ?? '';
   const head = (
     <div className="gw-diff-head">
       <span className="gw-path" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-        title={diff?.path ?? ''}>{diff?.path ?? ''}</span>
+        title={headPath}>{headPath}</span>
       <span className="grow" />
       {diff !== null && diff.additions > 0 && <span className="gw-diff-stat add">+{diff.additions}</span>}
       {diff !== null && diff.deletions > 0 && <span className="gw-diff-stat del">-{diff.deletions}</span>}
@@ -683,9 +729,11 @@ function DiffPane(props: { store: GitStore; snap: Snapshot }): ReactNode {
     </div>
   );
 
-  if (diff === null) return <>{head}<Empty icon="file" title="读取 diff…" /></>;
+  // 只有**首次**加载(`shown === null`)才给空态;此后加载期间沿用上一份。
+  if (shown === null) return <>{head}<Empty icon="file" title="读取 diff…" /></>;
+  const shownDiff = shown.diff;
   // binary 也走移植的 Diff(它的 BinaryFile 分支画「这个二进制文件变了」+ 外部程序打开)。
-  if (diff.patch.trim() === '' && diff.binary !== true) {
+  if (shownDiff.patch.trim() === '' && shownDiff.binary !== true) {
     return (
       <>
         {head}
@@ -693,14 +741,14 @@ function DiffPane(props: { store: GitStore; snap: Snapshot }): ReactNode {
           body={props.snap.hideWhitespace
             // 这一句很关键:否则用户会以为改动丢了
             ? '当前隐藏了空白改动,所以只有缩进/空格变化的改动不会显示。要看到它们,请在右上角的 Diff 设置里取消「隐藏空白改动」。'
-            : diff.untracked === true ? '这是新文件,内容尚未进入 diff。' : '改动已被暂存或撤销。'} />
+            : shownDiff.untracked === true ? '这是新文件,内容尚未进入 diff。' : '改动已被暂存或撤销。'} />
       </>
     );
   }
 
   // 状态字母与冲突分类来自变更列表里的那一条(而不是 diff 自己),用于上游
   // 「重命名但没改动」/「冲突需在命令行解决」等按文件状态分派的文案。
-  const entry = (snap.status?.files ?? []).find((f) => f.path === diff.path);
+  const entry = shown.entry;
 
   /**
    * 这个文件的行级选区能不能被 host **按行**兑现(见 `file-kind.ts`)。
@@ -737,17 +785,17 @@ function DiffPane(props: { store: GitStore; snap: Snapshot }): ReactNode {
         免得再去猜它传了什么(以前只能靠「右栏有没有画勾」反推)。
       */}
       <div hidden data-gw-include-probe={JSON.stringify({
-        path: diff.path,
-        selection: snap.includeState[diff.path] ?? null,
+        path: shownDiff.path,
+        selection: snap.includeState[shownDiff.path] ?? null,
         lineSelectable,
       })} />
       <DesktopDiff
         input={{
           repositoryPath: snap.current,
-          path: diff.path,
-          ...(diff.oldPath !== undefined ? { oldPath: diff.oldPath } : {}),
-          patch: diff.patch,
-          binary: diff.binary,
+          path: shownDiff.path,
+          ...(shownDiff.oldPath !== undefined ? { oldPath: shownDiff.oldPath } : {}),
+          patch: shownDiff.patch,
+          binary: shownDiff.binary,
           ...(entry?.staged !== undefined ? { status: entry.staged } : {}),
           ...(entry?.staged === undefined && entry?.unstaged !== undefined ? { status: entry.unstaged } : {}),
           ...(entry?.untracked === true ? { untracked: true } : {}),
@@ -773,8 +821,8 @@ function DiffPane(props: { store: GitStore; snap: Snapshot }): ReactNode {
         // 反证方式:把这一行改成 `selectable={lineSelectable}`,未跟踪文件的 diff 勾选列
         // 立刻消失(探针 `docs/probes/browser-probe.tsx` 的 B1 就是这个断言)。
         selectable={true}
-        selection={snap.includeState[diff.path]}
-        onSelectionChanged={(spec) => props.store.setFileSelection(diff.path, spec)}
+        selection={snap.includeState[shownDiff.path]}
+        onSelectionChanged={(spec) => props.store.setFileSelection(shownDiff.path, spec)}
       />
     </>
   );
