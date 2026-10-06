@@ -1,4 +1,4 @@
-# dsh-git
+# @linxueyuan/dsh-git
 
 [![npm](https://img.shields.io/npm/v/@linxueyuan%2Fdsh-git?label=npm&color=4d6bfe)](https://www.npmjs.com/package/@linxueyuan/dsh-git)
 [![License: MIT](https://img.shields.io/badge/license-MIT-4d6bfe.svg)](./LICENSE)
@@ -10,13 +10,19 @@
 
 **把本地 Git 装进 [DeepSeek Harness](https://github.com/deepseek-ai) 的官方右侧栏**：多仓库下拉、Changes / History 本地操作、Code / Issues / Pull requests / Actions 远端页签，提交信息由 DSH 模型列表里的模型生成 —— **不使用任何 Copilot 付费能力**。
 
-布局参考 [dsh-github-workbench](https://github.com/meyaomiao/dsh-github-workbench)，工作流照 GitHub Desktop：左上角仓库下拉、工具栏同步/分支、Changes 的「文件列表 + diff + 提交区」。（上图是 DSH 窗口的结构示意，不是实机截图。）
+布局参考 [dsh-github-workbench](https://github.com/meyaomiao/dsh-github-workbench)，工作流照 GitHub Desktop：左上角仓库下拉、工具栏同步/分支、Changes 的「文件列表 + diff + 提交区」。（上图是 DSH 窗口的结构示意；**真实界面见下**。）
 
-<!-- 实机截图位（待补）：从 DSH 右侧栏截 1–2 张，建议 ≥1440×900，亮/暗各一张，
-     存成 assets/readme/panel-dark.png 与 assets/readme/panel-light.png，然后在这里
-     用居中的 img 标签嵌入（写法照上面那三张 SVG），alt 写明是「暗色实机截图」。
-     故意保持注释状态：审计脚本会逐字扫 local 图片引用，写死一个还不存在的文件名
-     会被报成坏引用。 -->
+<p align="center">
+  <img src="./assets/readme/Changes.png" width="100%"
+       alt="Changes 页签（实机截图）：仓库下拉显示 dsh-git 与 main 分支、工具栏「推送到 origin」的领先进度、六个页签、17 个变更文件的勾选列表、README.md 的逐行 diff，以及底部的提交区（摘要/描述、✨ 生成、提交按钮）">
+</p>
+
+<p align="center">
+  <img src="./assets/readme/History.png" width="100%"
+       alt="History 页签（实机截图）：左侧提交列表，右上是选中提交的说明、短 sha 与 +/− 统计，下方是该提交改动的文件与逐行 diff">
+</p>
+
+上面两张是**实机截图**（亮色主题）：Changes 与 History，都在 DSH 官方右侧栏里 —— 页签上那枚图标就是本插件的提交图形标记。
 
 ## 你会得到
 
