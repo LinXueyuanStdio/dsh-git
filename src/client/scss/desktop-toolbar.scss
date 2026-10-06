@@ -1,0 +1,713 @@
+//
+// **`.gw-toolbar` 面(顶栏三段 + 分支面板)的编译入口**(Sass)。
+//
+// 已落地:`scripts/styles.mjs` 的 `PORT_SURFACES` 里有一条 `id: 'toolbar'` 指向本文件
+// (作用域 `.gw-toolbar`,`portalHost: true`;治根换 `.gw-app-toolbar` 的第二步见下)。加这一面只用了「一个入口 SCSS + 一条表项」,
+// `scripts/build.mjs` 一行没动 —— 判定逻辑全在 `scripts/styles.mjs`,构建期会机械核对
+// 作用域外溢 / 双重前缀 / `requires` 缺失 / 变量未绑定。
+//
+// ## 这一面接的是谁
+//
+// `src/client/toolbar.tsx`(顶栏三段)+ `src/client/branches-view.tsx`(分支面板)
+// 渲染的 DOM:
+// - `Toolbar` → `<div id="desktop-app-toolbar" class="toolbar">`(上游 `ui/toolbar/toolbar.tsx`)
+// - `ToolbarDropdown` / `ToolbarButton` → `.toolbar-dropdown` / `.toolbar-button`
+// (上游 `ui/toolbar/dropdown.tsx` / `button.tsx`)
+// - 下拉浮层 → `#foldout-container > .overlay + .foldout`(上游 `ui/toolbar/dropdown.tsx:430-443`)
+// - 分支面板 → `.branches-container > .branches-list`(上游 `ui/branches/branch-list.tsx`)
+//
+// ⚠️ **浮层定位为什么是 fixed 而不是 absolute**:`ui/toolbar/dropdown.tsx:373` 的
+// `position: enableResizingToolbarButtons() ? 'fixed' : 'absolute'`,而我们的
+// `lib/feature-flag.ts` 的 `enableResizingToolbarButtons()` 返回 **true**
+// (`:24`,与上游正式版一致)⇒ 浮层是 `position:fixed`,在**视口坐标系**里定位。
+// 这不是巧合而是必需:插件长在 DSH 右侧栏里,`absolute` 会把
+// `top: rect.bottom` 解释成「相对最近定位祖先」,面板会整体下移一个侧栏偏移量。
+// **改动 `enableResizingToolbarButtons()` 会让顶栏下拉整体错位。**
+//
+
+// mixins 只定义 @mixin、不产出 CSS,放顶层导入(与 repository-list.scss 同一手法)。
+@import './upstream/mixins';
+
+// 变量桥:顶层导入只为拿到 mixin;真正展开在下面的 `.gw-toolbar` 里。
+@import 'dsh-bridge';
+
+// `.sr-only` 的基础配方(`TooltippedContent` 溢出时会渲染可达性文本副本;
+// `BranchListItem` 的 `renderRowFocusTooltip` 用到)。
+@import 'sr-only-recipe';
+
+//
+// ==========================================================================
+// `.gw-toolbar` —— 作用域根 = `src/client/toolbar.tsx` 最外层那个 div
+// ==========================================================================
+//
+// 它同时是 `tooltip-host`(顶栏按钮的 Tooltip 由 `ui/lib/tooltip.tsx` portal 到
+// 最近的 `.tooltip-host`,也就是这个元素)⇒ `.tooltip-host` 那一面声明的变量
+// 在这里**能**被浮层继承(`portalHost: true` 的严格模式断言因此成立)。
+//
+// **作用域根 = `.gw-app-toolbar`(顶栏独占类,2026-10 定稿)。**
+//
+// 不能用共用类 `.gw-toolbar`:它也被 `src/client/{history,issues,pulls,actions}-view.tsx`
+// 用,而 `styles.ts:118` 给它写了 `padding:7px 12px` / `align-items:center` /
+// `justify-content:space-between` / `gap:8px` / `flex-wrap:wrap`。顶栏最外层挂它
+// 就多出一层带内边距的 flex 容器 —— 真 Chrome 实测 `#desktop-app-toolbar` 的
+// x/y = **12/7**(上游 **0/0**)、包装层高 **64**(上游没有这个元素)。
+// 换独占类后实测 **x=0 / y=0、620×50、display:flex;row**;包装层只保留 `flex:none` /
+// `position:relative`,与上游「没有包装层」等价(包装层高 51 = 50 + 1px 边框)。
+//
+// ⚠️ **类名与注册表的 `scope` 是一对跨文件改动,不能只改一半**:`src/client/toolbar.tsx`
+// 最外层的 `gw-app-toolbar` 与 `scripts/styles.mjs` 的 `scope` 必须同时成立 ——
+// 只改一边本面**一条规则都匹配不到**(实测过一次:tsx 还是 `gw-toolbar` 时切 scope,
+// `#desktop-app-toolbar` 退化成 `display:block` 288px、按钮 250×78 竖排)。
+//
+// ⚠️ **`position:relative` 不许一起中和**:`.tooltip-host` 的包含块语义依赖它
+// (浮层由 `ui/lib/tooltip.tsx` portal 到这个元素,绝对定位的基准就是它)。
+//
+// 声明在这里的变量**只服务于本面**;每一个都对着上游 `_variables.scss` 逐条沿用数值,
+// 颜色一律换成宿主 `--dsw-alias-*`(goal 文档 §2.2:颜色只来自宿主令牌)。
+// 这些是构建期 `findUnboundVariables()` 断言的对象 —— 少一个,引用它的那条声明
+// 会按 invalid-at-computed-value-time **整条静默失效**(§3 失败模式 10)。
+//
+.gw-app-toolbar {
+  // 容器契约:替换掉手写的 `.gw-header`(styles.ts:232 是 flex:none + padding),
+  // 顶栏在 `.gw-root` 的纵向 flex 里不得被压缩。
+  flex: none;
+  // 保持与 `.gw-header` 相同的包含块语义(浮层/绝对定位的历史基准),
+  // 同时也是本面作用域根自己那一层定位。
+  position: relative;
+
+  // 容器契约:替换掉手写的 `.gw-header`(styles.ts:232 是 flex:none + padding),
+  // 顶栏在 `.gw-root` 的纵向 flex 里不得被压缩。
+  flex: none;
+
+  //
+  // ⚠️ 这里曾有一条 `&:has(> #desktop-app-toolbar)` 的中和规则(`padding:0` /
+  // `align-items:stretch` / `justify-content:flex-start` / `flex-wrap:nowrap` / `gap:0`),
+  // 用来在**作用域根还是共用类 `.gw-toolbar`** 时抵消 `styles.ts:118` 的容器属性。
+  // 第二步落地后**已删除**:作用域根换成顶栏独占类 `.gw-app-toolbar`,那个元素**本来
+  // 就不带** `.gw-toolbar` 的 padding/align/justify/gap ⇒ 中和不再需要。
+  // 实测(真 Chrome):删掉它之后 `#desktop-app-toolbar` 仍是 **x=0 / y=0 / 420×50 /
+  // display:flex;row**,包装层 padding 0 / align stretch / nowrap / gap 0 / position relative。
+  // **不要把它加回来** —— 它是过渡期的补丁,留着只会掩盖「有人把类名改回共用类」这件事。
+  //
+
+  // Desktop 主题变量 → DSH 令牌(与 diff / repository-list 面共用的那一组)。
+  @include dsh-desktop-bridge;
+
+  // ---------- 上游 `_variables.scss:258` + `themes/_dark.scss:193-195` ----------
+  --toolbar-height: 50px; /* :258 结构数值,逐字 */
+  --toolbar-background-color: var(--dsw-alias-bg-layer-2); /* dark:193 是 gray-900 压暗 3% */
+  --toolbar-border-color: var(--dsw-alias-border-l1); /* dark:194 → box-border-color */
+  --toolbar-text-color: var(--dsw-alias-label-primary); /* dark:195 → text-color */
+
+  // ---------- 工具栏按钮(`_variables.scss:265-285` / dark:198-211)----------
+  --toolbar-button-color: var(--toolbar-text-color); /* :265 */
+  --toolbar-button-background-color: transparent; /* :266 逐字 */
+  --toolbar-button-border-color: var(--dsw-alias-border-l1); /* :267 原值 black(浅色主题)→ 边框层 */
+  --toolbar-button-secondary-color: var(--dsw-alias-label-secondary); /* :268 */
+  --toolbar-button-hover-color: var(--dsw-alias-label-primary); /* :270 原值 $white */
+  --toolbar-button-hover-background-color: var(--dsw-alias-interactive-bg-hover); /* :271 $gray-800 */
+  --toolbar-button-hover-border-color: var(--toolbar-button-border-color); /* :272 原样引用 */
+  --toolbar-button-focus-background-color: var(--dsw-alias-interactive-bg-hover); /* :274 $gray-800 */
+  --toolbar-button-active-color: var(--dsw-alias-label-primary); /* :276 → text-color */
+  --toolbar-button-active-background-color: var(--dsw-alias-bg-layer-1); /* :277 → background-color */
+  --toolbar-button-active-border-color: var(--dsw-alias-bg-layer-1); /* :278 同上 */
+  // 进度弧(`.progress`,conic-gradient)。上游这四条**本来就是中性灰**
+  // (`_variables.scss:280-283` = `$gray-800` / `$gray-700` / `$gray-700` / `$gray-200`;
+  //  `themes/_dark.scss:213-216` 原样重复同一组)。原来绑 `brand-primary`,配的注释是
+  // 「进度条要能看见,用品牌色」—— 但 `brand-primary` 在浅色下是近黑、在深色下是近白,
+  // 恰好像 `$gray-800`,所以**看不出坏**;问题是它把「中性灰」写成了「品牌色」,
+  // 宿主一旦改品牌色,进度弧就会跟着变成彩色。按上游语义逐个绑中性墨阶:
+  //   $gray-800 → label-primary(浅 #0f1115 ≈ #24292e)/ $gray-700 → label-secondary(浅 #61666b ≈ #586069)
+  //   $gray-200 → label-dimmed(浅 #e1e5ee ≈ #e1e4e8)
+  --toolbar-button-progress-color: var(--dsw-alias-label-primary); /* :280 $gray-800 */
+  --toolbar-button-focus-progress-color: var(--dsw-alias-label-secondary); /* :281 $gray-700 */
+  --toolbar-button-hover-progress-color: var(--dsw-alias-label-secondary); /* :282 $gray-700 */
+  --toolbar-dropdown-open-progress-color: var(--dsw-alias-label-dimmed); /* :283 $gray-200 */
+
+  // ---------- 同步下拉的菜单项(`_push-pull-button.scss`)----------
+  --toolbar-dropdown-text-hover-color: var(--dsw-alias-label-primary); /* :285 → box-hover-text-color */
+  --toolbar-dropdown-text-warning-color: var(--dsw-alias-state-warn-primary); /* :284 $orange-800 */
+  --box-hover-background-color: var(--dsw-alias-interactive-bg-hover); /* 上游 box-hover 家族 */
+  --box-background-color: var(--dsw-alias-bg-layer-2);
+
+  // ---------- ↑N/↓N 徽标(`_toolbar.scss:84`。)----------
+  --toolbar-badge-background-color: var(--dsw-alias-bg-layer-3); /* :309 $gray-600 */
+
+  // ---------- 浮层(`_foldout.scss`)----------
+  --foldout-z-index: 17; /* :349 结构数值,逐字(见文件头:它决定下拉相对插件内容的层级) */
+  /*
+   * `_variables.scss:479` 是 `rgba(0, 0, 0, 0.4)` —— 一条**半透明黑遮罩**。
+   * ⚠️ **2026-10 修正:原来绑的 `--dsw-alias-bg-overlay` 是错的**。
+   * 它不是遮罩,是宿主的一个**中性表面色**:
+   *   浅色 = `--dsw-static-neutral-bluish-150` = `#e9ecf2`(不透明的浅灰)、
+   *   深色 = `--dsw-static-neutral-bluish-700` = `#61666b`(不透明中灰)。
+   * 两者都是 **6 位十六进制 = 完全不透明**,于是浮层遮罩不是「压暗」而是**整块盖住**
+   * 宿主窗口(浅色下用户看到的就是一整片灰,即「repo list 背景是灰色 + 溢出挡住宿主」)。
+   * 宿主自己的遮罩令牌是 `--dsw-alias-bg-mask-{1,2,3}`
+   * (声明处:`@deepseek-ai/dsh-client-ui-theme/lib/client.js:1148` 的 `body{…}` / `body[data-ds-dark-theme]{…}`;
+   *  浅 `#0000003d` / 深 `#00000080`),宿主自己的 `Modal.module.css:28` 与
+   * `ImageLightbox.module.css:14` 用的就是 `mask-1` —— 语义完全对上。
+   * 数值差异(宿主 0.24/0.50 vs 上游 0.40)见交付报告,不在这里私自造一个 rgba。
+   */
+  --overlay-background-color: var(--dsw-alias-bg-mask-1); /* :479 rgba(0,0,0,.4) → 宿主的遮罩令牌 */
+  /*
+   * 顶栏自身的**块尺寸**:`_toolbar.scss:4-5` 是
+   * `#desktop-app-toolbar { height: var(--toolbar-height); border-bottom: 1px solid … }`,
+   * 而 `.gw-app-toolbar` 里**只有**这一个子元素(toolbar.tsx 的注释明确要求齿轮/绿点也放进去)。
+   * 所以它的 border-box 高 = 50 + 1 = 51px,是**结构数值**不是量出来的魔数。
+   * 用途:浮层容器的 `top` —— 见下面 `#foldout-container` 的那一段。
+   */
+  --gw-toolbar-block-size: calc(var(--toolbar-height) + 1px);
+
+  // ---------- 分支面板(`_branches.scss` + `_tab-bar.scss`;PR 那半未接线但规则在闭包里)----------
+  --tab-bar-count-color: var(--dsw-alias-label-primary); /* :318 */
+  --tab-bar-count-background-color: var(--dsw-alias-bg-layer-3); /* :319 $gray-200 */
+  --pr-open-icon-color: var(--dsw-alias-state-success-primary); /* :525 $green-500 */
+  --pr-draft-icon-color: var(--dsw-alias-label-tertiary); /* :526 $gray-500 */
+
+  // ---------- 列表/过滤列表要的(`_list.scss` / `_filter-list.scss`)----------
+  // `.selected` 上游 `_variables.scss:139` = 字面值 `#ebeef1`(哑光蓝灰);
+  // 宿主 `--dsw-alias-button-ghost-active-fill` 浅色 = `#ebeef2`(几乎同值),深色 = `#43454a`。
+  // `.selected-active` 上游 `:170` = `$blue`;⚠️ 宿主无实心蓝底令牌,改取更强一档中性交互底
+  // (冲突记账见交付报告)。
+  --font-weight-light: 300; /* 结构数值 */
+  --list-item-hover-background-color: var(--dsw-alias-interactive-bg-hover);
+  --box-selected-background-color: var(--dsw-alias-button-ghost-active-fill);
+  --box-selected-text-color: var(--dsw-alias-label-primary);
+  --box-selected-active-background-color: var(--dsw-alias-interactive-bg-active);
+  --box-selected-active-text-color: var(--dsw-alias-label-primary);
+  --drag-overlay-z-index: 15; /* `_variables.scss:351` 数值;不绑就没有 z-index(§3 失败模式 10) */
+
+  // ---------- 动画(`_toolbar.scss` 的进度条 transition)----------
+  --easing-ease-out-quint: cubic-bezier(0.23, 1, 0.32, 1); /* :514 逐字 */
+
+  //
+  // `.sr-only` 的**基础配方**:上游写在 `ui/_app.scss:115-123`(整个应用外壳,不 import)。
+  // `BranchListItem` 的 `renderRowFocusTooltip` 与 `TooltippedContent` 溢出时都会渲染
+  // `sr-only` 副本 —— 缺配方它们会变成**可见文本**,把顶栏撑开(这条 bug 在 diff 面
+  // 已经咬过一次,goal §7)。`_sr-only-recipe.scss` 只有 mixin、不产出 CSS,所以必须在
+  // **作用域内**就地展开,不能只顶层 import。
+  //
+  .sr-only {
+    @include sr-only-recipe;
+  }
+
+  //
+  // ==========================================================================
+  // 浮层的**容纳**(2026-10 修:「样式侵入宿主 + 溢出挡住宿主内容」)
+  // ==========================================================================
+  //
+  // ## 上游是怎么定位的(逐行核对过,不是猜的)
+  //
+  // `ui/toolbar/dropdown.tsx` 把浮层**就地**渲染成
+  // `#foldout-container > .overlay + .foldout`,**没有 portal**;定位是**行内 style**:
+  //
+  //   `:366-379` 容器 `position:fixed; top:rect.bottom; left:0; width:100%;
+  //              height:calc(100% - rect.bottom px)`
+  //   `:381-407` 面板 `position:absolute; marginLeft:rect.left; top:0; height:100%`
+  //
+  // `position:fixed` + `width:100%` 的语义是「**整个视口宽**,从工具栏底边到视口底边」。
+  // 在 Desktop 里这是对的:`rect.bottom` / `rect.left` 就是**窗口**坐标,而 Desktop 的下拉
+  // 本来就是「整个 App 的一条通栏 + 一层盖住整个 App 的遮罩」。
+  // **在 DSH 里插件只占右侧栏的一格**,同一组坐标就变成「盖住宿主窗口」:
+  // 真 Chrome 实测(1320×760 视口、插件根 824..1244)——
+  //   `#foldout-container` / `.overlay` 量到 **x:0 w:1320 h:623**(= 整个视口),
+  //   而插件根只有 420 宽。这就是用户看到的「溢出挡住了宿主的内容」。
+  //
+  // ## 为什么不能沿用 Desktop(goal §0 要求的偏离理由)
+  //
+  // Desktop 的浮层是**整个 App 的**面板:它的坐标准确、遮罩盖住 App 是设计意图;
+  // 我们的插件是宿主里的**一格**,宿主窗口不是我们的画布。所以「视口坐标」这一条
+  // 在侧栏里**没有对应物**,必须把浮层重新锚回**插件自己的区域**。
+  //
+  // ## 怎么锚(两层,缺一不可)
+  //
+  // 1. **包含块**:`src/client/styles.ts` 的 `.gw-root` 上有 `contain:layout paint`
+  //    (与已有的 `container-type:inline-size` 同族;**注意 `container-type` 本身
+  //    **不会**把 `position:fixed` 的后代改成相对它定位** —— 真 Chrome 实测:
+  //    只有 `contain:layout|paint` / `transform` / `filter` 才会。这条如果记错,
+  //    下面那两行就会算出错的盒子)。
+  //    ⇒ `#foldout-container` 的 `100%` / `0` 从此是**插件根**的盒子,而且**被裁剪**。
+  // 2. **覆盖行内坐标**:行内的 `top` / `height` 是视口坐标,在侧栏里算出来的盒子
+  //    会整体下移一个「插件根顶边」的距离。这里用 `!important` 覆盖**行内 style**
+  //    (样式表里的 `!important` 优先于行内非 `!important`,这是唯一能不改上游 TSX
+  //    就换掉它的办法;`foldoutStyle` / `foldoutStyleOverrides` 两个 prop 只覆盖
+  //    `.foldout`,碰不到容器)。
+  //    `top` = 顶栏块尺寸(见上),`height` = 剩余高度 ⇒ 容器 = 工具栏底边到插件根底边。
+  // 3. **面板的水平偏移**由 `toolbar.tsx` 的 `foldoutStyleOverrides.marginLeft` 给
+  //    (行内是 `rect.left`,同样是视口坐标,在插件坐标里要减去插件根左边界)。
+  //
+  #foldout-container {
+    top: var(--gw-toolbar-block-size) !important;
+    left: 0 !important;
+    width: 100% !important;
+    height: calc(100% - var(--gw-toolbar-block-size)) !important;
+    // 兜底:即使将来有人把这个盒子算错,浮层也只能在**这个盒子内**画出来,
+    // 不可能再覆盖宿主(包含块 + 裁剪是两条独立的保险)。
+    overflow: hidden;
+
+    /*
+     * ⚠️ **这是一处「不得不偏离 Desktop」的地方,理由必须写在旁边**(goal §0)。
+     *
+     * 上游给面板的是行内 `marginLeft: rect.left`(`dropdown.tsx:401`)—— `rect` 是触发按钮的
+     * **视口**矩形。在 Desktop 里这正确:容器(更准确地说:固定定位的包含块)的左边界就是
+     * **窗口**左边界,所以「面板左边 = 按钮左边」。
+     *
+     * 我们这里没有「窗口左边界 = 我们的左边界」这件事:`.gw-root` 上有 `contain:layout paint`,
+     * 于是 `#foldout-container` 的包含块是**插件根**,而 `marginLeft` 仍是视口值 ⇒
+     * 面板会被放到「插件根左边界 + 按钮的视口 x」= 多出整整一个 `gwRoot.x`
+     * (真 Chrome 实测:插件根 x=480 时,仓库段的面板 x 就是 960)。CSS 里没有办法把行内那个
+     * 值减掉插件根左边界(它是运行期量出来的)。
+     *
+     * 所以行内 `marginLeft` 一律由下面那条 `margin-left: 0 !important` 清零,面板的水平位置
+     * 改由 `toolbar.tsx` 经 `foldoutStyleOverrides.left` 给**插件根相对**偏移
+     * (三段都给;值分别是 0 / 仓库段宽 / 量出来的同步段偏移)。完整机制、实测表与判据见
+     * 下面 `#foldout-container > .foldout` 那一段的注释。
+     */
+
+  }
+
+  /*
+   * ==========================================================================
+   * 三段面板的水平位置:**唯一**的真源 = `toolbar.tsx` 给的插件根相对偏移
+   * ==========================================================================
+   *
+   * ## 上一版错在哪(用户第二次报「三个下拉框都没对齐」的根因)
+   *
+   * 这一面原来在这里(嵌在 `#foldout-container {}` 块内)写着:
+   *
+   *   `&:not(.multi-option-style) #foldout-container > .foldout { margin-left: 0 !important; }`
+   *
+   * `&` 展开的是**整个复合选择器** `.gw-app-toolbar #foldout-container`,所以产物里的选择器
+   * 逐字是(`lib/client.js` 可查):
+   *
+   *   `.gw-app-toolbar #foldout-container:not(.multi-option-style) #foldout-container > .foldout`
+   *
+   * 它要求**一个 `#foldout-container` 里面再套一个 `#foldout-container`** —— `dropdown.tsx:430`
+   * 只渲染一层 ⇒ **这条 `!important` 一次都没生效过**,而它正是唯一负责把上游那个
+   * **视口坐标**的行内 `marginLeft: rect.left`(`dropdown.tsx:401`)清零的东西。
+   *
+   * ## 后果(真 Chrome 实测,宿主宽 755 / 插件根在视口 (480,63),与真实宿主同构)
+   *
+   * | 段 | 段.x | 面板.x | 面板.x − 段.x |
+   * |---|---|---|---|
+   * | 当前仓库 | 480 | 960 | **+480** |
+   * | 当前分支 | 730 | 1200 | **+470**(面板只剩 10% 可见) |
+   * | 抓取 origin | 847 | 847 | 0(它走 `syncFoldoutOverride()` 的 JS 坐标) |
+   *
+   * 而**插件根在 (0,0)** 的那一档里三个差全是 **0**:两个坐标系正好相差一个 `gwRoot.x`
+   * (`.gw-root` 上有 `contain:layout paint`,面板的包含块就是它,而 `marginLeft` 是视口值)
+   * ⇒ 这条缺陷在原点 fixture 里**数学上不可见**。这就是「探针一直绿、用户屏幕一直坏」的机制。
+   *
+   * ## 现在这条:清零行内视口坐标,**位置一律由 `.foldout` 的行内 `left` 给**
+   *
+   * 三段的调用点(`toolbar.tsx`)现在都给 `foldoutStyleOverrides.left`,值一律是
+   * 「**触发按钮左边缘相对插件根左边缘**的偏移」:
+   *   · 仓库段 = `0`(它就是插件根的第一个段,结构事实);
+   *   · 分支段 = 仓库段的外框宽(`panelWidth`,与 `.sidebar-section` 的行内 width 同源);
+   *   · 同步段 = `syncFoldoutOverride()` 量出来的 `rect.left - toolbarRect.left`。
+   *
+   * 为什么是 `left` 而不是 `margin-left`:行内 `margin-left` 是上游用来塞**视口坐标**的,
+   * 必须被这条 `!important` 压掉;把测量值也写进 `margin-left` 会被这条规则**静默**清零
+   * (上一版注释里记着的那次事故)。分开两个属性之后,「被压掉的」与「生效的」互不重叠。
+   *
+   * ⚠️ 这条**不再按 `multi-option-style` 分档**:三段现在都靠 `left`,所以它对三段一视同仁 ——
+   * 少一个条件就少一类「某一段被静默清零」的可能。
+   *
+   * 兜底:即使 `left` 没给(还没量到 / 将来有人新加一段忘了给),面板也会落在**插件根左边缘**,
+   * 永远不会被推出插件区域。判据见 `docs/probes/menu-anchor-probe.mjs` 的「三段面板」那一节
+   * (**两档插件根位置**都要满足 `|面板.x − 段.x| ≤ 1.5px`)。
+   */
+  #foldout-container > .foldout {
+    margin-left: 0 !important;
+  }
+
+
+}
+
+
+//
+// ==========================================================================
+// 上游 partial —— **顶层** import(顺序 = 输出顺序)
+// ==========================================================================
+//
+// 只 import **本面真的会渲染**的那些:`ui/toolbar/**` 里 `worktree-dropdown`
+// (`../worktrees/**` 未镜像)与 `revert-progress`(要 rebase 进度流)不在其中;
+// 分支面板今天只接 `branch-list.tsx` 那一半(见 `branches-view.tsx` 的文件头),
+// 所以 `ui/tab-bar` 也先不进 —— 等 `BranchesContainer` 接上时一并加。
+//
+@import './upstream/ui/toolbar/toolbar';
+@import './upstream/ui/toolbar/button';
+@import './upstream/ui/toolbar/dropdown';
+@import './upstream/ui/toolbar/push-pull-button';
+/*
+ * 上游 `ui/_resizable.scss` —— 2026-10-06 换装时**新加**的顶层 import。
+ *
+ * 为什么现在才需要:同步段从我们手写的 `renderSyncSegment()` 换成了上游
+ * `ui/toolbar/push-pull-button.tsx` 本体,而它恒把按钮包进上游 `Resizable`
+ * (`push-pull-button.tsx:404-433`;`enableResizingToolbarButtons()` 在镜像里恒 true)。
+ * 那个组件的 DOM 是 `.resizable-component` + `.resize-handle`
+ * (`ui/resizable/resizable.tsx:194-204`),而它俩的样式**只**在上游这一份 partial 里:
+ * 不 import 的话 `.resize-handle` 会是一个**没样式的裸 `<button>`**
+ * (UA 默认的灰底圆角方块)贴在同步段右侧 —— 那就是一个可见的坏件。
+ *
+ * 与 `split.scss:63` 的同一行 import 是**两个作用域各留一份**(构建日志里那条
+ * 「跨作用域的逐字相同规则不是冗余,各面必须各留一份」说的就是这类)。
+ */
+@import './upstream/ui/resizable';
+@import './upstream/ui/foldout';
+@import './upstream/ui/button';
+@import './upstream/ui/octicons';
+@import './upstream/ui/popover';
+@import './upstream/ui/text-box';
+@import './upstream/ui/filter-list';
+@import './upstream/ui/list';
+@import './upstream/ui/list-item-insertion-overlay';
+@import './upstream/ui/branches';
+
+//
+// ==========================================================================
+// 同步段:不要吃掉全部剩余宽(**必须**在 `@import` 之后,见下面第一条注释)
+// ==========================================================================
+//
+.gw-app-toolbar {
+  /*
+   * ---------- 同步段:不要吃掉全部剩余宽(2026-10,用户当面要求)----------
+   *
+   * ⚠️ **这一块必须写在文件末尾(所有 `@import` 之后),这不是风格问题**:
+   * 它的特异度与上游 `_dropdown.scss:9-12` 的
+   * `.toolbar-dropdown.resizable{flex-grow:1}` **完全相同**(作用域前缀之后都是 0,3,0),
+   * 所以胜负**只由源码顺序决定** —— 谁在后面谁赢。
+   * ⚠️ 同一条约束对**形状 B(裸 `.toolbar-button`)** 不成立:那边对手带 ID,顺序救不了,
+   * 见本块末尾「两种形状」那一段。
+   * 第一版把它写在 `.gw-app-toolbar{…}` 主块里(在 `@import` **之前**),
+   * 产物里它排在 `.resizable` 前面 ⇒ `flex-grow:1` 仍然生效,
+   * 实测 `getComputedStyle(dropdown).flex === '1 0 auto'`、留白仍为 **0px**,
+   * 而规则本身"匹配上了"(`el.matches()` 为 true)—— 一个只看选择器匹配
+   * 完全看不出来的静默失效。判据见 `docs/probes/menu-anchor-probe.mjs`。
+   *
+ * 用户原话:「这些按钮应该放一个格子里,在【推送到 origin | v】按钮**右边留空白**,
+ * 然后才是这些按钮」。
+ *
+ * ## 为什么默认没有那段空白
+ *
+ * 上游 `lib/feature-flag.ts:22` 的 `enableResizingToolbarButtons()` 返回 `true`
+ * ⇒ `ui/toolbar/dropdown.tsx:460-467` 给 `.toolbar-dropdown` 加 `resizable` 类
+ * ⇒ `_dropdown.scss:12-15` 的 `&.resizable{flex-grow:1}` 生效
+ * ⇒ **同步段吃掉顶栏里全部剩余宽**,于是它右边缘直接顶到右侧动作组。
+ * 实测(宿主宽 900):同步段右边缘 **788**、动作组左边缘 **788** ⇒ 留白 = **0px**;
+ * 而顶栏宽 900,剩下的 112px 全被同步段吃掉了。
+ *
+ * 在 Desktop 里 grow 是对的(它是窗口里唯一会被拉伸的东西);我们有右侧动作组,
+ * 那段空间应当留成空白。
+ *
+ * ## 这两条为什么是必需的(少一条都不行)
+ *
+ * ```text
+ * flex-grow: 0                       // 段容器不再 grow(**不改** flex-shrink:宿主比内容窄时必须能收,
+ *                                    // 否则顶栏横向溢出 —— 见本块末尾形状 B 那一段)
+ * > .toolbar-button { width: max-content }
+ *                                    // ⚠️ 还必须覆盖上游 `_dropdown.scss:14-17` 的
+ *                                    // `.toolbar-dropdown > .toolbar-button{width:100%}` ——
+ *                                    // 不覆盖的话按钮仍按 100% 撑开,段容器跟着被撑满
+ * ```
+ *
+ * ⚠️ **上面这段只写了形状 A**(`push` / `pull` / `force-push` / `publish-branch`)。
+ * 形状 B(`busy` / `publish-repository` / `detached` / **`fetch`**)的段根**就是**
+ * `.toolbar-button`,它的对手规则**带 ID**,上面两条都不适用 —— 见本块末尾
+ * 「同步段(**两种形状**)」那一段(2026-10 补)。
+ *
+ * 宽度交回**内容**(文字 + 图标 + ↑↓ 徽标),没有新的尺寸字面量。
+ * 只作用于 `.gw-sync-segment`(同步段),仓库段 / 分支段的宽度契约不受影响。
+ *
+ * ⚠️ **这是有意偏离上游的一处**,理由如上;判据在
+ * `docs/probes/menu-anchor-probe.mjs` 的「同步段右边缘 → 动作组左边缘的留白」
+ * 与「顶栏 scrollWidth == clientWidth」(不因不换行而溢出)。
+ */
+/*
+ * ## 2026-10 **第二轮实测更正**:上一版为什么「看起来对、实际是 0px」
+ *
+ * 上一版把留白交给**两条自动外边距**:同步段 `margin-right:auto` + 动作组
+ * `margin-left:auto`。判据「自动外边距吸收主轴剩余空间」本身没错,但它有一个前提:
+ * **必须有剩余空间**。自动外边距分配的是自由空间的**正数部分**;弹性行一旦放不下,
+ * 自由空间就是 0,两条自动外边距**同时解析成 0px** —— 而且规则全都「匹配上了」,
+ * 只看选择器匹配完全看不出来(`docs/probes/toolbar-layout-probe.mjs` 会把每条
+ * 匹配规则连同计算值一起打出来)。
+ *
+ * 而这个顶栏在宿主宽 < ~795px 时**必然放不下**:仓库段(`.sidebar-section`)被钉在
+ * 左栏宽上、且上游给它 `flex-shrink:0`,它一个就吃掉 370px;分支段 + 同步段 +
+ * 动作组的内容宽还要 ~424px。真 Chrome 实测(2026-10,fixture 同
+ * `toolbar-width-probe.mjs`;每个直接子元素的 `flex-grow` 与**所有匹配到它的
+ * `flex-grow` 声明**都逐条量过,结论:**没有任何一条 `flex-grow:1` 在赢** ——
+ * 仓库段里的 flex-grow 只在内层按钮上,两个 `.toolbar-dropdown` 赢的都是本文件的
+ * `flex-grow:0`):
+ *
+ * | 宿主宽 | 仓库段 | 分支段 | 同步段 | 动作组 | 同步段右缘 → 组左缘 |
+ * |---|---|---|---|---|---|
+ * | 520 | 370 | 14.22 | 23.78(其按钮被压成 **0**) | 112 | **0** |
+ * | 620 | 370 | 51.67 | 86.33 | 112 | **0** |
+ * | 900 | 370 | 117 | 195.52 | 112 | 70.33(自由空间被**三条**自动外边距**均分**) |
+ *
+ * ## 现在这条:留白是**真实盒子**,不是剩余空间的副产物
+ *
+ *   · 同步段右侧留白写成**间距令牌** `var(--spacing)`(10px,`_dsh-bridge.scss:91`)
+ *     —— 它是布局的一部分,**即使自由空间为 0 也存在**;
+ *   · 动作组仍然 `margin-left:auto`(规则在下面 `.gw-toolbar-actions` 那一段),
+ *     于是**全部**剩余空间都落进这**一个**空隙里(不再被均分);
+ *   · 分支段:`margin-right:auto` **撤掉**(它原来只是与同步段共用选择器列表的连带
+ *     后果)。上一版三条自动外边距均分自由空间,1/3 落在**分支段与同步段之间**
+ *     —— 一个没人要的空隙;撤掉之后两个段相邻(与 Desktop 一致),
+ *     自由空间**整体**移到用户点名的那一处。
+ *
+ * 修后实测:520 / 620 的空隙 = **10px**;900 的空隙 = **105.48px**
+ * (= 10 固定留白 + 95.48 全部剩余空间)。
+ *
+ * ⚠️ 代价一条:固定留白要占 10px,于是顶栏开始横向溢出的宿主宽从 ~482px 挪到
+ * ~492px(仓库段 370 + 动作组 112 + 留白 10)。「留白」在放不下的时候只能从内容里
+ * 让出来 —— 这是那条要求本身的价钱,不是可以绕开的。
+ */
+
+/* 分支段:只要「不 grow」;留白**不**由它分担(见上)。 */
+#desktop-app-toolbar > .toolbar-dropdown:nth-child(2) {
+  /*
+   * 上游 `.resizable{flex-grow:1}` 实测(宿主宽 900、未加本条时)让分支段
+   * `flex=1 1 auto`、宽 **342.48**、右边缘 **592.48**,把自由空间吃光。
+   * `flex-grow:0` 之后它退到**内容固有宽**(实测 58.375px —— 上游 `.toolbar-button`
+   * 本身就是「文字 + 图标」的宽度,`_toolbar.scss:64-70` 的 `width:230px` 只写给
+   * `.push-pull-button` / `.branch-toolbar-button` 那两个类,而我们的分支段没有那两个类)。
+   * 选择器用 `:nth-child(2)` 是因为**没有办法给它加类名**:它的 `className` 是
+   * `toolbar.tsx` 里写死的 `Dropdown` 调用;`#desktop-app-toolbar` 的子元素顺序在
+   * `toolbar.tsx` 里是固定的(仓库段 / 分支段 / 同步段 / 动作组)。
+   *
+   * `flex-grow: 0` = **不伸**,但**允许收缩**(`flex-shrink` 保持默认 1):窄侧栏下
+   * (`nowrap`)总宽可能放不下,那时该收的是这个段与同步段,而不是让顶栏横向溢出。
+   * 收缩的代价是按钮文字走 `ellipsis`(上游 `.toolbar-button` 本来就有
+   * `overflow:hidden; text-overflow:ellipsis`),这是可接受的降级。
+   */
+  flex-grow: 0;
+  min-width: 0;
+}
+
+/*
+ * ==========================================================================
+ * 同步段(留白的**机制**说明;选择器见文件末尾那一段)
+ * ==========================================================================
+ *
+ * ⚠️ **2026-10-06 换装说明(先读这一句再看下面的历史表)**:本节下面的两张表
+ * 描述的是**换装前**手写渲染器的两种形状(`.toolbar-dropdown.gw-sync-segment` /
+ * `.toolbar-button.gw-sync-segment`)。换装后段根统一成 `.resizable-component`,
+ * 选择器与宽度契约都搬到**文件末尾**那一段了(那里写明「用户裁决:采纳上游固定宽」)。
+ * 保留这些历史数字,是因为它们正是「留白必须是真实盒子」这条结论的实证来源。
+ *
+ * ## ⚠️ 2026-10 修正:上一版只覆盖了**一种**形状,所以用户报的那半**根本没修到**
+ *
+ * `toolbar.tsx` 的 `renderSyncSegment()`(换装前)有两个渲染形状,而**只有形状 A** 带
+ * `gw-sync-segment` 类(那个类由调用点传,不在镜像里):
+ *
+ * | | 段根元素 | 上游的竞争规则(都带 `#desktop-app-toolbar`) | 上一版 |
+ * |---|---|---|---|
+ * | **A** MultiOption 下拉 | `.toolbar-dropdown.push-pull-button.gw-sync-segment` | `_dropdown.scss:9-12` `.toolbar-dropdown.resizable{flex-grow:1}`(**无 ID**) | 有覆盖 ✅ |
+ * | **B** 裸 `ToolbarButton` | `.toolbar-button.push-pull-button`(**没有** `gw-sync-segment`) | `_toolbar.scss:37-41` `.toolbar-button.resizable{flex-grow:1}` + `:43-49` `.toolbar-button.push-pull-button{width:230px;&.resizable{width:100%}}`(**含 ID**) | 一条都没匹配上 ❌ |
+ *
+ * 形状 B 就是 `busy` / `publish-repository` / `detached` / **`fetch`** 四支,而
+ * 「抓取 origin + 上次抓取 2026-10-06 08:14」(**用户截图里的那一档**)正是 `fetch`。
+ * 真 Chrome 实测(宿主宽 756 / 侧栏 250 / 插件根在视口 (480,63)):
+ *
+ * | 形状 | 同步段宽 | 它自己的 max-content | 差 | 同步段右缘 → 动作组左缘 |
+ * |---|---|---|---|---|
+ * | A(push) | 196.52 | 196.52 | **0** | **105.82px** |
+ * | B(fetch) | **363.14** | 199.38 | **+163.76**(被 `width:100%` + `flex-grow:1` 拉长) | **0px** |
+ *
+ * ⇒ 两形状现在都带身份类(`toolbar.tsx` 的 `GW_SYNC_SEGMENT_CLASS`),下面两条规则
+ * 各管一个形状。**判据**(两形状 × 5 档宽 + 三段面板)在
+ * `docs/probes/toolbar-gap-probe.mjs`。
+ *
+ * ## 为什么保留「固定留白 `margin-right: var(--spacing)`」+「`margin-left:auto`」这一对
+ *
+ * 上一版把留白交给 `margin-right:auto` + `margin-left:auto` 两条自动外边距 ⇒ 自由空间为
+ * 0 时两条**同时解析成 0px**,留白消失(那个事故记在上面)。所以:
+ *   · `margin-right` 是**地板**:自由空间为 0 时它仍然存在(用户第二次说的
+ *     「留白我看了是没有」就是地板被撤掉的那一版);
+ *   · `margin-left:auto`(在下面 `.gw-toolbar-actions` 那段)吸收**全部**剩余空间,
+ *     于是「软空白」= 地板 + 剩余空间 —— 它**跟着宿主宽一起长**。
+ * 判据不是「空隙 > 0」(固定值也能过),而是**斜率**:两个都放得下的相邻宽度之间
+ * `Δ空隙 == Δ宿主宽`(`toolbar-gap-probe.mjs` 的判据 3)——固定留白给出 Δ=0,判死。
+ *
+ * ⚠️ **这一段必须写在文件末尾(所有 `@import` 之后),这不是风格问题**:
+ * 形状 A 那条覆盖与上游 `_dropdown.scss:9-12` 的 `.toolbar-dropdown.resizable`
+ * **特异性完全相同**(作用域前缀之后都是 0,3,0),胜负**只由源码顺序决定** ——
+ * 谁在后面谁赢。第一版把它写在 `.gw-app-toolbar{…}` 主块里(在 `@import` **之前**),
+ * 产物里它排在 `.resizable` 前面 ⇒ `flex-grow:1` 仍然生效,
+ * 实测 `getComputedStyle(dropdown).flex === '1 0 auto'`、留白仍为 **0px**,
+ * 而规则本身「匹配上了」(`el.matches()` 为 true)—— 一个只看选择器匹配
+ * 完全看不出来的静默失效。
+ *
+ * ## 两形状的 `width` 都必须交回**内容**
+ *
+ * ```text
+ * A: > .toolbar-button { width: max-content }   // 覆盖 `_dropdown.scss:14-17` 的 `.toolbar-dropdown > .toolbar-button{width:100%}`
+ * B:   width: max-content !important            // 覆盖 `_toolbar.scss:43-49` 的 width:100%(含 ID)
+ * ```
+ *
+ * ⚠️ 形状 B 的 `!important` 是必需的:对手是
+ * `#desktop-app-toolbar .toolbar-button.push-pull-button.resizable`(特异度 **(1,3,0)**,
+ * 一条 ID),而作用域前缀最多只能把我们抬到 (0,N,0) —— 类再多也压不过一个 ID。
+ * 这里**写清楚另一条路**(便于后人裁决,不必重新发现):
+ * 在选择器里**复用我们自己 DOM 上已有的那个 ID**(`#desktop-app-toolbar` 由
+ * `toolbar.tsx` 的 `<ToolbarEl id="desktop-app-toolbar">` 渲染)也能赢,
+ * 且不必用 `!important`;本条**没有**选它,是为了与形状 A 及本仓既有写法保持一致
+ * (同样的对手、同样的处理),而不是因为「没有别的办法」。
+ * ⚠️ 上一版这段注释写的是 `!important` 是**唯一**的手段 —— 那句话是**错的**,已更正。
+ *
+ * ## 为什么把约束挂在**段身份类**上(而不是内层按钮的结构上)
+ *
+ * 另一条泳道正在把同步段的**内容**从我们手写的形状换成上游
+ * `ui/toolbar/push-pull-button*.tsx` 的原件。那会改变**段根是 `.toolbar-dropdown`
+ * 还是 `.toolbar-button`**(上游同一个组件两种都渲染),但不会改变「哪一段是同步段」。
+ * 所以约束挂在 `gw-sync-segment`(段身份)上、并**同时给两个形状各写一条**:
+ * 内容换成哪一种形状都仍然受约束,不需要新增选择器,也不会被那次替换静默撤销。
+ * **不要**把这两条改写成只针对内层按钮结构(例如 `> .toolbar-button`)——
+ * 那正是上一版漏掉形状 B 的方式。
+ *
+ * ## 右侧那条竖线的来源(形状 B 同样命中)
+ *
+ * 上游 `_button.scss:100` 给 `.toolbar-button > button` 一条
+ * `border-right: 1px solid var(--toolbar-button-border-color)`。用户原话:
+ * 「你把【抓取 origin】的宽度边框,是不应该的」—— 形状 B 的段根**就是**
+ * `.toolbar-button`,所以那条线在形状 B 上来自它自己的 `> button`,
+ * 两形状各需要一条覆盖(见下)。镜像**不动**(`verify-mirror.mjs` 盯字节一致)。
+ */
+
+/*
+ * ==========================================================================
+ * 同步段(**换装后**:段根 = 上游 `Resizable` 的 `.resizable-component`)
+ * ==========================================================================
+ *
+ * ## 2026-10-06 用户裁决(要点):**采纳上游「固定 clamp(230,200,350) + 可拖拽」**
+ *
+ * 这条裁决**取代**了本仓前一版的「宽度受内容限制(`width: max-content !important`)」。
+ * 所以下面**不再**有 `width` 覆盖 —— 宽度现在是**行内**的
+ * `width: clamp(value, 200, 350)`(`resizable.tsx:194-204` 写的),真源是
+ * `src/client/push-pull-button-width.ts` 那个持久化载体(默认 230,上游
+ * `app-store.ts:484`)。判据也随之换成「实测宽 == 载体里的值」 —— 见
+ * `docs/probes/toolbar-gap-probe.mjs` 的判据 2:改前那条断言的是「== max-content」,
+ * 现在断言的是载体值,注释里写明这是**用户裁决**而不是放宽。
+ *
+ * ## 段根为什么变成 `.resizable-component`、身份类为什么挂在**包装层**
+ *
+ * 上游 `ui/toolbar/push-pull-button.tsx:404-433` 恒把按钮包进 `<Resizable>`
+ * (`enableResizingToolbarButtons()` 在镜像里恒 true)⇒ 段根是 `.resizable-component`。
+ * 而 `PushPullButton` 的 17 个 prop 里**没有** `className`(`:37-111`),
+ * `defaultButtonProps()` / `defaultDropdownProps()` 把类名写死(`:246-268`)
+ * ⇒ **没有**注入口给它加类。要把身份挂上去只剩两条路:改镜像(禁止),或挂到
+ * **我们自己的那层包装层**上 —— 后者可行,因为 `display:contents` 不改 DOM 父子关系,
+ * CSS 的 `>` 仍然成立:
+ *
+ * ```text
+ * div.gw-sync-segment            ← display:contents(零布局),身份类在这里
+ *   └─ div.resizable-component   ← 段根:行内 width = clamp(230,200,350)
+ *        └─ .toolbar-dropdown / .toolbar-button.push-pull-button
+ * ```
+ *
+ * 好处是**阴性对照还能用**:`toolbar-gap-probe.mjs --asis` 仍然是「把这个类从 DOM 上
+ * 摘掉」(与上一版同一个机制),不需要 `:has()` 那种没法在 DOM 上撤销的选择器。
+ *
+ * ## 右侧那条竖线(用户点名过)仍然要消失
+ *
+ * 上游 `_button.scss:100` 给 `.toolbar-button > button` 一条
+ * `border-right: 1px solid var(--toolbar-button-border-color)`。换装后那条线在
+ * **两个** `<button>` 上(下拉形态的主按钮 + chevron;裸按钮形态一个)
+ * ⇒ 覆盖写在这条后代选择器上,一次覆盖全部。镜像不动(`verify-mirror` 盯字节一致)。
+ *
+ * ## 留白与收缩(两条都是**实测**逼出来的)
+ *
+ * · `margin-right: var(--spacing)` 是**地板**:`.gw-toolbar-actions` 的
+ *   `margin-left:auto` 只吸收**正数**自由空间,自由空间为 0 时它解析成 0px ——
+ *   上一版就是因此出现「空隙 0px」(用户第二次报的那个)。
+ * · `flex-shrink: 1` + `min-width: 0 !important` **必须**覆盖上游那份配方:
+ *   `upstream/ui/_resizable.scss:4` 给 `.resizable-component` 一条 `flex-shrink: 0`,
+ *   而 `Resizable` 又写了行内 `min-width: 200px`(`resizable.tsx:196-200`)。
+ *   两条一起会让同步段在窄宿主下**不肯收** ⇒ 顶栏横向溢出
+ *   (`scrollWidth > clientWidth`,判据 6)。换装前那一版的注释里记着同一件事:
+ *   「宿主比内容还窄时(实测 < ~663px)必须允许收」。行内 `min-width` 只能被
+ *   `!important` 压过,所以要带 `!important`;`flex-shrink` 是样式表对样式表,不需要。
+ */
+.gw-sync-segment > .resizable-component {
+  flex-shrink: 1;
+  min-width: 0 !important;
+  margin-right: var(--spacing);
+
+  /* 竖线:覆盖上游 `_button.scss:100`(见上「右侧那条竖线」)。 */
+  .toolbar-button > button {
+    border-right: none;
+  }
+}
+
+/*
+ * ==========================================================================
+ * 顶栏右侧动作组(`登录状态(绿点) / ⚙ 设置 / ⋮ 更多`)
+ * ==========================================================================
+ *
+ * ## 为什么这条规则从 `toolbar.tsx` 的**行内 style 搬到这里**
+ *
+ * 它原来是 `toolbar.tsx` 的 `GW_TOOLBAR_ACTIONS_STYLE`(`display:flex` /
+ * `align-items:center` / `gap` / `margin-left:auto` / `flex:none`)。搬家的理由不是
+ * 风格,是**正确性**:`margin-left:auto` 与上面同步段的 `margin-right` 是一对
+ * **必须一起理解**的东西(见上面「留白是真实盒子」那一段)。拆在 tsx 与 scss 两个
+ * 文件里,下一次改的人只会看到一半 —— 上一版的 0px 就是这么来的。顺带把
+ * 「样式表是唯一真源」这条本仓契约补齐:行内样式除 `!important` 之外无法被覆盖。
+ *
+ * ⚠️ `.gw-toolbar-actions` 这个类名**已经**在 `toolbar.tsx` 里(它同时是动作组的
+ * 真实盒子),本块不新造 DOM 标记。
+ */
+.gw-toolbar-actions {
+  display: flex;
+  align-items: center;
+  /*
+   * 成员之间的间距:`--spacing-third`(= `calc(10px / 3)` ≈ 3.33px,
+   * `_dsh-bridge.scss:112`,沿用上游 `_variables.scss:245`)。
+   *
+   * 为什么是它:用户 2026-10 第二轮「这几个按钮之间不需要 `|` 线隔开,**紧凑一点**」。
+   * 竖线(下面那条 `border-right:none`)拿掉之后,`gap` 就是三个成员之间**唯一**的
+   * 东西 ⇒ 取同一族间距令牌里**最小**的那个,不新造数字。实测成员间隙 5px → 3.33px。
+   */
+  gap: var(--spacing-third);
+  /* 把**全部**剩余空间吸到本组左边那**一个**空隙里(= 用户要的那段留白)。 */
+  margin-left: auto;
+  /* 本组不参与伸缩:它是一块固定宽度的内容,不是弹性空白。 */
+  flex: none;
+
+  /*
+   * ------------------------------------------------------------------
+   * 「紧凑」的第二半:`|` 竖线 与 图标右边的**死空白**
+   * ------------------------------------------------------------------
+   *
+   * 上游 `ui/toolbar/_button.scss:100` 给 `.toolbar-button > button` 一条
+   * `border-right: 1px solid var(--toolbar-button-border-color)` —— 那是**相邻工具栏
+   * 按钮之间的竖线**。用户原话:「这几个按钮之间**不需要 `|` 线隔开**」。
+   * ⚠️ 上游那条是**与上游一致**(`verify-mirror` 盯字节一致),所以这里**不改镜像**,
+   * 只在我们自己的作用域里覆盖(本条比上游那条多一个类 ⇒ 特异度更高,不需要
+   * `!important`)。改前真 Chrome 实测:设置 / 更多两个 `button` 的 `border-right`
+   * 都是 `1px solid rgba(0, 0, 0, 0.04)`。
+   */
+  .toolbar-button > button {
+    border-right: none;
+
+    /*
+     * 上游 `_button.scss:102-106` 的 `.icon { margin-right: var(--spacing) }` 是
+     * **图标与 `.text` 之间**的间距。而本组两个按钮**没有 `.text`**
+     * (`button.tsx:258/266` 那个 `<div className="text">` 只在有 title/description
+     * 时渲染)⇒ 那 10px 是**死空白**,它才是「不紧凑」的主因。
+     *
+     * 实测(改前):按钮 47px = 10 padding-left + 16 图标 + **10 死空白** +
+     * 10 padding-right + 1 竖线。去掉死空白与竖线后 36px。
+     *
+     * ⚠️ 这条**只**作用于本组:上游那条对仓库段 / 分支段 / 同步段的「图标 + 两行文字」
+     * 仍然必需。若将来本组里出现带 `.text` 的按钮,这条要跟着收窄。
+     */
+    .icon {
+      margin-right: 0;
+    }
+  }
+}
+}

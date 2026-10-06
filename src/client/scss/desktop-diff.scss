@@ -1,0 +1,336 @@
+/**
+ * **Desktop diff 样式的编译入口**(Sass)→ `src/client/desktop-diff-styles.generated.ts`。
+ *
+ * ## 做法(2026-10 架构改动:**编译后前缀化**,不再用嵌套 `@import` 加作用域)
+ *
+ * 以前是把上游 partial 逐字 `@import` 在 `.gw-desktop-diff { … }` **里面**。嵌套
+ * import 确实能给上游选择器套上作用域,但它会**改写 `&` 的语义**:
+ * `ui/_tab-bar.scss:33,93,127` 的 `&.tabs &-item` / `&.switch &-item` /
+ * `&.vertical &-item` 里**第二个 `&`** 被替换成**完整父选择器**(含作用域根),产物长成
+ *
+ *     .gw-desktop-diff .tab-bar.switch .gw-desktop-diff .tab-bar-item { … }
+ *
+ * —— 永不匹配。19 条规则(42 条选择器)因此静默失效(图片 diff 的 TabBar 切换器
+ * 丢掉 `flex:1`、圆角与选中底色),而**三道旧守卫全绿**:类名在、基底配方在、
+ * 类名覆盖也「覆盖」了。机制与判据盲点见 `docs/goal-port-desktop.md` §7.1、§10.9。
+ *
+ * 现在:
+ *  1. 本文件把上游 partial **在顶层** `@import`(**没有**包裹作用域根),`&` 按上游
+ *     自己的语义展开 —— `&.switch &-item` 得到正确的 `.tab-bar.switch .tab-bar-item`;
+ *  2. `scripts/styles.mjs` 在**编译产物**上给每条顶层选择器加上作用域根
+ *     (`.gw-desktop-diff …`):`@keyframes`/`@font-face` 的块体不动,`:root` 换成
+ *     作用域根,`html`/`body` 的前缀插在它们**之后**(上游 `_platform.scss` 的
+ *     `body.platform-* &` 变体),已经带作用域的规则**不会**被重复加前缀;
+ *  3. 我们**自己手写**的适配层仍旧写在 `.gw-desktop-diff { … }` 块里 —— 前缀化会
+ *     认出它已经带作用域根而**原样保留**,所以这一部分产物与改动前逐字一致,
+ *     便于逐选择器核对(见本轮报告 (c))。
+ *  4. **上游一个变量喂两种角色、而宿主令牌按角色分开时,在本面按角色覆盖**
+ *     (不是换掉整个变量、更不是替换上游组件)。本文件已有一例:
+ *     `--tab-bar-active-color` 同时管线(`.tabs .selected` 的下划线)与底
+ *     (`.switch`/`.vertical .selected`),而宿主的蓝只用于线与字、底要中性 ⇒
+ *     只覆盖「底」那一半。长注释与退役条件在该规则上方;
+ *     判据写进 `docs/goal-port-desktop.md` §2.2。
+ *
+ * 作用域根:**一个面一个入口文件**。以前 diff 与 split 两个面共用本文件,整份样式
+ * 被编译两遍(产物里每个选择器各出现两次,~80KB 纯冗余);现在:
+ *  - `.gw-desktop-diff` ← 本文件(diff 面板);
+ *  - `.gw-split` ← `split.scss`(左右两栏的网格与拖拽手柄)。
+ *
+ * Desktop 的样式表用的是**裸全局选择器**(`.panel`、`.button`、`.row`、`.image` …),
+ * 直接注入会污染宿主的整个界面,所以必须有作用域;但作用域由**产物前缀化**加,
+ * 上游文件与上游选择器文本一个字都不改。
+ *
+ * 变量桥:Desktop 的取色变量由 `_dsh-bridge.scss` 重新绑到 DSH 的 `--dsw-alias-*`
+ * 令牌上(见那个文件里的逐条理由)。
+ *
+ * `@import` 的弃用警告:Sass 正在推 `@use`,但上游 partial 里 600+ 处 `&`、以及
+ * `@import` 的变量可见性语义我们要逐字保留(「对齐优先」),所以继续用 `@import` 并静音。
+ */
+
+// mixins 只定义 @mixin、不产出任何 CSS,所以放在顶层导入(嵌进选择器里没必要)。
+@import './upstream/mixins';
+
+// 变量桥:顶层导入只为拿到 `dsh-desktop-bridge` 这个 mixin(它本身不产出 CSS),
+// 真正展开在下面的 `.gw-desktop-diff` 里。
+@import 'dsh-bridge';
+
+/*
+ * `.sr-only` 的**基础配方**(上游在 `ui/_app.scss:115-123`)。
+ * 抽成 mixin 是因为它有**多个**使用现场:`.gw-desktop-diff`(diff 行里的读屏文本)、
+ * `.gw-split`(`Resizable` 内部的 `AriaLiveContainer`)与 `.gw-repo-list`
+ * (`TooltippedContent` 溢出时的可达性副本)。同一份配方写几遍必然漂移,而任何一处
+ * 缺了配方都是「文本变成可见文本」这种很难看出来的坏。
+ */
+@import 'sr-only-recipe';
+
+/*
+ * `$gray-500` —— `ui/_tab-bar.scss:161` 在一个 Sass 插值里引用它
+ * (写法是井号紧跟花括号,这里**故意不写在一起**:Sass 的响亮注释会真的求值插值,
+ *  goal 文档 §7.2 记过这个坑)。
+ * 上游那个 `$gray-500` 来自 `_variables.scss:3` 的
+ * `@import '~primer-support/lib/variables/color-system.scss'` —— `~` 是 webpack 的
+ * alias,Dart Sass 解析不了;整张变量表也不可能整份 import(它是 `:root { … }` 块,
+ * 嵌进作用域会变成 `.gw-desktop-diff :root`,永不匹配)。
+ *
+ * 所以这里补的是**语义等价的宿主令牌**:上游自己就把 `--text-secondary-color` 定义成
+ * `$gray-500`(`_variables.scss:20`),而 `_tab-bar.scss:161` 的用点正是
+ * 「未选中项里的 `.icon`」= 次要图标色。绑令牌而不是写死十六进制,颜色仍然只来自 DSH。
+ * 插值后产物是 `color: var(--text-secondary-color)`,不是 Sass 计算出的字面色。
+ *
+ * ⚠️ 必须留在**顶层**:上游 partial 现在也是顶层 import,而写在规则块里的变量声明
+ * 对顶层 import 进来的文件**不可见**(用 `@content` 也救不了,见 `repository-list.scss`
+ * 里 `$gray-300` 的那段)。
+ */
+$gray-500: var(--text-secondary-color);
+
+.gw-desktop-diff {
+  /*
+   * `.sr-only` 的**基础配方**必须补上。它在上游 `ui/_app.scss:115-123`,而那个文件是
+   * Desktop 的整个应用外壳,不能也不需要整份 import —— 我们只 import 了 diff 相关的
+   * 样式表,里面只有 diff 内的**覆盖** `_side-by-side-diff.scss:20 { user-select: none }`。
+   * 缺了基础配方,读屏专用文本就变成**可见文本**。
+   *
+   * 真实后果:`side-by-side-diff-row.tsx:646-649` 的
+   * `<span className="sr-only">Lines N to M Added</span>` 以可见文本渲染、在窄列里折行,
+   * 把行号格撑开 → gutter 竖着堆叠、每条 diff 行变成正常高度的 2–3 倍。
+   * 截图里的 `Line` / `1` / `...dded` 就是这段文本。
+   *
+   * 这类缺失**现有检查全抓不到**:构建不报错(类名合法);类名覆盖自检查的是类名
+   * **是否存在**,而 `.sr-only` 确实存在;令牌检查只管 `--dsw-alias-*`。
+   * 教训:**「类名存在」不等于「那条规则生效」。**
+   */
+  .sr-only {
+    @include sr-only-recipe;
+  }
+
+  // Desktop 主题变量 → DSH 令牌。dsh-bridge 是一组裸变量声明,必须用 mixin 展开
+  // (裸声明不能直接写进这里;写成选择器则会变成 `.gw-desktop-diff .gw-desktop-diff`)。
+  @include dsh-desktop-bridge;
+}
+
+/*
+ * ==========================================================================
+ * 上游 partial —— **顶层** import(不再嵌进作用域根)
+ * ==========================================================================
+ *
+ * 逐字编译:下面这些文件一个字都不改,作用域由 `scripts/styles.mjs` 在编译产物上
+ * 逐选择器加前缀。顺序 = 输出顺序(后面的面/表可以覆盖前面的),与改动前完全一致。
+ */
+@import './upstream/ui/side-by-side-diff';
+@import './upstream/ui/diff';
+@import './upstream/ui/panel';
+@import './upstream/ui/octicons';
+@import './upstream/ui/button';
+@import './upstream/ui/popover';
+
+/*
+ * ==========================================================================
+ * 本轮补的**基底配方**(来源:`scripts/check-base-recipes.mjs` 的 split 桶)
+ * ==========================================================================
+ *
+ * 下面这些类在包里原本**只有覆盖、没有配方**,或者整个 partial 都没进闭包 ——
+ * 这正是丢掉 `.sr-only` 的那条路径(goal 文档 §7):构建绿、类名覆盖自检绿、
+ * 令牌检查绿,界面坏。每一条后面都写明「上游 file:line」+「哪个活着的组件要它」。
+ *
+ * 顺序无关(这些 partial 之间没有级联依赖),按优先级排。
+ */
+
+/*
+ * (1) TextBox。配方:上游 `ui/_text-box.scss:3`(`.text-box-component`)+
+ *     `:41`(`&.display-clear-button`)/ `:45`(`&.display-prefixed-icon`)/ `:49`(`.prefixed-icon`)/
+ *     `:56`(`button.clear-button`)/ `:69`(`&:not(.no-invalid-state) :not(:focus):invalid`)。
+ *
+ *     包里原本只有两条**覆盖**:`ui/_side-by-side-diff.scss:534,535,547`(diff 内的
+ *     `.diff-search` 尺寸/定位)。所以 `input` 的 textboxish 配方、以及**清空按钮**的
+ *     `position:absolute; border:0; background:none; width/height: var(--text-field-height)`
+ *     全部缺失 —— 清空按钮退回**原生默认灰按钮**。
+ *
+ *     使用方:`ui/diff/diff-search-input.tsx:34`(`displayClearButton={true}` 的
+ *     diff 内搜索框,Cmd/Ctrl+F;已接线,`src/client/diff-ui.ts` 可达)。
+ *     审计 B §3.4 末 / §6.7① 记的就是这条可见的丑。
+ */
+@import './upstream/ui/text-box';
+
+/*
+ * (2) Checkbox。配方:上游 `ui/_checkbox.scss:1`(整张表只有这一条选择器)。
+ *     使用方:`ui/diff/diff-options.tsx:2`(「隐藏空白改动」),
+ *     以及 `ui/changes/**` 里行级勾选列(`changed-file.tsx`)。
+ */
+@import './upstream/ui/checkbox';
+
+/*
+ * (3) RadioButton。配方:上游 `ui/_radio-button.scss:1`。
+ *     使用方:`ui/diff/diff-options.tsx:5`(统一 ↔ 并排的单选)。
+ */
+@import './upstream/ui/radio-button';
+
+/*
+ * (4) DiffOptions 本体。配方:上游 `ui/_diff-options.scss:1`(`.diff-options-component`)。
+ *     包里原本只有 `ui/_diff.scss:924` 的一条**上下文覆盖**
+ *     (`.diff-container .header .diff-options-component { margin-right; flex-shrink }`)——
+ *     那是覆盖,不是配方。使用方:`ui/diff/diff-options.tsx:87`,
+ *     由 `diff-header.tsx` 渲染;diff 连线那条线马上要把它挂上去(审计 B 排名 9)。
+ */
+@import './upstream/ui/diff-options';
+
+/*
+ * (5) TabBar。整张表之前**一次都没进过闭包**:上游 `ui/_tab-bar.scss`
+ *     (`:1` `.tab-bar`、`:18` `&-item` → `.tab-bar-item`、`:28` `.tab-bar-separator`、
+ *     `:93` `&.switch`、`:127` `&.vertical`)。
+ *
+ *     使用方:`ui/diff/image-diffs/modified-image-diff.tsx`(图片 diff 的
+ *     「2-up / Swipe / Onion skin」切换)—— 它是移植过来的 diff 面板**内部**唯一的
+ *     TabBar 使用者,所以作用域挂 `.gw-desktop-diff` 是对的;上游 `ui/_diff.scss:462`
+ *     那条 `.panel.image .tab-bar { width: 350px; margin: var(--spacing) auto 0 }`
+ *     也印证了它长在 diff 面板里。
+ *
+ *     ⚠️ 这张表里的 `&.tabs &-item` / `&.switch &-item` / `&.vertical &-item`
+ *     正是「嵌套 import 会改写 `&` 语义」那个缺陷的现场(19 条规则 / 42 条选择器,
+ *     图片 diff 的 switch 切换器丢 `flex:1`、圆角、选中底色的根因)。现在改成
+ *     **顶层 import + 编译后前缀化**修好了它;不要再把任何上游 partial 嵌回选择器里。
+ */
+@import './upstream/ui/tab-bar';
+
+/*
+ * (6) Ref。配方:上游 `ui/_ref.scss:1`(`.ref-component`,mono 字体的分支名 chip)。
+ *     使用方:`ui/changes/no-changes.tsx`(空态里的 `Ref`)。
+ *     (仓库列表面也 import 了这张表;两个面各留一份 —— 作用域不同就是**必须**的
+ *      两份,`scripts/styles.mjs` 只删逐字相同的顶层规则,不会碰它们。)
+ */
+@import './upstream/ui/ref';
+
+/*
+ * `ui/_tab-bar.scss` 要的 5 个变量,上游都在 `styles/_variables.scss` 的 `:root` 块里
+ * (`:root` 不能嵌套 import —— 嵌进来会变成 `.gw-desktop-diff :root`,永不匹配;
+ *  现在作用域由产物前缀化加,但那份变量表仍**不**在编译闭包里,所以这里照旧手补)。
+ * 取值规则同 `_dsh-bridge.scss`:**结构数值沿用,颜色一律绑 DSH 令牌**。
+ * 放在这里(而不是桥里)是因为它们只服务这一个 partial;桥是多个面共用的。
+ */
+.gw-desktop-diff {
+  --tab-bar-height: 29px; /* `_variables.scss:312` */
+  /* `:313` 是 Sass 变量 `$blue`。宿主「选中页签」的惯用色是
+     `--dsw-alias-state-business-primary`(浅 `#4176e6` / 深 `#7aaaFF`):
+     消费方 `ui-schedule/.../TaskManagerPage.module.css:620`(选中页签文字)与
+     `:625`(`::after` 那条 2px 下划线)。
+     本面这条只服务**线/字**那一半角色(`.tab-bar.tabs .selected` 的
+     `box-shadow: inset 0 -3px 0`、`.tab-bar.tabs .indicator` 的 `color`);
+     **底**那一半由下面那条按角色的覆盖规则接走 —— 见紧接本块之后的长注释。 */
+  --tab-bar-active-color: var(--dsw-alias-state-business-primary); /* `:313` `$blue` —— 下划线 / 指示器 **线/字** 角色 */
+  --tab-bar-hover-background-color: var(--dsw-alias-interactive-bg-hover); /* `:315` 是 Sass 变量 `$gray-100` */
+  --tab-bar-count-color: var(--text-color); /* `:318` 原样就是这个引用 */
+  --tab-bar-count-background-color: var(--dsw-alias-bg-layer-3); /* `:319` 是 Sass 变量 `$gray-200` */
+}
+
+/*
+ * ==========================================================================
+ * `.tab-bar.switch/.vertical .selected` 的**底** —— 按角色覆盖(作用域适配)
+ * ==========================================================================
+ *
+ * ## 为什么要拆(上游一个变量承担双重角色,而宿主令牌按角色分开)
+ *
+ * 上游 `ui/_tab-bar.scss` 用**同一个** `--tab-bar-active-color` 喂两种**不同角色**:
+ *   · `:61` `.tabs .selected { box-shadow: inset 0 -3px 0px var(--tab-bar-active-color) }` —— **线**;
+ *   · `:78` `.tabs .indicator { color: … }` —— **字**;
+ *   · `:117` `.switch .selected { background-color: … ; color: var(--box-selected-active-text-color) }` —— **底**;
+ *   · `:147` `.vertical .selected { background-color: … ; color: … }` —— **底**。
+ * 上游那条注释自己写着「We intentionally swap foreground and background here to create a
+ * more intense selected state」—— 它是有意让选中的药丸变成实心强调块。
+ *
+ * 宿主的令牌集里**没有任何一个值能两全**:蓝
+ * (`--dsw-alias-state-business-primary`,浅 `#4176e6` / 深 `#7aaaFF`)只用于**线与字**,
+ * 而「底」要中性(`--dsw-alias-button-ghost-active-fill`,浅 `#ebeef2` / 深 `#43454a`,
+ * 宿主自己的选中控件底色,见 `ui-primitives/src/Pill.module.css` 的 `.active`)。
+ * 实测过把两者合成一个:若把 `--tab-bar-active-color` 绑蓝,则本面**真实渲染**的
+ * 图片 diff 四档切换器(`modified-image-diff.tsx:154` 的 `TabBar(TabBarType.Switch)`,
+ * DOM 是 `.panel.image > .tab-bar.switch > .tab-bar-item.selected`)在深色主题下变成
+ * `#7aaaFF` 底 + `#f9fafb` 字(**约 2:1,不可读**);若绑中性,`.tabs` 的下划线就失去蓝色。
+ *
+ * ⇒ **按角色拆开,而不是绕过上游**:上游照旧原样 `@import`(它的线与字仍用
+ * `--tab-bar-active-color` 的蓝),只在**本面**把「底」那一半改成宿主的中性选中底。
+ * 这不是新样式,是**作用域适配**,与 `.gw-app-toolbar` 的中和、`--contrast-border` 的
+ * 形状修正同族:**上游的单变量承担了双重语义,而宿主令牌按角色分开。**
+ * (判据已写进 `docs/goal-port-desktop.md` §2.2 的可复用规则。)
+ *
+ * ⚠️ **退役条件**:上游若把这两种角色拆成两个变量(例如 `--tab-bar-active-color` 只管线、
+ * 另给底一个变量),**这条覆盖必须删掉** —— 那时它就从「适配」退化成「第二份真源」。
+ */
+.gw-desktop-diff .tab-bar.switch .tab-bar-item.selected,
+.gw-desktop-diff .tab-bar.vertical .tab-bar-item.selected {
+  background-color: var(--dsw-alias-button-ghost-active-fill);
+}
+
+/*
+ * ==========================================================================
+ * `.diff-contents-warning-container` —— **作用域适配**(不是新样式)
+ * ==========================================================================
+ *
+ * 上游那条规则在 `ui/_diff.scss:827-845`,嵌在 `.seamless-diff-switcher`
+ * (`ui/_diff.scss:778`)之下。`_diff.scss` **已经在闭包内**(本文件上面的 `@import`),
+ * 所以这不是「配方没 import」;问题是那条选择器的**中间祖先在我们的 DOM 里不存在**:
+ *
+ *   · `src/client/desktop-diff.tsx:266-269` 直接渲染 `Diff`(`ui/diff/index.tsx`),
+ *     它产出 `.diff-container`,**不产出** `.seamless-diff-switcher`;
+ *   · 唯一渲染 `<SeamlessDiffSwitcher>` 的是 `ui/changes/changes.tsx:116`,而
+ *     `changes.tsx` 现在**不可达**(手写的 `changes-view.tsx` 还没被上游容器替换)。
+ *
+ * ⇒ 产物里那条规则长成
+ *   `.gw-desktop-diff .seamless-diff-switcher .diff-contents-warning-container`
+ *   永远匹配不到任何节点。
+ *
+ * 真正渲染警告条的是 `ui/diff/side-by-side-diff.tsx:596`(`containerClassName`)与
+ * `:614-616`(把 `<DiffContentsWarning>` 作为它的**直接子节点**),所以真实祖先链是
+ * `.gw-desktop-diff … .side-by-side-diff-container > .diff-contents-warning-container`。
+ *
+ * 最小修法 = **上游 partial 一个字不改照 import**(上面已经 import 了 `ui/diff`),
+ * 再在真实祖先下补一条同一声明块的规则。属性与取值**与上游一致自 `ui/_diff.scss:827-845`**,
+ * 没有发明任何视觉。代价:这几条声明在产物里出现两次;`changes.tsx` 接线后两条都会命中,
+ * 取值相同,不冲突。`History` 页签那条路径(`desktop-diff.tsx`)永远不会有
+ * `.seamless-diff-switcher`,所以这条适配是**长期需要的**,不是临时补丁。
+ */
+.gw-desktop-diff {
+  .diff-contents-warning-container {
+    background-color: var(--file-warning-background-color);
+    padding: var(--spacing) var(--spacing-double);
+    border-bottom: var(--file-warning-border-color) solid 1px;
+
+    .octicon {
+      margin-right: var(--spacing);
+      color: var(--file-warning-color);
+      vertical-align: text-bottom;
+    }
+
+    a.link-button-component {
+      display: unset;
+    }
+
+    // Separate warning items
+    .diff-contents-warning:not(:last-child) {
+      margin-bottom: var(--spacing);
+      border-bottom: var(--file-warning-border-color) solid 1px;
+      padding-bottom: var(--spacing);
+    }
+  }
+}
+
+/*
+ * 本插件自己的容器契约(不是从 Desktop 沿用的):
+ * Desktop 的 `.side-by-side-diff-container` 是 `flex-grow:1` + `overflow:hidden`,
+ * 内层 `.side-by-side-diff` 再 `flex-grow:1` —— 而 `react-virtualized` 的 `<AutoSizer>`
+ * **必须**拿到一个有确定高度的父元素,否则算出来是 0、一行都不画。
+ * 所以这里给出那个确定高度:`flex:1;min-height:0`。
+ */
+.gw-desktop-diff {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 历史页签用:那里是滚动容器,没有可分配的高度,给一个固定的框。 */
+.gw-desktop-diff.bounded {
+  flex: none;
+  height: 320px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+}

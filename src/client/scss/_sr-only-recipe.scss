@@ -1,0 +1,29 @@
+/**
+ * `.sr-only` 的**基础配方**,抽成 mixin 供**多个移植面/多个作用域根**共用。
+ *
+ * ## 为什么必须共用一份,而不是各写一遍
+ *
+ * 这是本项目最贵的一次返工(`docs/goal-port-desktop.md` §7):上游
+ * `ui/_app.scss:115-123` 才写真正的基础配方(定位/尺寸/裁剪),而 `_app.scss` 是
+ * Desktop 的整个应用外壳、不能也不需要整份 import。我们只 import 了 diff 相关的表,
+ * 于是产物里 `.sr-only` **只有** diff 内的覆盖(`_side-by-side-diff.scss:20` 的
+ * `user-select: none`)—— 读屏文本变成**可见文本**,把行号格撑开、gutter 竖排。
+ *
+ * 现在有三个使用现场:
+ *   - `.gw-desktop-diff`(diff 行里的 `Lines N to M Added`);
+ *   - `.gw-split`(`Resizable` 内部的 `AriaLiveContainer` 拖拽宣告);
+ *   - `.gw-repo-list`(`TooltippedContent` 溢出时的可达性副本)。
+ * 同一份配方写三遍必然漂移,而这三处一旦缺了配方都是「很难看出来的坏」。
+ *
+ * 这里**只有变量与 mixin,不产出任何 CSS**,所以只能在顶层 `@import`
+ * (嵌进选择器里没有意义;裸声明也不能用嵌套 `@import`)。
+ */
+@mixin sr-only-recipe {
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  height: 1px;
+  overflow: hidden;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}

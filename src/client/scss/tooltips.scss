@@ -1,0 +1,177 @@
+/**
+ * **`.tooltip-host` 面的编译入口** —— 让 portal 出来的浮层拿到上游 tooltip 样式。
+ *
+ * ## 为什么必须有这一面(机制,不是补丁)
+ *
+ * 上游 Tooltip 的 DOM 走 `ReactDOM.createPortal(…, tooltipHostFor(target))`,而
+ * `tooltipHostFor(target) = target.closest('.tooltip-host') ?? document.body`
+ * (`ui/lib/tooltip.tsx:228/260/652-655/838-839`)。也就是说**浮层节点不在触发点的子树里**,
+ * 而在某个 `.tooltip-host` 元素(或 `document.body`)之下。后果有两条,缺一条都是坏的:
+ *
+ *  1. **CSS**:上游 `ui/window/_tooltips.scss:1-2` 的入口选择器是
+ *     `body > .tooltip, .tooltip-host > .tooltip`。把它整体套上任何一个移植面的作用域根
+ *     (`body > .tooltip` 会变成 `body .gw-x > .tooltip`)都**永不匹配** —— 浮层拿不到
+ *     `display:flex` / `position:absolute` / 背景 / 阴影,只能是一坨**透明裸文本**。
+ *     所以这一面的作用域根就是那个 host 类本身,`_tooltips.scss` **顶层** import 进来:
+ *     `.tooltip-host > .tooltip` **原样保留**(前缀化认出它已含作用域根),
+ *     其余规则被前缀成 `.tooltip-host .tooltip …`(浮层是 host 的子元素 ⇒ 能匹配)。
+ *  2. **变量**:浮层继承的是 **host 元素**上的自定义属性。绑在 `.gw-repo-list` 之类
+ *     "触发点所在的作用域"上浮层**拿不到**(它不是那个子树的后代)。
+ *     所以本文件把 `_tooltips.scss` 用到的变量绑在**作用域元素自己**身上
+ *     (注册表里 `portalHost: true` ⇒ 构建断言「只能声明在作用域元素上」,见
+ *      `scripts/styles.mjs` 的 `findUnboundVariables`)。
+ *
+ * ## portal 宿主清单(**机器枚举出来的**,不是猜的;2026-10 真 Chrome 实测)
+ *
+ * 判据:`docs/probes/tooltip-paint-probe.mjs` 在挂载前包住
+ * `Element.prototype.closest`,只记 `selector === '.tooltip-host'` 的调用 —— 那正是
+ * `tooltipHostFor()` 的**唯一**决定点 ⇒ 探针能列出真实渲染树里**每一个**触发点及其
+ * portal 目标。实测 14 个触发点、6 个仍连着:
+ *
+ * | portal 目标 | 触发点 | 结果 |
+ * |---|---|---|
+ * | `.gw-app-toolbar`(`src/client/toolbar.tsx:254`) | 三个 `ToolbarDropdown` 按钮、sync 按钮、仓库行、分支行 | ✅ 4 条规则匹配、10 个变量全解析、底色 `rgb(44,44,46)`、命中栈最上面 |
+ * | `.gw-body`(`src/client/workbench.tsx`,**本轮新增**) | Changes 页签 diff 里的 `[aria-label="Expand Down"]` 等 | ✅ 修前是 `body > .tooltip`(见下) |
+ * | `.gw-desktop-history`(`src/client/history-view.tsx:970/992`) | History 页签的 diff 与文件行 | ✅ 未变(它比 `.gw-body` 近) |
+ * | 对话框自己(`ui/dialog/dialog.tsx:928`) | 对话框内的工具提示 | ✅ 未变 |
+ *
+ * ## 修前「hover 没出来」的机制(**已由真浏览器定死**)
+ *
+ * 触发点**不在任何 `.tooltip-host` 子树里**时,portal 目标退回 `document.body`,
+ * 浮层等于 `body > .tooltip` ⇒ **一条 tooltip 规则都不匹配**(入口选择器要
+ * `.tooltip-host > .tooltip`)⇒ 计算值退回 UA 默认
+ * (`display:block; position:static; background:transparent; z-index:auto; font-size:16px`),
+ * 于是它落在 `<body>` 正常流的末尾、**视口之外**。实测:悬停 Changes 页签里 diff 的
+ * 「Expand Down」,浮层 rect `y=1308`(视口高 813)、该点命中测试返回 `null`、
+ * 匹配到的规则只有宿主主题那条 `body, body *` —— 用户看到的正是「hover 没出来」。
+ *
+ * ⚠️ 所以**「浮层没创建」不是根因**(组件创建、定位都正确),**「变量未解析」也不是**
+ * (那条规则根本没匹配上,压根没引用 `var()`)—— 根因是 **portal 目标落在作用域之外**,
+ * 「没样式」只是它的后果。本文件**不**为它放宽白名单:`body` 级作用域根会让上游
+ * `body`-rooted 规则打到宿主页面上。修法是**让 portal 目标进到作用域里**
+ * (给 DOM 加 `tooltip-host`,即 `.gw-body`)。
+ *
+ * ## 与 `check-unreachable-ancestors` 的已知红灯(⚠️ 不要手写,不要登记基线)
+ *
+ * 这一面进闭包后,那个闸门的「未登记祖先」从 42 涨到 **46**,新增的 4 个全是本表的
+ * **变体态**,而且**渲染方都还没接线**:
+ *   - `.sha-hint`(`_tooltips.scss:117` ← `ui/lib/tooltipped-commit-sha.tsx:38` 的 `tooltipClassName="sha-hint"`);
+ *   - `.user-info`(`:161` ← `ui/lib/avatar.tsx:380`);
+ *   - `.length-hint-tooltip`(`:173` ← `ui/changes/commit-message.tsx:1655`);
+ *   - `.changed-files-description-tooltip`(`:186`)。
+ * (`.length-hint-tooltip` 与 Changes 面那 42 条同因:上游 Changes 容器还没接线。)
+ *
+ * ⇒ 那个数字是**接线进度的机器可读进度条**,不是「被我们改坏了」。两条禁令:
+ *  1. **禁止**把这 4 条选择器手写进本文件(或别的入口)绕开 partial —— 违反「对齐优先」,
+ *     而且会在上游之外造出第二份必然漂移的真源;
+ *  2. **禁止**把它们登记进 `scripts/unreachable-ancestors-baseline.json` ——
+ *     登记等于把「还没接」按成「已接受」,进度条就瞎了。
+ * 等 Changes 容器与 tooltip 触发面接上,这 4 条应当**自己消失**;若接线之后**始终不降**,
+ * 那才说明上游确实有死变体 —— **那时**再登记,并在理由里写明「上游死类」。
+ *
+ * `@import` 的弃用警告同其它入口:上游 partial 的 `&` 与变量可见性语义要逐字保留。
+ */
+
+// mixins 只定义 @mixin、不产出任何 CSS,放顶层导入。
+@import './upstream/mixins';
+
+/*
+ * `$gray-900` —— `_tooltips.scss:157` 在插值里用它给 `&.sha-hint button:active`
+ * 上文字色(那个按钮 active 时背景是写死的 `white`)。上游的 `$gray-900` 来自
+ * `_variables.scss:3` 的 `@import '~primer-support/lib/variables/color-system.scss'`
+ * —— `~` 是 webpack 的 alias,Dart Sass 解析不了;整张变量表也不可能整份 import
+ * (它是 `:root { … }` 块)。不补就是一个**硬错**(Sass 报 Undefined variable)。
+ *
+ * 取值:那处是「浅底上的深字」,正好是 `--tooltip-color` 的反色面,所以绑
+ * `--dsw-alias-tooltip-bg`(= 气泡底色 = 深色)—— 语义等价、跟随主题、不写死十六进制。
+ */
+$gray-900: var(--dsw-alias-tooltip-bg);
+
+/*
+ * ==========================================================================
+ * 变量:绑在**作用域元素自己**上(= portal 容器 = 浮层的直接父节点)
+ * ==========================================================================
+ *
+ * 每一条都写清上游 `file:line`;结构数值沿用,**颜色一律绑 DSH 令牌**
+ * (`_dsh-bridge.scss` 开头那条契约)。
+ */
+.tooltip-host {
+  /* ---------- 结构数值(上游 `_variables.scss`) ---------- */
+  --border-radius: 6px; /* 同 `_dsh-bridge.scss` */
+  --spacing: 10px; /* `:242` 那组间距的基数 */
+  --spacing-half: 5px; /* 同上 */
+  --spacing-third: calc(var(--spacing) / 3); /* `:245` 原样是 calc */
+  --font-size: 12px; /* 同 `_dsh-bridge.scss` */
+  --font-size-sm: 11px; /* 同上 */
+  --font-family: inherit; /* 宿主字体;不要带 Desktop 的字体栈进来 */
+
+  /*
+   * `_variables.scss:346` 是 **20**。沿用会坏:`.gw-pop`(`styles.ts:358`)是 `z-index:50`,
+   * 而浮层与它同处一个层叠上下文(都是 `.gw-header` 的绝对定位子元素,`.gw-header`
+   * 自身 `z-index:auto` 不新建上下文)⇒ 20 会让浮层**画在面板底下**,而面板的每一行
+   * 恰恰是这个浮层的触发点。取 55 = 高于面板内所有浮层(`.gw-diffopt-pop` 45 /
+   * `.gw-pop` 50)、低于遮罩与对话框(`.gw-scrim` 50 之上、`.gw-dialog-scrim` 60 /
+   * `.gw-toasts` 70)。这是本文件**唯一**一处不沿用上游字面值的地方,理由如上;
+   * 浮层是 `pointer-events:none`,盖住什么都不会抢点击。
+   */
+  --tooltip-z-index: 55;
+
+  /* ---------- 颜色:DSH 令牌 ---------- */
+  /* 宿主自己就有一对 tooltip 令牌(`dsh-client-ui-theme`:bg = neutral-bluish-850),直接用它。 */
+  --tooltip-background-color: var(--dsw-alias-tooltip-bg); /* 上游 `:498` `$gray-900` */
+  /*
+   * 上游 `:499` 是 `$gray-100` —— **气泡上的文字**。原绑 `--dsw-alias-label-primary-inverted`,
+   * 2026-10 真 Chrome 实测**深色主题下这对组合是坏的**:
+   *
+   * | 主题 | 气泡底色 | 文字 | 对比度 |
+   * |---|---|---|---|
+   * | 浅色 | `rgb(44,44,46)`(`tooltip-bg` = bluish-850) | `rgb(255,255,255)`(bluish-00) | 13.94:1 ✓ |
+   * | 深色 | `rgb(67,69,74)`(`tooltip-bg` = bluish-750) | `rgb(53,54,56)`(**bluish-800**) | **1.26:1 ✗ 字几乎看不见** |
+   *
+   * 机制:`--dsw-alias-label-primary-inverted` 是一个**随主题翻转**的令牌(浅色 = 近白、
+   * 深色 = 近黑),而**气泡本身不翻转** —— `--dsw-alias-tooltip-bg` 两个主题都是深色。
+   * 拿「翻转的前景」配「不翻转的底」,深色下必然同色。这正是 goal 文档 §2.2 那条
+   * 「上游一个变量喂一种角色、宿主令牌按**角色**分开时按角色取」的同族问题,只是方向相反。
+   *
+   * 宿主自己给这种「深色浮层」的配对是 **`--dsw-alias-toast-bg` + `--dsw-alias-toast-label`**
+   * (`design-platform.css:261-262` / `:379-380`):前者 850/750 与 `--dsw-alias-tooltip-bg`
+   * **逐字同值**,后者两个主题都是 `neutral-bluish-00`(纯白)。宿主没有
+   * `--dsw-alias-tooltip-label`,所以「深色气泡上的文字」这个角色就用宿主已经定义好的
+   * `--dsw-alias-toast-label` —— 单一真源,不是我们新造的色值。
+   * 修后实测(WCAG 相对亮度比,脚本算的):浅色 `rgb(255,255,255)` on `rgb(44,44,46)` = **13.94:1**;深色 `rgb(255,255,255)` on `rgb(67,69,74)` = **9.59:1**。
+   */
+  --tooltip-color: var(--dsw-alias-toast-label); /* 上游 `:499` `$gray-100` = 深色气泡上的浅色文字 */
+  /*
+   * 上游 `:500` 是 `rgba($gray-900, .65)`(深色主题是纯黑)。DSH 没有「阴影色」令牌,
+   * 而 `_dsh-bridge.scss` 的 `--base-box-shadow: 0 2px 7px rgb(0 0 0 / 25%)` 已经是同一先例:
+   * 阴影是**结构**,不是皮肤。保留上游的 65% 透明度、黑色基。
+   */
+  --tooltip-shadow-color: rgb(0 0 0 / 65%);
+  --toolbar-tooltip-background-color: var(--dsw-alias-tooltip-bg); /* 上游 `$gray-800`(窗口控件变体) */
+  --toolbar-tooltip-shadow-color: rgb(0 0 0 / 65%); /* 上游 `black` */
+
+  /* 浮层内会用到文件状态色(`.files-added-icon` 一族) */
+  --color-new: var(--dsw-alias-state-success-primary);
+  --color-modified: var(--dsw-alias-state-warn-primary);
+  --color-deleted: var(--dsw-alias-state-error-primary);
+  --color-renamed: var(--dsw-alias-state-business-primary);
+}
+
+/*
+ * ==========================================================================
+ * 上游 `ui/window/_tooltips.scss` —— **顶层** import(一个字不改)
+ * ==========================================================================
+ *
+ * 入口选择器 `body > .tooltip, .tooltip-host > .tooltip`:
+ *  - `.tooltip-host > .tooltip` → **原样保留**(已是合法形状);
+ *  - `body > .tooltip` → 前缀化成 `body .tooltip-host > .tooltip`。
+ *    ⚠️ **这一条不是冗余,它是被有意识地挡在外面的**(2026-10 更正上一版注释里
+ *    「冗余,但语义等价」那句 —— 那句是错的,而且正好掩盖了本文件顶部记的那条缺陷):
+ *    前缀化之后它要求 `body` 的**后代**里有 `.tooltip-host`,而 `body > .tooltip`
+ *    (portal 到 `document.body` 的那种)是 `body` 的**直接子节点** ⇒ **永不匹配**。
+ *    这是**故意的**:让 `body` 当作用域根会把上游 `body`-rooted 规则打到宿主页面上。
+ *    代价就是「触发点不在任何 `.tooltip-host` 子树里 ⇒ 浮层完全没样式」——
+ *    所以每个渲染面都要自己保证触发点在 host 里(清单见本文件顶部)。
+ * 末尾的 `.tooltip-host { position: relative }` 与 `button.toggletip` 同样进产物。
+ */
+@import './upstream/ui/window/tooltips';

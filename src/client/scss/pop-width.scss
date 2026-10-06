@@ -1,0 +1,37 @@
+/**
+ * **`.gw-pop` 宽度消费面** —— 一行适配,不是上游移植。
+ *
+ * ## 为什么需要
+ *
+ * 仓库下拉面板的宽度必须**等于左栏的实际像素宽**,而不是常量。客户端半已经做完:
+ * `src/client/repo-bar.tsx` 的 `useLeftWidth()` 只读地观察 `.gw-split` 与 `> .left`,
+ * 把量到的宽度写成面板元素上的**行内** `--gw-pop-width`(宽度真值仍然只有
+ * `useSplitWidth()` 一份可写状态;竖排 <420px 时写成 0,于是这里回落到 `auto`)。
+ *
+ * 差的就是这一句消费:`styles.ts:358` 的 `.gw-pop{max-width:420px}` 会把 >420px 的左栏
+ * **夹回去**,所以 `max-width:none` 与 `width` 必须一起写(真 Chrome 对照实验:
+ * 左栏 300px→面板 300px、左栏 430px→面板 430px;只写 `width` 时 430px 仍被夹成 420px)。
+ *
+ * ## 为什么它能赢
+ *
+ * 同特异性(`.gw-pop`,0-1-0)时后注入的赢:`src/client/index.ts:78-79` 的顺序是
+ * `ensureStyles()` → `ensureDesktopDiffStyles()`(本产物),所以本文件在 styles.ts 之后。
+ * 反过来说:**这条规则不能再挪回 styles.ts**,否则它和那条 `max-width:420px` 谁赢
+ * 又要靠别的手段裁决。
+ *
+ * ## 为什么它是一个「面」
+ *
+ * 注册表(`scripts/styles.mjs` 的 `PORT_SURFACES`)的语义是「产物里**允许出现的顶层
+ * 作用域根**」,`.gw-pop` 是**我们自己的**类(不是上游类名),它的作用域根只是用来
+ * 让这一行合法地进入产物、并且照旧被 `findLeakedRules` 的白名单与
+ * `findForeignScopedSelectors` 的逐面归属断言管住 —— **没有放宽**:
+ * 产物里除注册过的作用域根以外任何顶层选择器依然让构建失败。
+ */
+
+.gw-pop {
+  /* `--gw-pop-width` 由 `repo-bar.tsx` 的行内 style 写在同一元素上(样式表不声明它,
+     所以它登记在 scripts/styles.mjs 的 VARIABLE_EXCEPTIONS 里 —— 那条断言不允许
+     「引用了但哪儿都没声明」的自定义属性）。 */
+  width: var(--gw-pop-width, auto);
+  max-width: none;
+}

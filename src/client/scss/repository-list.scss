@@ -1,0 +1,301 @@
+//
+// **仓库列表移植面的编译入口**(Sass)→ 由 `scripts/build.mjs` 遍历
+// `scripts/styles.mjs` 的 `PORT_SURFACES` 编译,并合并进同一个产物模块。
+//
+// 上游对应:GitHub Desktop 的 `ui/repositories-list/**`(`repositories-list.tsx` /
+// `repository-list-item.tsx`)+ 它直接渲染的原语(`ui/lib/filter-list.tsx` /
+// `ui/lib/section-filter-list.tsx` / `ui/lib/list/**` / `ui/lib/text-box.tsx` /
+// `ui/lib/checkbox.tsx` / `ui/lib/row.tsx`)。
+//
+// 做法与 diff 面完全一致:**逐字编译上游 SCSS**,不手工翻译成 CSS。上游 partial
+// 一律**顶层** `@import`,作用域由 `scripts/styles.mjs` 在编译产物上逐选择器加前缀
+// (嵌套 `@import` 会改写 `&` 的语义,见 `desktop-diff.scss` 开头)。
+// 我们**自己手写**的适配层写在 `.gw-repo-list { … }` 块里,前缀化会认出它已经带
+// 作用域根而原样保留。
+//
+// **`.` 与 `_` 的坑**:下面 `@import` 的是上游 partial,文件名带下划线前缀
+// (`_repository-list.scss`)。Sass 的 partial 解析**接受不带下划线的写法**,
+// 所以这里写 `ui/repository-list` 是对的;但**核实文件名时必须带下划线去 `ls`**
+// —— 上游**没有** `_repositories-list.scss` / `_section-list.scss` / `_tooltip.scss`
+// / `_focus-container.scss` / `_aria-live.scss`(我一度按猜测的名字写过 import,
+// 幸好先 `ls` 了一次)。这条记在 `docs/desktop-ui-port.md`。
+//
+// `@import` 的弃用警告同 `desktop-diff.scss`:上游 partial 的 `&` 与变量可见性语义
+// 要逐字保留,所以继续用 `@import` 并静音。
+//
+
+// mixins 只定义 @mixin、不产出任何 CSS,放顶层导入。
+@import './upstream/mixins';
+
+// 变量桥:顶层导入只为拿到 mixin;真正展开在下面的 `.gw-repo-list` 里。
+@import 'dsh-bridge';
+
+// `.sr-only` 的基础配方(`TooltippedContent` 溢出时渲染可达性副本)。
+@import 'sr-only-recipe';
+
+//
+// `$gray-300`:上游 `_repository-list.scss:115` 用它给 ProTip 里的 `<kbd>` 上边框色,
+// 而它来自 `~primer-support/lib/variables/color-system.scss`(上游 `_variables.scss:5`
+// 的 webpack 别名 import)。**我们没装 primer**,所以这个符号在这里未定义 ——
+// 不补就是一个硬错(Sass 报 Undefined variable,不是静默失败)。
+//
+// 修法:**不改上游文件**(「对齐优先」的红线),在入口里就地给一个同名 SCSS 变量。
+// 取值绑宿主令牌(`border-l2` 比 `kbd` 已有的 `--base-border` 的 `border-l1` 略深一档,
+// 保留「边框比外框深一点」的原意),**不引入 Desktop 调色板**。
+//
+// 为什么不是 `@mixin`:`@content` 是在**调用方**的作用域里求值的,所以 mixin 内部
+// 声明的 `$gray-300` 对被 include 进来的上游 partial **不可见**(已实测:
+// `@mixin fb { $x: red; @content } .a { @include fb { .b { color: $x } } }` → Undefined variable)。
+// 而**顶层**的变量声明对顶层 import 进来的 partial 可见,这正是这里需要的。
+//
+$gray-300: var(--dsw-alias-border-l2);
+
+.gw-repo-list {
+  //
+  // `.sr-only` 的**基础配方**。上游在 `ui/_app.scss:115-123`,那个文件是 Desktop 的
+  // 整个应用外壳,不能也不需要整份 import。缺了配方,读屏专用文本就变成可见文本
+  // —— goal 文档 §7 记的那次事故(`.sr-only` 把 diff 行号格撑开、gutter 竖排)。
+  //
+  // 这个面为什么也需要:`TooltippedContent`(`ui/lib/tooltipped-content.tsx`)在
+  // `onlyWhenOverflowed` 为真且内容溢出时,会渲染一个 sr-only 的可达性文本副本;
+  // `repositories-list.tsx:262-271` 的组头就是这种用法。
+  //
+  .sr-only {
+    @include sr-only-recipe;
+  }
+
+  // Desktop 主题变量 → DSH 令牌(diff 面共用的那一组)。
+  @include dsh-desktop-bridge;
+
+  //
+  // 下面这些是**仓库列表面独有**的变量:上游 `ui/_repository-list.scss` 与
+  // `ui/_list.scss` 用了它们,而 diff 面的桥里没有。取值照上游 `_variables.scss`
+  // 的类型(「结构数值沿用、颜色绑宿主令牌」),逐条给理由。
+  //
+  --font-family: inherit; /* 宿主字体;不要带 Desktop 的字体栈进来 */
+  --font-weight-light: 300; /* 结构数值,沿用上游 */
+  --font-size-xxl: 42px; /* 结构数值,沿用上游(空态大标题) */
+  --spacing-quad: calc(var(--spacing) * 4); /* 上游是 calc,沿用 */
+  --spacing-third: calc(var(--spacing) / 3); /* 同上 */
+
+  // 行徽标(↑↓ 与改动数)
+  --list-item-badge-background-color: var(--dsw-alias-bg-layer-3);
+  --list-item-badge-color: var(--dsw-alias-label-secondary);
+  --list-item-selected-badge-background-color: var(--dsw-alias-border-l2);
+  --list-item-selected-badge-color: var(--dsw-alias-label-primary);
+  /* `_variables.scss:331` 是 `$white`(选中且激活那一行**上面**的芯片底色)。
+     原来绑 `brand-primary-invert` = 近黑,配同一行的近黑芯片文字 ⇒ 芯片整块看不见。 */
+  --list-item-selected-active-badge-background-color: var(--dsw-alias-bg-layer-1);
+  --list-item-selected-active-badge-color: var(--dsw-alias-label-primary);
+
+  // 列表行的三种态。`_list.scss` 定义 .selected / .hoverable / .selected-active
+  //
+  // `.selected` 上游 `_variables.scss:139` 是字面值 `#ebeef1`(哑光蓝灰,不是蓝)。
+  // 宿主「选中控件底色」别名 `--dsw-alias-button-ghost-active-fill` 浅色 = `#ebeef2`(几乎同值)、
+  // 深色 = `#43454a`,是宿主自己的选中态用法(`ui-primitives/Pill.module.css` 的 `.active`)。
+  // `.selected-active` 上游 `:170` 是 `$blue` —— ⚠️ 宿主无实心蓝底令牌,
+  // 这一级改取更强一档的中性交互底(见交付报告的冲突记账)。
+  --list-item-hover-background-color: var(--dsw-alias-interactive-bg-hover);
+  --box-selected-background-color: var(--dsw-alias-button-ghost-active-fill);
+  --box-selected-text-color: var(--dsw-alias-label-primary);
+  --box-selected-active-background-color: var(--dsw-alias-interactive-bg-active);
+  --box-selected-active-text-color: var(--dsw-alias-label-primary);
+
+  // 覆盖层与拖拽反馈(`_list.scss` 的 .list-item-insertion-overlay 用)
+  // ⚠️ 上游 `_variables.scss:479` 是 `rgba(0,0,0,.4)`(半透明**黑遮罩**)。
+  // 原来绑的 `--dsw-alias-bg-overlay` 是宿主的**中性表面色**(浅 `#e9ecf2` / 深 `#61666b`,
+  // 都是**不透明**的 6 位十六进制)⇒ 遮罩变成「整块盖住」而不是压暗。宿主的遮罩令牌是
+  // `--dsw-alias-bg-mask-{1,2,3}`(宿主 `Modal.module.css:28` 用的就是 mask-1)。
+  --overlay-background-color: var(--dsw-alias-bg-mask-1);
+  --drag-overlay-z-index: 15; /* 上游 `_variables.scss:351` 的数值;不绑就没有 z-index */
+
+  // 页签/提示框色(空态与组头会用到)
+  // `_variables.scss:313` 是 `$blue`。本面唯一消费方是
+  // `.change-indicator-wrapper .octicon{color:var(--tab-bar-active-color)}`(`:243-247`)
+  // —— 那是仓库行上那个**蓝色改动指示点**,是强调色不是底色 ⇒ 用宿主的蓝色强调令牌。
+  --tab-bar-active-color: var(--dsw-alias-state-business-primary);
+  --tip-box-background-color: var(--dsw-alias-state-warn-tertiary);
+  --tip-box-border-color: var(--dsw-alias-state-warn-secondary);
+  --text-field-focus-shadow-color: var(--dsw-alias-interactive-bg-hover);
+
+  //
+  // ---------- `ui/_scroll.scss`(win32/linux 原生滚动条)要的 4 个变量 ----------
+  //
+  // 这 4 个是**本轮新加的守卫**捞出来的:它们在上游 `_variables.scss:101,109,335,336`,
+  // 从来不在我们的变量桥里,于是 `body.platform-win32 ::-webkit-scrollbar { width:
+  // var(--win32-scroll-bar-size) }` 那几条声明一直按「invalid at computed-value time」
+  // 整条丢掉 —— 与 `--gw-mono` / `--drag-overlay-z-index` 同一类静默失效
+  // (goal 文档 §3 失败模式 10),三道旧守卫全都看不见。
+  //
+  // 说明:我们的 DOM **从不加 `body.platform-*`**(全仓 grep 只有产物 CSS 自己提到它),
+  // 所以这几条规则本来就打不到任何节点;补值是为了「声明不再静默失效」,不是视觉改动。
+  // 尺寸沿用上游;颜色绑宿主令牌(原值是 Desktop 调色板的 rgba(0,0,0,.2/.5),
+  // 按「颜色只来自 DSH」的契约换成边框层令牌)。
+  //
+  --win32-scroll-bar-size: 10px; /* `_variables.scss:335` */
+  --linux-scroll-bar-size: 10px; /* `:336` */
+  --scroll-bar-thumb-background-color: var(--dsw-alias-border-l2); /* `:101` rgba(0,0,0,.2) */
+  --scroll-bar-thumb-background-color-active: var(--dsw-alias-border-l3); /* `:109` rgba(0,0,0,.5) */
+
+  // ==========================================================================
+  // 仓库下拉的**尺寸契约**(2026-10 从 `repo-bar.tsx` 的行内 `<style>` 收编)
+  // ==========================================================================
+  //
+  // 这一段修的是**「打开仓库下拉,一行仓库都不渲染」**:面板没有确定高度 ⇒ 它是
+  // **内容尺寸**的盒子 ⇒ flex 自由空间 ≡ 0 ⇒ 子项写 `flex:1` 完全无效(实测
+  // `.gw-repo-local` 与 `.repository-list` 的 computed `flex-grow` 都是 1,高度却都停在
+  // **45px**);而 `.repository-list` 上游只有 `display:flex`、**既没有 flex 也没有高度**
+  // (靠 Desktop 应用外壳给)⇒ `.filter-list-container` 分到 **0** ⇒ `.list` **0**
+  // ⇒ react-virtualized memo 出的 `.ReactVirtualized__Grid` 内联 `height: 0px`
+  // ⇒ **一行都不渲染,而且不报错、控制台干净**(它按测得高度裁)。
+  //
+  // 两层根因**缺一层还是不可见**,所以四条必须一起在。
+  //
+  // ## ① `height: 100%` —— 不是 `min(70vh, 520px)`
+  //
+  // 旧版(面板还是 `.gw-pop` 浮卡片、外面套着一层 `position:relative; height:0` 的
+  // **零高度定位锚**时)写的是 `min(70vh, 520px)`:那时包含块高度是 0,`100%` 会解析成
+  // **0**。**那层锚已经被顶栏线删掉了**(见 `src/client/toolbar.tsx` 文件头 §4):
+  // 现在 `RepositoryPanel` 是 `ToolbarDropdown` 的 `dropdownContentRenderer` 的直接产物,
+  // 落在 `#foldout-container > .foldout` 里,而 `.foldout` 拿的是
+  // `ui/toolbar/dropdown.tsx:381-407` 的行内 `position:absolute; top:0; height:100%`
+  // (容器 `:366-379` 是 `position:fixed; top:rect.bottom; height:calc(100% - rect.bottom)`)
+  // ⇒ **包含块有了确定高度**,`100%` = 「工具栏底边 → 视口底边」,正好是 Desktop 那种
+  // **整幅面板**(不是浮卡片)。
+  //
+  // **真 Chrome 实测**(`/tmp/j1-domprobe`,CDP,`#foldout-container` = 1200×763):
+  // | 面板 `height` | `.gw-repo-pop` | `.gw-repo-local` | Grid 内联高 | `.repository-list-item` |
+  // |---|---|---|---|---|
+  // | `100%`(本条) | 310×**763** | 731 | **686px** | **1 行**(`dsh-git`) |
+  // | `min(70vh,520px)`(强制覆盖) | 310×**520** | 488 | 443px | 1 行 |
+  // 两者都能让列表渲染(都有确定高度);`100%` 铺满 foldout,`min()` 会在面板下方留
+  // 243px 的空带 —— 那是浮卡片时代的上限,**不要沿用回来**。若哪天包含块又变回零高度
+  // (例如把锚点加回来),`100%` 会重新解析成 0,那时才需要退回 `min()`;两者不能同时写。
+  //
+  // ## ②③④ 三条
+  //
+  // ② `.gw-repo-local` 拿走剩余高度(上游 `.repository-list` 自己没有 flex/height,
+  // 见上;`display:flex;column` 是把高度继续往下传的那一环);
+  // ③ 上游列表根 `.repository-list` 才能长高 ⇒ `.filter-list-container` / `.list` /
+  // Grid 才有非零高度;
+  // ④ 远端仓库段(本插件自己的产品面,不是 Desktop 的)是**固定高度**的页脚,
+  // `flex:0 0 auto` 不参与抢高度 —— 它曾经因为和本地段共用 `flex:1` 而把列表挤成 0。
+  //
+  // ## 底色/边框/圆角/内边距/z-index 现在由谁给(**不要**把 `.gw-pop` 的卡片外观加回来)
+  //
+  // 面板**不再是 `.gw-pop`**(`repo-bar.tsx` 的面板类名是 `gw-repo-pop gw-repo-list`),
+  // 所以 `styles.ts` 的 `.gw-pop{...}` 与 `pop-width.scss` 的
+  // `.gw-pop{width:var(--gw-pop-width)}` 都**打不到它**。现在这一套来自**顶栏面的上游
+  // `ui/_foldout.scss`**(已进产物、真 Chrome 已证命中):
+  // - **底色/文字色** —— `.gw-toolbar #foldout-container .foldout { background:
+  // var(--background-color); color: var(--text-color) }`(`_foldout.scss:20-23`;
+  // 两个变量由顶栏作用域里的 `dsh-desktop-bridge` 绑到 `--dsw-alias-bg-layer-1` /
+  // `--dsw-alias-label-*`)。⇒ 覆盖由 `.foldout` 提供。
+  // ⚠️ 探针页里它是 `rgba(0,0,0,0)` —— 那是**探针没有宿主令牌**的假象
+  // (`--dsw-alias-bg-layer-1` 未定义 ⇒ `var()` 链整条失效),不是缺陷。
+  // - **遮罩** —— `.gw-toolbar #foldout-container .overlay { background:
+  // var(--overlay-background-color); height:100% }`(`_foldout.scss:11-16`)。
+  // - **z-index** —— `.gw-toolbar #foldout-container { z-index: var(--foldout-z-index) }`
+  // (`_foldout.scss:1-2`;`--foldout-z-index:17` 声明在顶栏作用域,真 Chrome 实测 z=17)。
+  // - **边框 / 圆角 / 内边距** —— **上游刻意没有**:Desktop 的仓库下拉是一整块从工具栏
+  // 底边铺到视口底边的面板,不是卡片;`.gw-pop` 那 8px 内边距、圆角与阴影正是
+  // 「看起来又不对」的来源。**谁也不要为了「好看」把它们加回来**。
+  //
+  //
+  // ⚠️ 选择器写成 `.gw-repo-list.gw-repo-pop`(两个类),不用 `[data-gw-repo-pop]`:
+  // 两者**现在都合法** —— `findLeakedRules` 自 2026-10 起把 `[` 纳入「紧跟作用域根的
+  // 合法字符」,`.gw-repo-list[data-gw-repo-pop]` 不会再被误报成「没套作用域」
+  // (判据的自检夹具在 `scripts/styles.mjs` 的 `leakPredicateSelfTest`)。这里仍选
+  // **类名**形状,因为它不依赖那个只给行内 `<style>` 用的 `data-*` 键 —— 行内那段
+  // 删掉之后也照样成立。两个类同样只命中这**一个**面板元素(远端段是
+  // `gw-repo-list gw-remote-list`,没有 `gw-repo-pop`),特异性与 `[data-gw-repo-pop]`
+  // 相同(0-2-0)。
+  //
+  &.gw-repo-pop {
+    // ① 接住 foldout 的确定高度,并把剩余高度交给 ②。
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  // ② 本地段拿走剩余高度(上游 `.repository-list` 没有 flex/height)。
+  .gw-repo-local {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .gw-repo-local > .repository-list {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  // ④ 远端段是固定高度的页脚(折叠 = 一行开关),不参与抢高度。
+  .gw-remote-section {
+    flex: 0 0 auto;
+    min-height: 0;
+    border-top: 1px solid var(--dsw-alias-border-l1);
+    margin-top: 4px;
+  }
+}
+
+//
+// ==========================================================================
+// 上游 partial —— **顶层** import(顺序 = 输出顺序)
+// ==========================================================================
+//
+@import './upstream/ui/repository-list';
+@import './upstream/ui/filter-list';
+@import './upstream/ui/list';
+@import './upstream/ui/list-item-insertion-overlay';
+@import './upstream/ui/repository';
+@import './upstream/ui/text-box';
+@import './upstream/ui/checkbox';
+@import './upstream/ui/button';
+@import './upstream/ui/row';
+@import './upstream/ui/octicons';
+@import './upstream/ui/popover';
+@import './upstream/ui/ref';
+@import './upstream/ui/scroll';
+
+//
+// 本插件自己的容器契约(不是从 Desktop 沿用的):
+// `.gw-pop` 在 `styles.ts` 里是 flex column,`.gw-repo-pop` 是它的具体身份。
+// 面板高度由上层的 `max-height` 决定,列表自己滚 —— 照 Desktop 的 `.filter-list`
+// (列表是滚动区,不是整页滚)。
+//
+.gw-repo-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+//
+// ==========================================================================
+// 适配(不是上游样式)—— 让 `.list` 撑满面板宽
+// ==========================================================================
+//
+// **症状**:作用域根 `.gw-repo-list` 落到面板上之后,`.list` 塌到**内容宽 178.8px**
+// (面板内宽 384px)⇒ 项目名被省略号砍掉、`↑↓` 指示器挤在行中间。
+//
+// **原因**:上游 `.filter-list-container` 是 `display:flex`,但**不给它的 flex 子项
+// `.list-focus-container`(`ui/lib/focus-container.tsx` 渲染)任何宽度约束**;
+// 在上游的 DOM 里宽度由更外层决定,而我们的外层不同 ⇒ flex 基线按内容宽收缩。
+//
+// **已实测排除的替代方案**(真 Chrome,每次只改一处):
+// `.repository-list{min-width:0}` / `.list{max-width:100%}` / `.list{width:100%}` /
+// `.filter-list{flex:0 0 auto}` / `.filter-list-container{width:100%}` /
+// 面板行内 `min-width:0` / 面板行内 `overflow:hidden` / 把作用域根挂到
+// `.gw-root`·`.gw-header` / 加一层 `display:flex;flex-direction:column` 包裹层
+// —— **只有**下面这一条让 `.list` 回到 384px。178.8px 的确切来源仍未挖到底(如实记录)。
+//
+// **写法**:写在**顶层且不手写作用域前缀**。构建期 `prefixTopLevelSelectors` 会自动补成
+// `.gw-repo-list .list-focus-container`;手写前缀会变成 `.gw-repo-list .gw-repo-list …`
+// 并被「单条选择器里作用域根出现 >1 次」的构建期断言直接拦下。
+//
+.list-focus-container {
+  width: 100%;
+}

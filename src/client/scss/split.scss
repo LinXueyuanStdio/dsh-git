@@ -1,0 +1,144 @@
+/**
+ * **`.gw-split` 面(左右两栏网格 + 拖拽分隔条)的编译入口**(Sass)。
+ *
+ * ## 为什么单独一个入口文件
+ *
+ * 以前这一面与 diff 面**共用** `desktop-diff.scss`,于是整份样式被编译了两遍 ——
+ * 产物里每个 `.gw-desktop-diff …` 选择器都出现两次(约 80KB 纯冗余),而
+ * `scripts/styles.mjs` 的旧去重逻辑(按「作用域块体」找规则)在**扁平**的产物上
+ * 一条都删不掉。现在 **一个面 = 一个入口文件**,冗余从源头上消失。
+ *
+ * ## 作用域怎么加
+ *
+ * 上游 `ui/_resizable.scss` 是**顶层** `@import`(没有包裹作用域根),作用域由
+ * `scripts/styles.mjs` 在**编译产物**上逐选择器加前缀。这样上游 `&` 的语义完全不变
+ * —— 这也是 `_tab-bar.scss` 那 19 条死选择器(嵌套 `@import` 会把第二个 `&` 换成
+ * 完整父选择器)被修好的同一条机制。
+ *
+ * 我们**自己手写**的适配层仍旧写在 `.gw-split { … }` 块里(前缀化认出它已经带作用域
+ * 根而原样保留),所以这一部分产物与改动前逐字一致。
+ *
+ * 组件本体是与上游一致的 `src/core/desktop/ui/resizable/resizable.tsx`
+ * (Desktop `ui/resizable/resizable.tsx`),用法也照 Desktop `ui/repository.tsx:410-421`:
+ * 把左栏内容整个包进 `<Resizable width={…} minimumWidth={…} maximumWidth={…}>`。
+ * 宽度数值与持久化在 `src/client/history-view.tsx` 的 `useSplitWidth()`(两个页签共用)。
+ *
+ * **作用域为什么独立**:分隔条在左右两栏之间,`.gw-desktop-diff` 只是右栏内部的
+ * diff 面板,手柄根本不在它里面。上游这份表只有 `.resizable-component` 与
+ * `.resize-handle` 两个选择器,但仍是裸选择器,不套作用域一样会外溢。
+ */
+
+// mixins 只定义 @mixin、不产出任何 CSS,放顶层导入。
+@import './upstream/mixins';
+
+/*
+ * 这里**刻意不** import `dsh-bridge`:`.gw-split` 是 `.gw-desktop-diff` 的**祖先**,
+ * 而变量桥把变量定义在那些孙辈作用域根上,祖先规则看不见(也不该依赖)。
+ * `_resizable.scss` 只用到 `--drag-overlay-z-index`,下面就地绑。
+ */
+
+// `.sr-only` 的**基础配方**:`AriaLiveContainer` 拖拽时宣告
+// 「Repository sidebar width increased. Set to 42%」,缺配方会以**可见文本**挤在左栏。
+@import 'sr-only-recipe';
+
+.gw-split {
+  /*
+   * 上游 `styles/_variables.scss:351` 定义 `--drag-overlay-z-index: 15`,而那份变量表
+   * **不在**编译范围里(diff 面的变量桥只桥了取色与尺寸)。不在这里绑,`.resize-handle`
+   * 的 `z-index: var(--drag-overlay-z-index)` 会因为 `var()` 未定义而**整条声明失效**
+   * —— goal 文档 §3 失败模式 10:`--gw-mono` 就是这样静默失效了 4 处。数值沿用上游。
+   *
+   * (本文件声明的每一个自定义属性都在 `scripts/styles.mjs` 的 `PORT_SURFACES`
+   *  `variables` 里登记,构建会断言「声明真的在自己作用域下」;整个产物还会被
+   *  「`var()` 引用了从未声明的变量」那条断言再扫一遍。)
+   */
+  --drag-overlay-z-index: 15;
+}
+
+/*
+ * ==========================================================================
+ * 上游 `ui/_resizable.scss` —— **顶层** import
+ * ==========================================================================
+ */
+@import './upstream/ui/resizable';
+
+/*
+ * 以下都是**我们的适配层**,上游那两个文件一个字没改。
+ */
+.gw-split {
+  > .left {
+    /*
+     * (1) 左栏原来的 1px 右边框在 `.left` 上(`styles.ts` 的 `.gw-split>.left`)。手柄是
+     * 绝对定位 `right:-3px`,而 `.resizable-component` 的宽度 = 网格轨宽、`.left` 是
+     * border-box,边框留在 `.left` 上会被列表行的悬停底色盖掉那 1px。把边框**移到
+     * resizable 上**:位置与像素宽度完全不变(它自己的 box-sizing 也是 border-box),
+     * 但列表内容再也盖不住它。
+     */
+    border-right: none;
+
+    > .resizable-component {
+      /*
+       * (2) 上游 `.resizable-component` 是 `display:flex; flex-shrink:0` 的**行内**子元素,
+       * 靠父级 flex row 的高度拉伸;我们把它放进已有的 `.left`(flex column)里,
+       * 所以要显式撑满高度,内部的 `.gw-chead`(flex:none)/`.gw-files`(flex:1)/
+       * `.gw-commit`(flex:none)才能照原样分配。
+       */
+      flex: 1;
+      min-height: 0;
+      min-width: 0;
+      border-right: 1px solid var(--dsw-alias-border-l1);
+    }
+  }
+
+  /*
+   * (3) 上游手柄是一条 6px 的**透明**竖条,唯一的暗示是 `ew-resize` 光标。Desktop 的窗口
+   * 有 960px 最小宽度、侧栏边缘在视线可及处;我们长在 280–720px 的 DSH 侧栏里,
+   * 一条不可见的 6px 条没人能找到,所以补一条 hover / focus 的可视提示。
+   * 颜色只用宿主令牌,深浅主题自动跟随。
+   */
+  .resize-handle:hover,
+  .resize-handle:focus-visible {
+    background: var(--dsw-alias-border-l2);
+  }
+
+  /*
+   * 焦点环:**只声明样式**,颜色与宽度留给宿主的全局 `:focus-visible`
+   * (`ui-theme/src/styles/focus.css:14-17` 声明
+   * `outline-color: var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary))`
+   * 与 `outline-width: var(--dsw-focus-ring-width)`)。
+   *
+   * 为什么不沿用上游那句 `outline: 2px solid var(--focus-color)`:
+   *  1. 那条会**顶掉**宿主的 `outline-color`,于是宿主在指针模态下把
+   *     `--dsw-focus-ring-color` 置成 `transparent` 的抑制(点一下鼠标也会画环)失效;
+   *  2. `--dsw-focus-ring-*` 不在本文件的变量桥里,而构建期的变量绑定断言
+   *     (`scripts/styles.mjs` 的 `findUnboundVariables`)只认 `--dsw-alias-*` 为宿主令牌
+   *     ⇒ 直接 `var()` 引用它们会让构建红。交给宿主全局规则就没有这个矛盾。
+   * 结果:键盘聚焦时是宿主标准的 2px 蓝色环(浅 #4176e6 / 深 #7aaaFF),点击时不画。
+   */
+  .resize-handle:focus-visible {
+    outline-style: solid;
+    outline-offset: -2px;
+  }
+
+  /*
+   * `AriaLiveContainer`(`ui/accessibility/aria-live-container.tsx:107`)渲染的是
+   * `className="sr-only"`。它挂在 `.gw-split` 之下 —— 缺了这一条,拖拽时宣告的
+   * 「Repository sidebar width increased. Set to 42%」会以**可见文本**挤在左栏里。
+   */
+  .sr-only {
+    @include sr-only-recipe;
+  }
+
+  /*
+   * (4) 窄到 420px 以下时,`styles.ts` 的容器查询把 `.gw-split` 从左右两栏改成上下两行
+   * (`@container (max-width: 420px)`),此时**没有横向分隔条**,手柄必须藏掉:
+   * 留着它就成了一个「拖了没用」的假手柄(方向也错了)。断点与视图里的
+   * `SPLIT_STACK_BREAKPOINT` 必须一致 —— 视图在竖排时不再渲染 `Resizable`,
+   * 这里只是兜住「渲染了但被 CSS 藏掉」的那一帧。
+   */
+  @container (max-width: 420px) {
+    .resize-handle {
+      display: none;
+    }
+  }
+}

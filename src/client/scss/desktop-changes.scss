@@ -1,0 +1,453 @@
+/**
+ * **`.gw-desktop-changes` 面(Changes 页签的容器与它内部各块)的编译入口**(Sass)。
+ *
+ * ## 为什么有这一面
+ *
+ * `src/client/scss/desktop-diff.scss` 的 14 条 `@import` 里**没有 `ui/changes`**,
+ * 所以上游 `references/desktop/app/styles/ui/changes/**` 的 8 个 partial 从来没进过
+ * 编译闭包。而 `src/client/styles.ts:546-611` 的注释**自认**那一带的尺寸/布局是
+ * 「照 Desktop 数值手写」的 —— 「沿用了但用手写替代」在样式层的根因就是这个缺口。
+ *
+ * 机械证据(审计):
+ *   changes-list-container / commit-button / action-bar / filter-popover /
+ *   hidden-changes-warning / changes-interstitial / no-changes-filtered / undo-commit
+ *   这 12 个抽样类名在本文件存在之前,产物里 **0 命中**;而同一支探针里
+ *   `seamless-diff-switcher` 48 处、`repository-list` 54 处 ⇒ 探针本身是有效的。
+ *
+ * ## 做法
+ *
+ * 与其它面完全一致:上游 partial **顶层** `@import`(一个字都不改),作用域由
+ * `scripts/styles.mjs` 在编译产物上逐选择器加前缀。加这一面**只需要**
+ * 「一个入口 SCSS + `PORT_SURFACES` 里一条表项」,判定逻辑一行都不用动 —— 这正是
+ * 声明式注册表要证明的契约。
+ *
+ * ## 已知缺口(留给接线上游 Changes 容器的线,列出而不是假装没有)
+ *
+ * `ui/changes/**` 的组件还会渲染这些**原语**,而它们的 partial **不在本入口的闭包内**
+ * (上游把它们放在全局 `app.scss` 里;我们每个面必须自给自足):
+ *   - `ui/_button.scss`(`.button-component` —— 提交按钮 / Continue rebase 按钮)
+ *   - `ui/_octicons.scss`(`svg.octicon` —— 每一行的状态图标)
+ *   - `ui/_text-box.scss`(`.text-box-component` —— 摘要/描述输入框)
+ *   - `ui/_checkbox.scss`(`.checkbox-component` —— `changed-file.tsx` 的行级勾选)
+ *   - `ui/_row.scss` / `ui/_popover.scss` / `ui/_list.scss`(`.filter-popover` 的宿主、
+ *     Changes 列表本体)
+ *   - `ui/_dialog.scss`(`_oversized-files-warning.scss` 里的 `.dialog-content` ——
+ *     16KB / 39 个 partial 的闭包,按 `scripts/base-recipes-baseline.json` 里
+ *     dialog 那条的既定裁决:**等 dialog 面开面时一起 import**,不要塞进本面)
+ * 接线那一步的修法就是在本文件上面加对应的 `@import` 一行,并在注册表的 `requires`
+ * 里加一条断言 —— 仍然不用碰判定逻辑。
+ *
+ * `ui/_ref.scss` **已经**在这里 import:`no-changes.tsx`(Changes 的空态)渲染
+ * `<Ref>`,而这个 partial 之前只挂在 `.gw-desktop-diff` 下(见 `desktop-diff.scss`
+ * 的 (6) 段注释)—— 它真正的使用方就在本面。
+ *
+ * ## 上游自己的一个 bug(必须就地补,否则整条声明静默失效)
+ *
+ * `_changes-list.scss:68` 用了 `var(--spacing-quarter)`,而上游**从未定义**这个变量
+ * (已 `grep` 上游全树确认:只有这一处**引用**,没有任何定义)。未定义的 `var()` 会让
+ * **整条声明**按 invalid-at-computed-value-time 丢掉 —— goal 文档 §3 失败模式 10
+ * (`--gw-mono` 与 `--drag-overlay-z-index` 各踩过一次)。下面按上游自己的间距命名法
+ * (`--spacing-half`=5px=`spacing/2`、`--spacing-third`、`--spacing-quad`)
+ * 补 `calc(var(--spacing) / 4)`,不发明数值。
+ *
+ * `@import` 的弃用警告同其它入口:上游 partial 的 `&` 与变量可见性语义要逐字保留。
+ */
+
+// mixins 只定义 @mixin、不产出任何 CSS,放顶层导入。
+@import './upstream/mixins';
+
+// 变量桥(取色/尺寸共用那一组)。
+@import 'dsh-bridge';
+
+// `.sr-only` 的基础配方(`TooltippedContent` 在这面也会用)。
+@import 'sr-only-recipe';
+
+.gw-desktop-changes {
+  // Desktop 主题变量 → DSH 令牌。
+  @include dsh-desktop-bridge;
+
+  /*
+   * ---------- changes 面独有的变量 ----------
+   *
+   * 全部逐条核对了上游定义处;结构数值沿用,**颜色一律绑 DSH 令牌**
+   * (`_dsh-bridge.scss` 开头写的那条契约)。
+   */
+  --font-size-md: 14px; /* `_variables.scss:87` */
+  --font-size-xl: 32px; /* `:89` */
+  --font-weight-light: 300; /* 结构数值,沿用上游 */
+  --spacing-quad: calc(var(--spacing) * 4); /* `:242` 原样 */
+  --undo-animation-duration: 500ms; /* `:462` 原样 */
+
+  /*
+   * ⚠️ 上游**没有**这个变量(它只被引用、从未定义):`_changes-list.scss:68`
+   * 的 `margin-top: var(--spacing-quarter)`。不补这一条,那个 `margin-top` 整条失效。
+   * 取值按上游间距命名法推:`--spacing-half`=5px=spacing/2、`--spacing-third`、
+   * `--spacing-quad`=spacing×4 ⇒ quarter = spacing/4。**不发明数值**。
+   */
+  --spacing-quarter: calc(var(--spacing) / 4);
+
+  /* 列表行的三种态(`_list.scss` 的 `.selected` / `.hoverable` 家族在这里也要能用)
+   *
+   * `--box-selected-background-color`:上游 `_variables.scss:139` 是**字面值** `#ebeef1`
+   * (哑光蓝灰)。宿主的「选中控件底色」别名 `--dsw-alias-button-ghost-active-fill` 浅色值是 `#ebeef2` ——
+   * 几乎同值(深色 `#43454a`),而且是宿主自己的选中态用法(`ui-primitives/Pill.module.css` 的 `.active`,
+   * 以及 `ui-settings-general/.../SettingsRoot.module.css:164` 的 `.navCell.active`,后者绑的
+   * `--dsw-specific-sidebar-nav-item-active` 与它**逐主题同值**)。
+   * 原来绑的 `--dsw-alias-bg-multi-select` 在宿主源码里 **0 个消费方**。
+   *
+   * `--box-selected-active-background-color`:上游 `:170` 是 `$blue`(饱和蓝)+ `$white` 文字。
+   * ⚠️ **冲突记账**:宿主没有实心蓝底令牌(唯一的蓝色选区令牌是 40% 半透明,
+   * 白字读不出来)⇒ 这一级取「更强一档的中性交互底」,保留两级区别而不是压成一级。
+   * 这就是用户截图里 Changes 列表选中行的「哑光蓝灰」来源。 */
+  --box-selected-background-color: var(--dsw-alias-button-ghost-active-fill);
+  --box-selected-active-background-color: var(--dsw-alias-interactive-bg-active);
+
+  /* 提交区 / 图标态(`_variables.scss:54-64`、`themes/_dark.scss:52-60`) */
+  --commit-message-action-button-separator-color: var(--box-border-color); /* `:64`(浅色口径) */
+  --input-icon-error-color: var(--dsw-alias-state-error-primary); /* `:55` `$red-600` / 深色 `:53` `$red-400` */
+  --input-icon-warning-color: var(--dsw-alias-state-warn-primary); /* `:54` `$yellow-800` / 深色 `:52` `$yellow-600` */
+  --input-icon-hover-background-color: var(--dsw-alias-interactive-bg-hover); /* `:56` `$gray-100` / 深色 `:54` `$gray-800` */
+  --commit-message-icon-error-color: var(--input-icon-error-color); /* 深色 `:60` 原样就是这个引用 */
+  --commit-message-icon-warning-color: var(--input-icon-warning-color); /* 深色 `:59` 同上 */
+
+  /* 链接与信息色(`_variables.scss:35` 是 `$blue-600`、`:483` 是 `$blue-400`)——
+   * 上游这两条都是**蓝**。宿主自己的链接令牌就是 `--dsw-alias-link`
+   * (浅 `deepseek-500 #4176e6` / 深 `deepseek-400 #7aaaFF`);
+   * 「信息」色同理取蓝色强调令牌(宿主没有独立的 information 令牌)。 */
+  --link-button-hover-color: var(--dsw-alias-link);
+  --dialog-information-color: var(--dsw-alias-state-business-primary);
+
+  /*
+   * ==========================================================================
+   * `.sr-only` 的基础配方(上游 `ui/_app.scss:115-123`)—— **本面此前漏了 include**
+   * ==========================================================================
+   *
+   * 本文件第 62-63 行早就 `@import 'sr-only-recipe'`,但那只带进来一个 **`@mixin`**,
+   * 一个字节的 CSS 都不产出;真正让它生效的是 **`@include`** —— 而本面**从来没有**
+   * include 过。于是产物里 `.sr-only` 只存在于 `.gw-desktop-diff` / `.gw-split` /
+   * `.gw-desktop-history` / `.gw-repo-list` 四个作用域下,**`.gw-desktop-changes` 下一条都没有**。
+   *
+   * 为什么现在必须补:`hidden-changes-warning` 告警条渲染
+   * `<span className="sr-only">警告:</span>`(`src/client/hidden-changes-warning.tsx`,
+   * 上游 `ui/changes/filter-changes-list.tsx:1414`)。缺配方时它会以**可见文本**渲染
+   * —— 正是 goal 文档 §7 那次最贵的返工(读屏文本挤进布局)。
+   *
+   * ⚠️ 三道旧守卫都抓不到它:`check-base-recipes.mjs` 判的是**类名级**的配方是否存在,
+   * 而 `.sr-only` 的 local recipe 在 `desktop-diff.scss:102` 里**确实存在**
+   * (所以它一直躺在 `ok(local review)` 桶里);类名覆盖自检只管
+   * 「类名出现过没有」;令牌检查只管 `--dsw-alias-*`。**这是逐作用域的盲区**,
+   * 已登记进交付报告(修法要另一条线改 `check-base-recipes.mjs`,不在本泳道所有权内)。
+   */
+  .sr-only {
+    @include sr-only-recipe;
+  }
+}
+
+/*
+ * ==========================================================================
+ * 上游 `ui/changes/**` —— 顶层 import(上游自己的聚合表,顺序就是上游顺序)
+ * ==========================================================================
+ *
+ * `_changes.scss` 逐条 import:commit-message / continue-rebase / changes-list /
+ * undo-commit / changes-interstitial / oversized-files-warning / commit-warning /
+ * submodule-diff。用聚合表而不是手写 8 行:上游加一个 partial 我们自动跟上。
+ *
+ * `submodule-diff` 的表服务的是**死的**子模块 diff 分支(host 构造不出
+ * `ISubmoduleDiff`,`docs/goal-port-desktop.md` 记过),它进闭包只是几十行死 CSS;
+ * 但它会让 `scripts/check-base-recipes.mjs` 里 4 条「基础配方在闭包外」的基线条目
+ * 变成已失效 —— 那份基线归另一条线持有,这里**只报数字不改它**。
+ */
+@import './upstream/ui/changes';
+
+/*
+ * `ui/_ref.scss`:`no-changes.tsx`(本面的空态)渲染 `<Ref>` —— 见本文件开头。
+ * 与 diff 面各留一份:作用域不同就是**必须**的两份。
+ */
+@import './upstream/ui/ref';
+
+/*
+ * ==========================================================================
+ * `hidden-changes-warning` 告警条**额外**要的两个基底(2026-10 接线时补)
+ * ==========================================================================
+ *
+ * 告警条自己的配方(`.hidden-changes-warning` 那一段)来自
+ * `ui/changes/_changes-list.scss:257-276`,而它**已经**在闭包内(上面那张
+ * `ui/changes` 聚合表 —— `requires` 里也早就登记了 `.hidden-changes-warning`)。
+ * 但告警条**渲染出来的两个子组件**各自的基底不在这张表里:
+ *
+ *  1. `ui/_octicons.scss` —— 告警图标 `<Octicon symbol={octicons.alert} />`
+ *     (上游 `filter-changes-list.tsx:1413`)。缺它就是缺 `svg.octicon { fill: currentColor }`,
+ *     于是 `.hidden-changes-warning .octicon { color: var(--file-warning-color) }`
+ *     (`_changes-list.scss:267-270`)**整条看不见效果** —— SVG 的 `fill` 默认是 `black`,
+ *     `color` 只有经由 `currentColor` 才起作用。图标会画成**黑色**而不是告警黄/橙。
+ *  2. `ui/_button.scss` —— 链接按钮 `<LinkButton>`(上游 `:1416`)。本面此前只有
+ *     `.hidden-changes-warning .link-button-component { display: inline }`
+ *     这条**覆盖**(`_changes-list.scss:271-273`),**没有**基底配方
+ *     (`.link-button-component` 的颜色 / `text-decoration:none` / `cursor` / `inline-flex`
+ *     在 `ui/_button.scss:61-90`)。缺它就是原生 UA 蓝下划线链接,不是 Desktop 的样子。
+ *
+ * 这两条正是本文件开头「已知缺口」清单里的第 1、2 项,当时的结论就写着
+ * 「接线那一步的修法就是在本文件上面加对应的 `@import` 一行」。
+ *
+ * `_button.scss` 同时把 `.button-component` 一族带进本面 —— 那本来也是
+ * Changes 容器接线(提交按钮)要用的。今天本面已经**有渲染方**(`changes-view.tsx` 的视图根带
+ * `gw-desktop-changes`),但我们手写的 DOM 里没有 `.button-component`(我们的按钮是 `.gw-btn`),
+ * 所以这一族目前**匹配不到任何节点** —— 它们是给容器接线准备的,不是给现在这块壳的。
+ * 碰撞审计已做:见 `changes-view.tsx:137-201` 的注解(184 条 `.gw-desktop-changes…` 选择器里
+ * 命中的只有 `.hidden-changes-warning` / `.octicon` / `.link-button-component` / `.sr-only`)。
+ *
+ * ⚠️ 注册表(`scripts/styles.mjs` 的 `PORT_SURFACES`)的 `requires` **没有**
+ * `svg.octicon` / `.link-button-component` 这两条断言,而那两个文件归另一条线持有
+ * ⇒ 本泳道**只报不改**:建议在 `changes` 表项的 `requires` 里加
+ * `'svg.octicon': '告警条图标(上游 _octicons.scss)'` 与
+ * `'.link-button-component': '告警条里的调整筛选链接(上游 _button.scss:61)'`。
+ */
+@import './upstream/ui/octicons';
+@import './upstream/ui/button';
+
+/*
+ * ==========================================================================
+ * 「Committing as」头像按钮 + 它的浮层(GitHub Desktop 的
+ * `ui/changes/commit-message-avatar.tsx`,上游样式 `ui/_commit-message-avatar.scss`)
+ * ==========================================================================
+ *
+ * ## 为什么这四条 `@import` 在本面是**新增**而不是本来就该有
+ *
+ * 上游把 `ui/_commit-message-avatar.scss` 挂在全局 `_ui.scss:93`,还顺手用了
+ * `ui/_avatar.scss` / `ui/_popover.scss` / `ui/_row.scss` 三个原语 partial
+ * (`_ui.scss` 是 Desktop 的**应用级**入口,我们每个面必须自给自足 ⇒ 谁用谁 import)。
+ * 本面此前一条都没有:实测产物里 `.gw-desktop-changes .avatar` /
+ * `.commit-message-avatar-component` / `.popover-component`(顶层)/ `.popover-tip` /
+ * `.row-component` **各 0 条**(只有 `.button-component` 1 条、`.link-button-component` 1 条、
+ * `svg.octicon`)—— 也就是「组件接上了、皮没接上」那种**看起来只是有点怪**的坏。
+ *
+ * ## 两个徽章变量:为 partial 的 `var()` 提供真源(不是配色决定)
+ *
+ * `_commit-message-avatar.scss:43-44` 引用 `--commit-warning-badge-background-color`
+ * 与 `--commit-warning-badge-border-color`,而本面闭包里**一个都没有**
+ * (产物里 0 次声明)⇒ 不绑就会触发构建的「变量未绑定」硬门。
+ *
+ * ⚠️ **上游自己命名不一致,如实记下**:`_variables.scss:223-224` 声明的第二个名字是
+ * `--commit-warning-badge-border`(**没有 `-color`**),而 partial 引用的却是
+ * `--commit-warning-badge-border-color` ⇒ 上游那一处**从来解析不到**(整条
+ * `border: var(--commit-warning-badge-border-color) 1px solid` 按
+ * invalid-at-computed-value-time 丢掉)。我们照 partial 引用的名字绑,是为了让
+ * 「规则要不要生效」这件事在我们这里**由数据决定**,而不是由上游那个拼写事故决定。
+ *
+ * ⚠️ 这两条规则今天**不可达**:头像组件的 `warningType` 恒 `'none'`(见
+ * `src/client/changes-view.tsx` 的 `CommitAuthorAvatar`),`warning-badge` 那个 div
+ * 压根不渲染,所以这两个变量今天**没有任何可见后果**。它们存在的唯一理由是让
+ * 上游 partial 原样进来。补上账号邮箱面(`GET /user/emails`)之后,这里会被真正点亮。
+ */
+.gw-desktop-changes {
+  /* 上游 `_variables.scss:223` = `$gray-000`(近白):徽章是**警示图标的白底圆点**,
+     所以取宿主的「基底」层,而不是某个状态色。 */
+  --commit-warning-badge-background-color: var(--dsw-alias-bg-layer-1);
+  /* 上游 `:224` 是 `$gray-300`;宿主对应的「浅边框」角色是 border-l2。 */
+  --commit-warning-badge-border-color: var(--dsw-alias-border-l2);
+}
+
+@import './upstream/ui/avatar';
+@import './upstream/ui/row';
+@import './upstream/ui/popover';
+@import './upstream/ui/commit-message-avatar';
+
+/*
+ * ==========================================================================
+ * 摘要行(头像 + 输入)—— 本泳道**新增的适配类**,不是上游类名的替身
+ * ==========================================================================
+ *
+ * 上游那一行是 `.commit-message-component .summary`
+ * (`ui/changes/_commit-message.scss:83-87`):
+ *
+ *     .summary { position: relative; display: flex; flex-direction: row;
+ *                column-gap: var(--spacing-half); }
+ *
+ * 我们的提交表单是**手写**的(`changes-view.tsx` 的 `.gw-commit`,上游那个容器整支
+ * 被 tree-shake),所以蹭不上 `.commit-message-component` 那条规则 ⇒ 用自己命名的
+ * `.gw-cm-summary`,只搬**这一行真正需要的两条**(flex row + 列间距);
+ * `align-items` 上游没写(默认 `stretch`),这里显式写 `center`,理由见下。
+ */
+.gw-cm-summary {
+  display: flex;
+  flex-direction: row;
+  /* 上游 `column-gap: var(--spacing-half)` = 5px(`_dsh-bridge.scss` 的变量桥)。 */
+  column-gap: var(--spacing-half);
+  /*
+   * 上游靠 `stretch` 天然对齐,是因为它两边都是 `--text-field-height` = **25px**
+   * (`.commit-message-avatar-component` 的宽高 + `_text-box.scss` 的输入框高)。
+   * 我们手写的 `.gw-input` 是 `padding: 5px 7px` + `font-size: 12px` ⇒ 实测高约
+   * **28px**,比头像高 3px ⇒ 不显式居中,25px 的圆头像会明显贴上沿。这是**适配**,
+   * 不是配色/尺寸上的再发明。
+   */
+  align-items: center;
+}
+
+/* 输入框吃掉剩余宽度(`min-width:0` = 长路径/长摘要时不许把行撑破)。 */
+.gw-cm-summary > .gw-input {
+  flex: 1;
+  min-width: 0;
+}
+
+/*
+ * ==========================================================================
+ * 浮层宽度钳制 —— **本泳道唯一一条「防裁」规则,数值全部由真 Chrome 实测反推**
+ * ==========================================================================
+ *
+ * ## 为什么必须有它(不是「好看」,是会看不见)
+ *
+ * 上游 `.commit-message-avatar-component .popover-component` 是 `width: 300px`
+ * (`ui/_commit-message-avatar.scss:92-100`),而它锚在**左栏最左**的头像上
+ * (`anchorPosition: RightBottom` ⇒ floating-ui `right-end`,浮层向右展开)。
+ * 插件根 `.gw-root` 有 `contain: layout paint`(`src/client/styles.ts:38`):
+ *   · `layout` ⇒ 它成为 `position:fixed` 后代的**包含块**(位置算得对,好消息);
+ *   · `paint`  ⇒ 后代被**裁在它的 padding box 里**(溢出 = 用户看到残缺浮层)。
+ * 而 floating-ui 的 `isOverflowElement`(`@floating-ui/utils`)**只认 `overflow`,
+ * 不认 `contain`** ⇒ `shift`/`flip` 眼里的边界是**视口**,它们**不保证**浮层留在
+ * 插件根里。真 Chrome 实测(`docs/probes/commit-avatar-popover-probe.mjs`,
+ * 280px 面板 = `.gw-root{min-width:280px}` 的下限):
+ *
+ * | 情况 | `pop` 盒 | 结果 |
+ * |---|---|---|
+ * | 不钳宽 + 宿主面板自己也裁 | `x=961 w=300` | 右缘超出插件根 **61px**,可见比例 **0.80** |
+ * | 不钳宽 + **只有** `contain:paint` | `x=620 w=300` | 浮层整体落在插件根**左侧之外**,可见比例 **0** ⇒ 用户**什么也看不见** |
+ * | 钳宽后(本规则) | `x=961 w=224` | 四边溢出 **0**,可见比例 **1** |
+ *
+ * 第二条是最坏情况(也是 `shift` 反而更糟的机制):浮层放不下时 `flip` 先把它翻到
+ * 左边、`shift` 再按**视口**边界把它推进来,于是它整块跑到插件根外面被 `paint` 裁光。
+ *
+ * ## 56px 怎么复算(实测 + 推导一致)
+ *
+ * ```
+ * 41 = 8(.gw-commit 左内边距 `padding:7px 8px 8px`)
+ *    + 25(头像按钮 `--text-field-height`)
+ *    +  8(`TipSize`,`ui/lib/popover.tsx:57`;Balloon 装饰下 `offset(TipSize + 0)`)
+ * 15 = 10(上游 `PopoverScreenBorderPadding` = 10,`shift()` 用的视口内边距)
+ *    +  5(`--spacing-half`,目视余量)
+ * ```
+ * 实测吻合:280px 档钳宽后 `pop.x = 961`,而插件根左缘 = 920 ⇒ 左偏移 **41px**,
+ * 右缘 = 961 + 224 = 1185 ≤ 1200 − 15 ✓。
+ *
+ * ## 为什么用 `100cqw` 而不是 `100%`(两式**都量过**,数值相同)
+ *
+ * 真 Chrome 六档实测两式的**有效宽度完全一致**(都是 `min(300px, 根宽 − 56)`)、
+ * 四边溢出都是 0 —— 因为 `.gw-root` 没有 padding,而 `contain:layout paint` 让它同时
+ * 是 fixed 后代的包含块(`%` 的基准 = padding box)与 `container-type: inline-size`
+ * 的容器(`cqw` 的基准 = content box)。
+ *
+ * 选 `cqw` 的理由是**失败方向**:
+ *   · `%` 一旦哪天 `contain` 被去掉,基准会**静默变成视口** ⇒ 钳制几乎失效(视口
+ *     宽 − 56),而这个缺陷不会报错、只会重新开始裁;
+ *   · `cqw` 的基准**永远是插件根**(`container-type` 在 `styles.ts` 里是显式写的),
+ *     即使 `contain` 被去掉,浮层也**仍然**被钳在面板宽内。
+ * ⇒ 留 `cqw` 一条,不留两条。
+ */
+.gw-desktop-changes .commit-message-avatar-component .popover-component {
+  max-width: calc(100cqw - 56px);
+}
+
+// ==========================================================================
+// 提交按钮(「提交 N 个文件到 <分支>」)—— **通栏 + 高亮**
+// ==========================================================================
+//
+// ## 上游是什么(每个值都对着 file:line 核过)
+//
+// 组件是 `ui/changes/commit-message.tsx:1613-1631` 的
+//     `<Button type="submit" className="commit-button" onClick={this.onSubmit} disabled={!buttonEnabled} …>`
+// `Button` 本体(`ui/lib/button.tsx:234-241`)渲出来就是
+//     `<button class="button-component commit-button" type="submit">`
+// ⇒ 它的外观**几乎全部来自 `ui/_button.scss` 这一个 partial**,`.commit-button` 自己
+// 只补了三条。所以 JSX 那侧直接写这两个类名,下面**只声明上游 `.commit-button` 里
+// 我们蹭不到的那两条值 + 三个颜色角色变量**,其余一条都不重复。
+//
+// | 值 | 上游出处 |
+// |---|---|
+// | `height: var(--button-height)` = **25px** | `ui/_button.scss:14` + `_variables.scss:26` |
+// | `padding: 0 var(--spacing)` = **0 10px** | `ui/_button.scss:11` + `_variables.scss:239` |
+// | `border: 1px solid var(--secondary-button-border-color)` | `ui/_button.scss:13` |
+// | `border-radius: var(--button-border-radius)` = **6px** | `ui/_button.scss:19` + `_variables.scss:29` |
+// | 主按钮态 `background-color: var(--button-background)` / `color: var(--button-text-color)` | `ui/_button.scss:43-47`(`.button-component[type='submit']`) |
+// | hover:`border-color: var(--button-background)` + `background-color: var(--button-hover-background)` | `ui/_button.scss:49-52` |
+// | focus:`outline-offset: 4px`(+ hover 底色) | `ui/_button.scss:26-28` / `:54-58` |
+// | 禁用:`[aria-disabled='true'] { opacity: 0.6 }` | `ui/_button.scss:30-32` |
+// | 省略号:`@include ellipsis`(overflow hidden / text-overflow ellipsis / nowrap) | `ui/_button.scss:4` → `mixins/_ellipsis.scss:5-9` |
+// | `max-width: 100%` | `ui/changes/_commit-message.scss:322` |
+// | `margin-top: var(--spacing)` | `ui/changes/_commit-message.scss:323` |
+// | `@include ellipsis`(第二次,`.commit-button` 自己又写了一遍) | `ui/changes/_commit-message.scss:325` |
+// | **通栏** = flex column 的**默认** `align-items: stretch` | `.commit-message-component{display:flex;flex-direction:column}`(`ui/changes/_commit-message.scss:5-11`) |
+//
+// ## 「通栏」怎么来的(⚠️ 上游**没有** `width:100%`)
+//
+// 上游 `.commit-button` 只有 `max-width: 100%`,**没有任何 width/flex/display**。
+// 它之所以是通栏,是因为它是 `.commit-message-component`(flex column)的**直接子级**,
+// 走的是 flex 容器的默认 `align-items: stretch`。我们照同一机制做:
+// `changes-view.tsx` 把它从 `.row` 里搬出来、成为 `.gw-commit`
+// (`styles.ts:374` `display:flex;flex-direction:column`)的直接子级。
+// 唯一的加码是显式写一条 `align-self: stretch` —— 它与上游的**默认值等价**,
+// 但把这条不变式钉在按钮自己身上:将来谁给 `.gw-commit` 加 `align-items:center`,
+// 上游那份不会坏(它的祖先没这么写),我们这份会;写出来就没有这个静默退化空间。
+//
+// ## 颜色:上游是饱和蓝,宿主没有实心蓝底令牌 ⇒ 用宿主的**主按钮角色**三元组
+//
+// 上游(`_variables.scss:28-31`,深色同值 `themes/_dark.scss:28-30`):
+//     --button-background: $blue;  --button-hover-background: lighten($blue, 5%);
+//     --button-text-color: $white;
+// 而 `_dsh-bridge.scss:144-146` 把这三个变量绑成了**中性**底色
+// (`--dsw-alias-bg-layer-2` / `--dsw-alias-interactive-bg-hover` / `--dsw-alias-label-primary`)
+// —— 那是给「普通按钮」的角色,用在提交按钮上就是**没有高亮**。
+// 宿主**没有实心蓝底令牌**(唯一蓝色选区令牌 `--dsw-alias-bg-document-selection` 是
+// 40% 半透明,白字读不出来;缺口登记在 `_dsh-bridge.scss:24-49`),所以按
+// 「同一个变量喂两种角色 ⇒ 在本面按角色覆盖」的成文做法,**只在这一个按钮上**重绑这三个
+// 角色变量,取宿主**自己的主按钮三元组**:
+//
+// | 角色 | 绑到 | 宿主出处(浅 / 深) |
+// |---|---|---|
+// | 底 `--button-background` | `--dsw-alias-button-primary-fill` | `design-platform.css:204/322`(浅 `#0f1115` / 深 `#f9fafb`) |
+// | 字 `--button-text-color` | `--dsw-alias-label-primary-foreground` | `:220/338`(浅 `#ffffff` / 深 `#0f1115`) |
+// | 悬停底 `--button-hover-background` | `--dsw-alias-button-primary-hover` | `:205/323`(浅 `rgb(67,69,74)` / 深 `rgb(235,238,242)`) |
+//
+// 这三条**就是宿主自己 `ui-primitives/Button.module.css` 的 `.primary`** 用的那一组
+// (`.primary{background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground)}`
+// + `.primary:hover{background:var(--dsw-alias-button-primary-hover)}`)—— 不是我们配的色,
+// 是宿主对「主操作」这个角色的既有定义。对比度:浅色 白/`#0f1115` ≈ 18:1、悬停
+// 白/`rgb(67,69,74)` ≈ 9.6:1;深色 `#0f1115`/`#f9fafb` ≈ 17:1、悬停 ≈ 15:1。
+//
+// ⚠️ 与 `_dsh-bridge.scss:169-171` 那条「`brand-primary` 浅色近黑,别拿去当高亮底」的
+// 裁决**不冲突**:那条针对的是**选区**(底与字同色 ⇒ 黑块盖住文字),
+// 而这里底用 `button-primary-fill`、字用**成对的 `label-primary-foreground`**,
+// 两主题下都是反色关系。选区的裁决一个字没改。
+//
+// 退役条件:宿主若给出实心蓝底令牌(或有 `--dsw-alias-button-primary-fill` 之外更贴
+// 上游 `$blue` 的角色令牌),把这三条换成它即可 —— 那时本段注释与探针里的期望值同批更新。
+.gw-desktop-changes .gw-commit > .gw-commit-button {
+  /* 上游 `_commit-message.scss:322-323`(本段开头那张表里逐条列了)。 */
+  max-width: 100%;
+  margin-top: var(--spacing);
+  /* 上游靠 flex column 的默认 stretch;写出来防将来被 `align-items:center` 静默压窄。 */
+  align-self: stretch;
+  /* 上游 `_variables.scss:28-31` 的三个角色变量 ⇒ 宿主的主按钮三元组(见上表)。 */
+  --button-background: var(--dsw-alias-button-primary-fill);
+  --button-text-color: var(--dsw-alias-label-primary-foreground);
+  --button-hover-background: var(--dsw-alias-button-primary-hover);
+}
+
+// 提交按钮里那个转圈图标(只在「正在生成提交详情…」时渲染,见 `changes-view.tsx` 的
+// `commitButtonText` 那一段)的四条配方 —— **逐字**对齐上游 `.commit-button .octicon`:
+//
+//   references/desktop/app/styles/ui/changes/_commit-message.scss:327-334
+//     flex-shrink: 0; flex-grow: 0; margin-right: var(--spacing-half);
+//     height: 12px; margin-bottom: 1px;   /* 上游原话:In order to center it vertically */
+//
+// 上游选择器里的 `.commit-button` 在这边叫 `.gw-commit-button`(那是本面既有的适配类,
+// 见上面那段),所以这里只换类名、四条属性一个字不改。
+// 那两个 flex 属性在上游与我们这里其实都是**惰性**的(`.button-component` 没有
+// `display:flex`,见 `ui/_button.scss:3-34`),沿用是为了「上游改了这里跟着改」时能对上。
+// `--spacing-half` = 5px 来自本面的变量桥(`_dsh-bridge.scss` 的 `dsh-desktop-bridge`,
+// 展开在本文件第 65-67 行的 `.gw-desktop-changes` 上)⇒ 它在这棵子树里是**有定义**的。
+.gw-desktop-changes .gw-commit > .gw-commit-button > .octicon {
+  flex-shrink: 0;
+  flex-grow: 0;
+  margin-right: var(--spacing-half);
+  height: 12px;
+  margin-bottom: 1px;
+}

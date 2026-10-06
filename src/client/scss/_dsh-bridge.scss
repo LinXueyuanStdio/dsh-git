@@ -1,0 +1,295 @@
+//
+// Desktop 主题变量 → DSH 主题令牌(`--dsw-alias-*`)的**桥**。
+//
+// 为什么需要这一层:Desktop 的 `ui/*.scss` 与上游一致品靠一堆 CSS 变量取色
+// (`--diff-add-background-color`、`--text-color`、`--base-border` …),这些变量在 Desktop
+// 里由 `app/styles/_variables.scss` + `themes/_dark.scss` 定义,**取值来自 Desktop 自己的
+// 调色板**。本插件的契约是「颜色只来自宿主令牌」,所以不移植那两个主题文件,而是把
+// 每个变量**重新绑到语义相符的 DSH 令牌**上。
+//
+// 映射原则(逐条都能说出为什么):
+// - 文本 / 背景 / 边框 → `--dsw-alias-label-*` / `--dsw-alias-bg-layer-*` / `--dsw-alias-border-l*`;
+// - 增删行 → DSH **专为 diff 准备**的那组令牌:`--dsw-alias-file-diff-added-bg|gutter|marker`
+// 与 `--dsw-alias-file-diff-deleted-bg|gutter|marker`(它们本来就分深浅主题);
+// - 字内高亮(Desktop `--diff-add-inner-background-color`)→ `--dsw-alias-code-diff-added|deleted`;
+// - 语法高亮色 Desktop 用的是固定十六进制;我们的 highlighter worker 是替身、**不产出 token**,
+// 所以这一组统一给 `inherit`,避免把 Desktop 的调色板偷偷带进来(真正接上高亮时再逐色映射);
+// - 尺寸(`--spacing*`、`--border-radius`、`--font-size*`、按钮高度…)沿用 Desktop 的数值 ——
+// 这些是「结构与数值」,不是皮肤。
+//
+// **只使用已验证在 DSH 主题里真实定义的令牌**(从宿主 `dsh-client-ui-theme` 的实际输出里
+// 逐条核对过)。这份文件的产物会被 `scripts/build.mjs` 的 `checkInlineTokens()` 再扫一遍,
+// 写错令牌名构建就会报警。
+//
+// ## ⚠️ 选区高亮:已登记的宿主令牌缺口(不是漏查,别再重开一轮)
+//
+// **上游是什么**:`_variables.scss:139` 的 `--box-selected-background-color` 是**字面值**
+// `#ebeef1`(哑光蓝灰);`:170` 的 `--box-selected-active-background-color` 是 **`$blue`**
+// (饱和蓝),配 `:180` 的 `$white` 文字(`.list-focus-container.focus-within .list-item.selected`)。
+// **宿主有什么**:`ui-theme/src/styles/design-platform.css` 里**没有实心蓝底令牌** ——
+// 唯一的蓝色选区令牌 `--dsw-alias-bg-document-selection` 是
+// `color-mix(in srgb, var(--dsw-static-blue-500) 40%, transparent)`,半透明蓝上打白字读不出来。
+// 而宿主自己成的文规则是「令牌表是唯一的颜色权威:设计系统里没有的值是**刻意不加**的,
+// **最接近的语义令牌胜出**」(`ui-theme/README.md` 的 Known Limitations)。
+//
+// **所以本线的裁决是:两级都保持中性,不换成蓝。**
+//   · 「选中」(未聚焦)  → `--dsw-alias-button-ghost-active-fill`(浅 `#ebeef2` = 上游 `#ebeef1`
+//     的近似同值 / 深 `#43454a`;宿主自己的选中态用法:`ui-primitives/Pill.module.css` 的 `.active`
+//     与 `--dsw-specific-sidebar-nav-item-active` 逐主题同值);
+//   · 「选中且有焦点」  → `--dsw-alias-interactive-bg-active`(浅 `rgba(38,49,72,.10)` /
+//     深 `rgba(255,255,255,.14)`);
+//   · 两级文字都 → `--dsw-alias-label-primary`(原先 `--dsw-alias-brand-primary-invert`
+//     与 `--dsw-alias-brand-primary` **同值**,于是底=字=近黑,整块盖住文字)。
+// **两级没有被拉平**(浅色合成 `#ebeef2` < `#e9eaed`;深色 `#43454a` < `#363637`),
+// 但这一级**是中性灰而不是上游的饱和蓝** —— 这是宿主令牌缺口,已在此登记。
+// **不许为它新造一个 `--dsw-*` 名字,也不许把两级合成一级。**
+//
+// 蓝在宿主里只用于**线与字**的强调:页签下划线/选中文字、焦点环、链接
+// (`--dsw-alias-state-business-primary`;`ui-schedule/.../TaskManagerPage.module.css:620/625`)。
+// 背景/边框类高亮一律走中性选区令牌。
+//
+
+// ---------- 基础文本 / 背景 / 边框 ----------
+//
+// 全部变量只定义在 `.gw-desktop-diff` 这一层 —— **不要**挂到 `body`/`:root`。
+// 原因:`--text-color`、`--background-color`、`--font-size`、`--border-radius`
+// 这类名字太通用,DSH 自己的样式表可能也在用;挂到全局就等于改宿主的皮肤。
+// 代价:Desktop 的 `Tooltip` 用 `ReactDOM.createPortal` 把节点挂到 `document.body`,
+// 隔离在作用域外,拿不到这些变量 —— 那条路径的样式见 `desktop-diff.scss` 里的说明。
+//
+// 本文件**不含任何选择器**:它只把变量声明包在一个 mixin 里,由入口
+// `desktop-diff.scss` 在 `.gw-desktop-diff { @include dsh-desktop-bridge; ... }` 里展开。
+// (不用「嵌套 @import」:Dart Sass 的嵌套 import 不接受裸声明,Sass 会报
+// `expected "{"`。用 mixin 是同一效果且语义明确。)
+//
+@mixin dsh-desktop-bridge {
+  // 等宽字体用插件自己的 --gw-mono(定义在 .gw-root 上,见 styles.ts),
+  // 宿主没有 --dsw-alias-font-mono 这个令牌(它只被引用、没有定义)。
+  --font-family-monospace: var(--gw-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  --font-family-sans-serif: inherit;
+
+  --text-color: var(--dsw-alias-label-primary);
+  --text-secondary-color: var(--dsw-alias-label-secondary);
+  --background-color: var(--dsw-alias-bg-layer-1);
+  --box-background-color: var(--dsw-alias-bg-layer-2);
+  --box-alt-background-color: var(--dsw-alias-bg-layer-3);
+  --box-border-color: var(--dsw-alias-border-l1);
+  --box-placeholder-color: var(--dsw-alias-label-tertiary);
+  //
+  // ⚠️ **2026-10 修**:这一条原来只写了**颜色**(`var(--dsw-alias-border-l2)`),而
+  // 上游 `_variables.scss:253` 是**一整个 `border` 简写**:
+  //
+  //     --contrast-border: 1px solid var(--box-border-contrast-color);   // 深色主题同值(:188)
+  //
+  // 我们的写法漏掉了 `1px solid` 那一半,后果不是「边框颜色不对」而是**边框整条消失**:
+  // 使用方都写 `border: var(--contrast-border)`(`mixins/_textboxish.scss:8`),替换后变成
+  // `border: rgba(0,0,0,.1)` —— 一个简写只给颜色时,`border-width`/`border-style`
+  // 回到**初始值**(medium/**none**),而 `style:none` ⇒ 不画边框。
+  // 真 Chrome 实测(本仓 `docs/probes/preferences-uitune-probe.mjs`):
+  // `input` 的 `getComputedStyle` 是 `border: 0px none rgba(0,0,0,0.1)`、高度 25px、
+  // 底色与卡片同色 ⇒ **Git▸Author 的 Name/Email 输入框与外观页的三个下拉框在界面上
+  // 就是一片空白**(用户截图报的正是这个:标签在、输入框「不见了」)。
+  // 三道守卫全都看不见它:类名在、基底配方在、令牌名也真实存在。
+  --contrast-border: 1px solid var(--dsw-alias-border-l2);
+  --base-border: 1px solid var(--dsw-alias-border-l1);
+  --base-box-shadow: 0 2px 7px rgb(0 0 0 / 25%);
+  --border-radius: 6px;
+  --error-color: var(--dsw-alias-state-error-primary);
+  // `_variables.scss:369` 是 `$blue`。这条是**焦点环**色,不是普通边框:
+  // 宿主 `focus.css:14` 的标准表达式是
+  // `outline-color: var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary))`,
+  // 主题把它解析成浅 `#4176e6` / 深 `#7aaaFF`。绑 `brand-primary` = 浅色近黑环。
+  --focus-color: var(--dsw-alias-state-business-primary);
+  --font-size: 12px;
+  --font-size-sm: 11px;
+  --font-weight-semibold: 600;
+  --spacing: 10px;
+  --spacing-double: 20px;
+  --spacing-half: 5px;
+  --popup-z-index: 45;
+  --text-field-height: 25px;
+  --text-field-focus-shadow-color: var(--dsw-alias-interactive-bg-hover);
+
+  //
+  // ---------- 本轮新增:新 import 的 partial 需要、而桥里原来没有的变量 ----------
+  //
+  // 用到它们的 partial(本轮之前**都不在**编译闭包里,所以从没暴露过):
+  // `ui/_text-box.scss`      → `--spacing-third`
+  // `ui/_ref.scss`           → `--path-segment-background` / `--path-segment-padding`
+  // `ui/_tab-bar.scss`       → `--spacing-third` / `--font-size-xs` / `--outlined-border-radius`
+  //
+  // 缺一个的后果**不是**「那个类没样式」,而是**那一条声明整条失效** —— `var()` 指到未定义
+  // 的变量时,CSS 把它当 invalid at computed-value time 丢掉。goal 文档 §3 失败模式 10 记的
+  // 就是这个:`--gw-mono` 从未定义却被 4 处引用,那 4 处一直静默地不是等宽字体,没有任何检查报错。
+  //
+  // 取值规则与本文件开头一致:**结构数值沿用上游 `_variables.scss`,颜色一律绑 DSH 令牌**。
+  //
+  --spacing-third: calc(var(--spacing) / 3); /* `_variables.scss:245` 原样(calc 形式沿用,不预先算成小数) */
+  --font-size-xs: 9px; /* `_variables.scss:93` */
+  --outlined-border-radius: 3px; /* `_variables.scss:251` */
+  // `_variables.scss:503` 是 `$blue-000`(极浅的品牌蓝)。宿主没有等价的浅蓝底,取「比页面底亮一层」的语义层。
+  --path-segment-background: var(--dsw-alias-bg-layer-3);
+  --path-segment-padding: var(--spacing-third); /* `_variables.scss:505` 原样就是这个引用 */
+  // `_variables.scss:180` 是 `$white`(Sass 变量):「选中且激活」的强调色底上的文字色。
+  //
+  // ⚠️ 原来绑 `--dsw-alias-brand-primary-invert` —— 名字像「反色」,但在宿主里它与
+  // `--dsw-alias-brand-primary` **同值**(浅 `#0f1115` / 深 `#f9fafb`;见
+  // `design-platform.css:190/192` 与 `:308/310`),它是「页面底色的反色 = 品牌墨色」。
+  // `ui/_list.scss` 的 `.list-focus-container.focus-within .list-item.selected` 把
+  // `--text-color` 重绑到它;底色当时也绑 `brand-primary` ⇒ **同色底 + 同色字**,
+  // 就是用户截图里那块盖住文字的纯黑矩形。**两处必须成对修。**
+  //
+  // 现在底色是中性交互层(见各面的 `--box-selected-*-background-color`),文字取正文墨色。
+  --box-selected-active-text-color: var(--dsw-alias-label-primary);
+  // Desktop 由 JS 量出可用视口后写进这两个变量(弹层定位用);没有 JS 侧时用视口兜底
+  --available-width: 100vw;
+  --available-height: 100vh;
+
+  // ---------- 文件状态色 ----------
+  --color-new: var(--dsw-alias-state-success-primary);
+  --color-deleted: var(--dsw-alias-state-error-primary);
+  --color-modified: var(--dsw-alias-state-warn-primary);
+  --color-renamed: var(--dsw-alias-state-business-primary);
+  --color-conflicted: var(--dsw-alias-state-error-primary);
+  --file-warning-background-color: var(--dsw-alias-state-warn-tertiary);
+  --file-warning-border-color: var(--dsw-alias-state-warn-secondary);
+  --file-warning-color: var(--dsw-alias-state-warn-label);
+
+  //
+  // ---------- 按钮 ----------
+  //
+  // ⚠️ **2026-10 修**:三条原来绑的是**中性层**与**正文色**
+  // (`--dsw-alias-bg-layer-2` = 卡片自己的底色 / `--dsw-alias-label-primary`),
+  // 而 `.button-component[type=submit]` 的配方是
+  // `background-color: var(--button-background); color: var(--button-text-color);
+  //  border: 1px solid var(--button-background)`(`ui/_button.scss`)⇒ 底、边、卡面**三者同色**,
+  // 主按钮在界面上**完全看不出来是个按钮**(用户截图里「保存」就是一行普通文字,
+  // 而「取消」因为走 `--secondary-button-border-color` 反而有框)。
+  //
+  // 上游是**实心强调色**:`_variables.scss:28` `--button-background: #{$blue}`、
+  // `:30` `--button-hover-background: #{lighten($blue, 5%)}`、`:31` `--button-text-color: #{$white}`。
+  // 这里按**宿主自己的主按钮配方**取角色令牌(`ui-primitives/src/Button.module.css:37-38`):
+  // `background: var(--dsw-alias-button-primary-fill); color: var(--dsw-alias-label-primary-foreground)`
+  // —— 与宿主 `Button` 的 primary 变体**同一个真源**,两个字面值都不新造
+  // (宿主 `--dsw-alias-brand-primary` 在浅色是近黑、深色是近白,配那个翻转前景色,
+  //  对比度由宿主自己保证;上游的饱和蓝在宿主令牌表里没有对应项,见本文件开头那条缺口登记)。
+  --button-background: var(--dsw-alias-button-primary-fill);
+  --button-hover-background: var(--dsw-alias-button-primary-hover);
+  --button-text-color: var(--dsw-alias-label-primary-foreground);
+  --button-border-radius: 6px;
+  --button-height: 25px;
+  --secondary-button-background: var(--dsw-alias-bg-layer-2);
+  --secondary-button-border-color: var(--dsw-alias-border-l1);
+  --secondary-button-hover-background: var(--dsw-alias-interactive-bg-hover);
+  --secondary-button-hover-border-color: var(--dsw-alias-border-l3);
+  --secondary-button-text-color: var(--dsw-alias-label-primary);
+  --link-button-color: var(--dsw-alias-link);
+
+  // ---------- diff 本体 ----------
+  --diff-text-color: var(--dsw-alias-label-primary);
+  --diff-alt-text-color: var(--dsw-alias-label-secondary);
+  --diff-background-color: var(--dsw-alias-bg-layer-1);
+  --diff-border-color: var(--dsw-alias-border-l2);
+  --diff-gutter-color: var(--dsw-alias-border-l2);
+  --diff-gutter-background-color: var(--dsw-alias-bg-layer-1);
+  --diff-line-number-color: var(--dsw-alias-label-tertiary);
+  // `_variables.scss:371` 是 `$blue-600`(深色主题 `:277` 是 `$blue-200`)。蓝色强调,
+  // 取宿主「选中/激活」的蓝色强调令牌(浅 `#4176e6` / 深 `#7aaaFF`)。
+  --diff-linenumber-focus-color: var(--dsw-alias-state-business-primary);
+
+  //
+  // ⚠️ **映射原则(2026-10,实测后写死,别再犯)**:`--dsw-alias-brand-primary` 在**浅色
+  // 主题下是 `#0f1115`(近黑)**,不是「品牌蓝」。所以**任何把它当高亮底色/边框色的写法
+  // 都会变成黑/灰**,而不是蓝色选区。
+  //
+  // 选区(selected / 高亮)要蓝底,就用宿主**唯一的蓝色选区令牌**
+  // `--dsw-alias-bg-document-selection`(= `color-mix(in srgb, var(--dsw-static-blue-500)
+  // 40%, transparent)`;已核对它在宿主主题里是**真实声明**,不是提及)。
+  //
+  // 这条改动的来由:`--diff-selected-background-color` 原来绑 `--dsw-alias-bg-multi-select`
+  // (= `neutral-850` / `neutral-bluish-60` = **中性灰**),而它的 border/gutter 又绑
+  // `brand-primary`(近黑)⇒ 真 Chrome 实测活 DOM 里
+  // `.line-number.selectable.hoverable.line-selected` 的 computed
+  // `background-color` = **rgb(245,246,247)**,配近黑边框 = 「灰底 + 黑框」;
+  // 而 `line-selected` 在默认「全部纳入」状态下出现 **37 次** ⇒ 整条 gutter 是灰的。
+  // 这是**语义错误**(选区 ≠ 多选),不是审美问题。
+  //
+  // ⚠️ 同一族**尚未逐条裁决**的写法(等主代理二次裁决,不要在这里批量改):
+  // 下面 `--diff-selected-border-color` / `--diff-selected-gutter-color` 仍绑
+  // `brand-primary`;`src/client/styles.ts` 的 `.gw-frow.on` 左边框等高亮位也在同一族。
+  // 逐条清单见交付报告。
+  //
+  --diff-selected-background-color: var(--dsw-alias-bg-document-selection);
+  //
+  // 上游这两条是 `$blue-600`(比底色 `$blue-400` 更深一档的**蓝**,`_variables.scss:402-403`)。
+  // 选型过程:`--dsw-alias-brand-primary`(浅色近黑 `#0f1115`)= 用户看到的「黑框」;
+  // `--dsw-alias-border-l3`(`#5a5a5a`)**是灰**,语义上仍是「普通边框」而非选区;
+  // ⇒ 主代理裁决:**选区族一律用宿主唯一的蓝色选区令牌**
+  // `--dsw-alias-bg-document-selection`(= `color-mix(in srgb, var(--dsw-static-blue-500) 40%,
+  // transparent)` = `rgba(59,130,246,.4)`;已核**是声明**)。**不许引入 `--dsw-static-*`,
+  // 也不许为「深浅差」新造名字。**
+  // 代价(已知并记账):边框/槽线与**底色同色** ⇒ 选中行内部不再有一条独立边线;
+  // 但「选中 vs 未选中」仍清晰可辨(合成实测:浅 `#b1cdfb` vs `#fff`;
+  // 深 `#2d4978` vs `#232324`,见交付报告)。
+  //
+  --diff-selected-border-color: var(--dsw-alias-bg-document-selection);
+  --diff-selected-gutter-color: var(--dsw-alias-bg-document-selection);
+  --diff-selected-text-color: var(--dsw-alias-label-primary);
+
+  --diff-add-background-color: var(--dsw-alias-file-diff-added-bg);
+  --diff-add-border-color: var(--dsw-alias-file-diff-added-marker);
+  --diff-add-gutter-color: var(--dsw-alias-file-diff-added-marker);
+  --diff-add-gutter-background-color: var(--dsw-alias-file-diff-added-gutter);
+  --diff-add-inner-background-color: var(--dsw-alias-code-diff-added);
+  --diff-add-text-color: var(--dsw-alias-label-primary);
+  --diff-delete-background-color: var(--dsw-alias-file-diff-deleted-bg);
+  --diff-delete-border-color: var(--dsw-alias-file-diff-deleted-marker);
+  --diff-delete-gutter-color: var(--dsw-alias-file-diff-deleted-marker);
+  --diff-delete-gutter-background-color: var(--dsw-alias-file-diff-deleted-gutter);
+  --diff-delete-inner-background-color: var(--dsw-alias-code-diff-deleted);
+  --diff-delete-text-color: var(--dsw-alias-label-primary);
+
+  --diff-hunk-background-color: var(--dsw-alias-bg-layer-3);
+  --diff-hunk-border-color: var(--dsw-alias-border-l1);
+  --diff-hunk-gutter-color: var(--dsw-alias-border-l1);
+  --diff-hunk-gutter-background-color: var(--dsw-alias-bg-layer-3);
+  --diff-hunk-text-color: var(--dsw-alias-label-secondary);
+
+  --diff-hover-background-color: var(--dsw-alias-interactive-bg-hover);
+  // `_variables.scss:427` 是 `$blue-400`(深色 `:330` 同值):悬停行的边线/槽线是**蓝**的强调线。
+  // 宿主没有「悬停边线」令牌,取语义最近的**蓝色强调**令牌 `--dsw-alias-state-business-primary`
+  // (它与宿主选中页签的下划线/文字同一个,见 `TaskManagerPage.module.css:620/625`)。
+  // 注意:这与 `--diff-selected-*` 用 `bg-document-selection`(40% 半透明蓝)不同 ——
+  // 悬停线要**实心**才能在 1px 上看得见,选区底色要**半透明**才能透出 diff 的增删底色。
+  --diff-hover-border-color: var(--dsw-alias-state-business-primary);
+  --diff-hover-gutter-color: var(--dsw-alias-state-business-primary);
+  --diff-hover-text-color: var(--dsw-alias-label-primary);
+  --diff-add-hover-background-color: var(--dsw-alias-interactive-bg-hover);
+  --diff-add-hover-border-color: var(--dsw-alias-state-success-primary);
+  --diff-add-hover-gutter-color: var(--dsw-alias-state-success-primary);
+  --diff-add-hover-text-color: var(--dsw-alias-label-primary);
+  --diff-delete-hover-background-color: var(--dsw-alias-interactive-bg-hover);
+  --diff-delete-hover-border-color: var(--dsw-alias-state-error-primary);
+  --diff-delete-hover-gutter-color: var(--dsw-alias-state-error-primary);
+  --diff-delete-hover-text-color: var(--dsw-alias-label-primary);
+
+  --diff-empty-row-background-color: var(--dsw-alias-bg-layer-2);
+  --diff-empty-row-gutter-background-color: var(--dsw-alias-bg-layer-2);
+  --diff-empty-hunk-handle: var(--dsw-alias-border-l1);
+
+  // ---------- 语法高亮:替身 worker 不产出 token,先一律 inherit ----------
+  --syntax-variable-color: inherit;
+  --syntax-alt-variable-color: inherit;
+  --syntax-keyword-color: inherit;
+  --syntax-atom-color: inherit;
+  --syntax-string-color: inherit;
+  --syntax-comment-color: inherit;
+  --syntax-quote-color: inherit;
+  --syntax-number-color: inherit;
+  --syntax-attribute-color: inherit;
+  --syntax-tag-color: inherit;
+  --syntax-type-color: inherit;
+  --syntax-link-color: inherit;
+  --syntax-header-color: inherit;
+  --syntax-qualifier-color: inherit;
+}

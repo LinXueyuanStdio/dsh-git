@@ -1,0 +1,507 @@
+//
+// **Preferences 弹窗移植面的编译入口**(Sass)。
+//
+// 上游对应:GitHub Desktop 的 `app/styles/ui/_preferences.scss`(`#preferences { … }`)
+// + 它渲染的原语(`ui/_tab-bar.scss` / `_button.scss` / `_checkbox.scss` /
+// `_radio-button.scss` / `_select.scss` / `_text-box.scss` / `_row.scss` /
+// `_octicons.scss` / `_ref.scss`)。
+//
+// 做法与其它面完全一致:上游 partial **顶层** `@import`(一个字都不改),作用域由
+// `scripts/styles.mjs` 在**编译产物**上逐选择器加前缀。**不要**把 `@import` 嵌进
+// `.gw-prefs { … }` —— 那会改写 `&` 的语义(`ui/_preferences.scss` 里
+// `.advanced-section { &:not(:last-child) … }` 这类会展开成永不匹配的形状,见
+// `desktop-diff.scss` 开头那次返工的记录)。
+//
+// ## 作用域根 `.gw-prefs` 加在**宿主卡片的自己身上**(2026-10 语义翻转,别按旧版读)
+//
+// 本面**不再渲染上游 `Dialog`**(那个带 `id="preferences"` 的 `<dialog>`,
+// `ui/preferences/preferences.tsx:388`),改走宿主 `Modal`:
+// `src/client/host-modal.tsx:111` 的 `CARD_CLASS = 'gw-prefs gw-prefs-card'` 加在
+// **卡片元素自己**上(`:130`)。卡片是 `ReactDOM.createPortal(…, document.body)` 的产物,
+// DOM 上**不在 `.gw-root` 子树里** ⇒ 作用域根必须显式落在卡片上,放宿主页面上无效。
+//
+// 前缀化的方式是 **`.gw-prefs ` + 选择器**(后代组合子,
+// `scripts/styles.mjs` 的 `prefixTopLevelSelectors`),所以产物里每条上游规则都要求
+// 目标元素是**卡片的后代**:`.gw-prefs .tab-bar` ✓、
+// `.gw-prefs .preferences-container .tab-container` ✓。
+//
+// ⇒ **永远不要把 `.gw-prefs` 与某个目标类加在同一个元素上**:例如给 `.tab-bar`
+// 那个元素再加一个 `gw-prefs`,产物就变成「`.gw-prefs` 里面还有一个 `.tab-bar`」,
+// 而它自己才是 `.gw-prefs` ⇒ **永不匹配**。这与 `.sr-only` 那次是同一类静默失败
+// (`docs/goal-port-desktop.md` §7.1 / §10.9),接线时必须守住。
+//
+// ⚠️ **旧版语义已作废**:旧产物是 `.gw-prefs #preferences`,要求 `<dialog id="preferences">`
+// 是 `.gw-prefs` 的**后代**。宿主 `Modal` 接手后 `#preferences` 已经**不存在**,
+// 随它一起的那两条基底配方也已删除 —— 见下面「本面不再补 dialog 的基底配方」。
+//
+// ## 本面不再补 dialog 的基底配方(2026-10 删除,理由是它们已成死规则)
+//
+// 旧版为了不整份 import 上游 `ui/_dialog.scss`(39 partial / 16KB),在适配块里就地补过
+// 三条 `dialog#preferences` 配方(纵向 flex / `width:600px` / 矮窗口滚动)。宿主 `Modal`
+// 接手后**页面上没有 `<dialog>` 了**,那三条的前缀形状变成 `.gw-prefs dialog#preferences`
+// ⇒ **永不匹配**,是纯粹的死规则(留着还会让下一个人以为它们在生效)。已整段删除;
+// 卡片尺寸与「矮窗口可滚」现在由 `src/client/styles.ts` 的 `.gw-prefs-card` /
+// `.gw-prefs-body` 那一层给(`styles.ts:393-408`,布局覆盖,不是 Desktop 类名,
+// **刻意不进移植面**)。
+//
+// 唯一的例外是 `.sr-only`(`ui/_app.scss:115-123`):它不是 dialog 专属,本面确实要用
+// (下面适配块里补)。
+//
+// ## 已知缺口(不假装没有)
+//
+// - `ui/_tooltip.scss`:本面浮层走 `.tooltip-host` 那一面,不在本面重复。
+// - `ui/_list.scss` / `_popover.scss`:本面的 7 个页面不渲染列表/气泡
+// (`Integrations` 的 `<Select>` 用原生 `<select>`,`ui/_select.scss` 已 import)。
+//
+// @see scripts/styles.mjs 的 PORT_SURFACES(本文件需要在其中登记一条表项)
+//
+
+// mixins 只定义 @mixin、不产出任何 CSS,放顶层导入。
+@import './upstream/mixins';
+
+// 变量桥:顶层导入只为拿到 mixin;真正展开在下面的 `.gw-prefs` 里。
+@import 'dsh-bridge';
+
+// `.sr-only` 的基础配方(`ui/lib/input-description` 与 aria-live 文本会用)。
+@import 'sr-only-recipe';
+
+//
+// `$gray-500` —— 上游 `ui/_tab-bar.scss:161` 在一个 Sass 插值里引用它
+// (原文是 `color: ` + 插值 + `;`),而它来自 `_variables.scss:3` 的
+// `@import '~primer-support/lib/variables/color-system.scss'`(`~` 是 webpack 的
+// 别名)。**我们没装 primer**,所以这个符号在这里未定义 —— 不补就是一个硬错
+// (Sass 报 Undefined variable,不是静默失败)。
+//
+// 修法**不改上游文件**(对齐优先的红线),在入口里就地给一个同名 SCSS 变量;
+// 取值与 `desktop-diff.scss:78` **逐字相同**(那一条已经因为同一个用点存在过):
+// 绑宿主令牌而不是引入 Desktop 调色板。
+//
+// 为什么必须是**顶层**变量而不是 `@mixin`:同 `repository-list.scss` 里
+// `$gray-300` 那条记录的实测结论 —— `@content` 在**调用方**作用域求值,
+// mixin 内部声明的变量对被 include 进来的上游 partial **不可见**;
+// 只有顶层声明对顶层 import 进来的 partial 可见。
+//
+$gray-500: var(--text-secondary-color);
+
+//
+// ==========================================================================
+// 适配层(**我们自己的**,不是从 Desktop 沿用的)
+// ==========================================================================
+//
+// 前缀化会认出这一段已经带作用域根而**原样保留**。
+//
+.gw-prefs {
+  // Desktop 主题变量 → DSH 令牌(diff 面共用的那一组)。
+  @include dsh-desktop-bridge;
+
+  //
+  // ---------- 本面独有的变量(逐条核对了上游定义处)----------
+  // 结构数值沿用;**颜色一律绑 DSH 令牌**(`_dsh-bridge.scss` 开头那条契约)。
+  //
+  --spacing-triple: calc(var(--spacing) * 3); /* 上游 `_variables.scss:241`,calc 形式沿用 */
+  --warning-badge-icon-color: var(--dsw-alias-state-warn-primary); /* `_variables.scss:51` 原值 `$orange` */
+  /* `_variables.scss:170` 是 `$blue`(饱和蓝)+ `$white` 文字(tab 选中态)。
+     ⚠️ 宿主**没有实心蓝底令牌**(唯一的蓝色选区令牌 `--dsw-alias-bg-document-selection`
+     是 40% 半透明,白字读不出来)⇒ 按 `ui-theme/README.md` 的成文规则「最接近的语义令牌胜出」,
+     取宿主自己的「选中控件底色」别名。原来绑 `--dsw-alias-brand-primary`(浅 #0f1115 近黑 /
+     深 #f9fafb 近白),而文字色 `--box-selected-active-text-color` 是 `label-primary` ⇒
+     **同色底 + 同色字**,设置里的主题选择器选中项会是一块盖住文字的实心矩形
+     —— 与 History 提交行那块黑块**同根**,只是另一个面。
+     缺口已登记(宿主缺实心蓝底令牌),不是漏查;不许为此新造令牌名。 */
+  --box-selected-active-background-color: var(--dsw-alias-button-ghost-active-fill); /* 上游 `$blue`;tab 选中态用 */
+
+  //
+  // ---------- `ui/_tab-bar.scss` 要的 5 个变量 ----------
+  //
+  // 这是本面**新加的守卫**(`findUnboundVariables`)捞出来的:它们在上游
+  // `_variables.scss:312-319`,从来不在我们的变量桥里 —— 不补的话,
+  // `--tab-bar-active-color`(`_tab-bar.scss:37` 的选中强调色)等**整条声明**会按
+  // invalid-at-computed-value-time 丢掉,页签看不出哪个被选中。
+  // 与 `--gw-mono` / `--drag-overlay-z-index` 是同一类静默失效(§3 失败模式 10),
+  // 三道旧守卫全都看不见。
+  //
+  // **取值与 diff 面逐字相同**(`desktop-diff.scss:204-208`):结构数值沿用上游,
+  // 颜色绑宿主令牌,不引入 Desktop 调色板。Preferences 弹窗的竖向页签就是
+  // `_tab-bar.scss` 渲染的,所以这 5 个必须在这一面自己身上声明 —— 各面各有自己的
+  // 变量桥,`.gw-desktop-diff` 绑过不算数(`scripts/styles.mjs` 的
+  // `findUnboundVariables` 就是按「**它自己的**作用域」判的)。
+  //
+  --tab-bar-height: 29px; /* `_variables.scss:312` */
+  /* `:313` 是 `$blue`。⚠️ **这一面里它只落在「底」上,不落在「线」上** ——
+     `_tab-bar.scss` 的三条消费方在本面渲染的都是底色:
+       · `.tab-bar.switch .tab-bar-item.selected{background-color:var(--tab-bar-active-color)}`(主题选择器药丸);
+       · `.tab-bar.vertical .tab-bar-item.selected{background-color:…}`(竖向页签);
+       · `.tab-bar .tab-bar-item .indicator{color:…}`。
+     真 Chrome 实测过:先前绑 `--dsw-alias-brand-primary` ⇒ 浅 `rgb(15,17,21)` 底 +
+     `rgb(15,17,21)` 字(**同色,字看不见**);改绑蓝色强调后底 `rgb(65,118,230)`、
+     字仍是 `label-primary`,深色主题下是 `#7aaaFF` 底 + `#f9fafb` 字 = **约 2:1,不可读**。
+     ⇒ 本面按「底」的角色取宿主自己的**选中控件底色**
+     (`--dsw-alias-button-ghost-active-fill`,浅 `#ebeef2` / 深 `#43454a`),
+     文字 `label-primary` 两主题都清晰。上游那一级是饱和蓝 —— 宿主无实心蓝底令牌,
+     缺口已登记(`_dsh-bridge.scss` 头注释),不为此新造名字。 */
+  --tab-bar-active-color: var(--dsw-alias-button-ghost-active-fill); /* `:313` 是 `$blue` */
+  --tab-bar-hover-background-color: var(--dsw-alias-interactive-bg-hover); /* `:315` 是 `$gray-100` */
+  --tab-bar-count-color: var(--text-color); /* `:318` 原样就是这个引用 */
+  --tab-bar-count-background-color: var(--dsw-alias-bg-layer-3); /* `:319` 是 `$gray-200` */
+
+  //
+  // ⚠️ 这里原有一条 `dialog#preferences { display:flex; flex-direction:column; width:600px }`
+  // 与一段 `@media (max-height: 650px) { dialog#preferences { … overflow-y:auto } }`
+  // ——**2026-10 已整段删除**。理由:宿主 `Modal` 接手后页面上**没有 `<dialog>` 了**
+  // (`host-modal.tsx:111` 把 `.gw-prefs` 加在宿主卡片自己身上),前缀化会产出
+  // `.gw-prefs dialog#preferences` ⇒ **永不匹配**的纯死规则;留着只会让下一个人
+  // 以为它们在生效。卡片尺寸与「矮窗口可滚」现在由 `src/client/styles.ts` 的
+  // `.gw-prefs-card` / `.gw-prefs-body` 那一层给(`styles.ts:393-408`,布局覆盖、
+  // 不是 Desktop 类名,**刻意不进移植面**)。
+  //
+  // 详见文件头「本面不再补 dialog 的基底配方」。
+  //
+  // ⚠️ **不要**在这里写布局宿主规则:`.gw-prefs` 只是**作用域根**,它里面还有一层
+  // `#preferences`(见 `host-settings-card.tsx` 的注释 —— 上游 `_preferences.scss`
+  // 整份以 `#preferences` 为根,那 40 条三段选择器要求它是作用域根的**后代**)。
+  // 卡片的三层布局(页签 / 页面 / 配置表单)因此挂在 `#preferences` 那一层上,
+  // 见下面 `.gw-prefs-preferences`。
+  //
+
+  /*
+   * ==========================================================================
+   * 适配层删除表 + 我们新增 UI 的排版(2026-10 从 `src/client/pref-adapt.ts` 搬来)
+   * ==========================================================================
+   *
+   * `ui/preferences/**` 的 7 个页面是**与上游字节一致的镜像**(`verify-mirror.mjs` 盯着),
+   * 不能删单个 `<Checkbox>`;能删的只有整页。但集成页 / 外观页**混着**能接的与接不了的控件
+   * (整页删会把能接的一起扔掉)⇒ 「删除」只能落在渲染层:`display:none`(它同时移出无障碍树、
+   * 移出命中区、盒子归零)。每一条都由真 Chrome 探针断言(`docs/probes/preferences-geometry-probe.mjs`
+   * 的 `removed` 组),上游改类名/结构导致它复活会当场变红。
+   *
+   * ⚠️ **`!important` 是实测逼出来的,删它之前先读这段**:这些控件在上游配方里**本来就有**
+   * `display`,且特异性与我们**相等** —— worktree 复选框的类名是
+   * `checkbox-component always-show-worktree-list`,而本面产物有
+   * `.gw-prefs .checkbox-component{display:flex}`(`ui/_checkbox.scss`),两者同为 (0,2,0)。
+   * 同特异性只看注入顺序:旧版这张表由 JS 在模块加载时注入,早于 `ensureDesktopDiffStyles()`
+   * ⇒ 移植面赢、删除失效,真 Chrome 量到 `display:flex`、`w=409 h=18`。压过上游那条 `display`
+   * 的正确表达就是 `!important`(上游自己也用过:`ui/_preferences.scss:156` 的
+   * `cursor: default !important`)。搬进本文件后顺序问题消失,但 `!important` 保留:
+   * 它守的是「上游配方的 `display` 不会因特异性/顺序变化把删除顶掉」。
+   */
+
+  /* 1. 外观 ▸ Miscellaneous ▸ Always show worktree list —— 产品里没有 worktree(§1.3 排除),
+        上游那个值也没有任何消费方(`app-state.ts:327` 声明、只有 `appearance.tsx` 渲染)。 */
+  .always-show-worktree-list { display: none !important; }
+
+  /* 2. 集成 ▸ Shell 整段(下拉 + 它的自定义表单)—— 宿主拥有 shell(宿主 `ui-settings-shell`),
+        我们的 git 由 host 的 `git-runner` 执行、**不经过客户端 shell**,而 `lib/shells/index.ts`
+        替身让 `getAvailableShells()` 恒返回 `[]` ⇒ 那个下拉里一个真选项都没有。
+        ⚠️ 选择器是**结构性**的:上游 `ui/lib/select.tsx:64-72` **丢掉** `aria-label`
+        (`integrations.tsx:313` 传了也到不了 DOM),而集成页恰好只有两个 `<fieldset>`
+        (External Editor / Shell)⇒ 用「后一个 fieldset」。上游若增删 fieldset,这条会失效 ——
+        探针 `removed` 组会变红,不会静默。 */
+  .tab-container fieldset + fieldset { display: none !important; }
+
+  /* 3. 集成 ▸ 自定义编辑器路径/参数表单 —— 它的「Choose…」走
+        `ui/main-process-proxy.ts` 的 `showOpenDialog`,那是**已登记的替身、恒返回 `null`**;
+        就算手填路径,host 的 `system/open-in-app` 只认 `listApps()` 探测到的 id
+        (`src/host/system-service.ts:97-110` 找不到就抛「没有可用的应用」)⇒ 这个表单兑现不了任何事。 */
+  .tab-container .custom-integration-form-container { display: none !important; }
+
+  /* 4. …上面那个表单的**入口选项**(表单已被删,留着就是一个死胡同:选中后什么都不出现)。 */
+  .tab-container select option[value='other'] { display: none !important; }
+
+  /* 5. 外观 ▸ Theme —— **只在宿主没有 `theme` 服务时**才删。
+       有服务时它是**真接线**(`src/client/host-theme.ts`:`getTheme` / `setTheme` / `theme/change`);
+       `preferences-dialog.tsx` 只在 `isHostThemeAvailable()` 为假时给卡片挂 `gw-prefs-no-theme`。
+       这样「能接就接、接不上才删」,两边都不会出现点了没反应的色板。 */
+  &.gw-prefs-no-theme .appearance-section:has(.theme-selector) { display: none !important; }
+
+  /* 6. 无障碍 ▸ Underline links —— 接线(不是删除)在**弹窗卡片**这一半。
+        上游把 `underlineLinks` 一路传给 `ui/toolbar/branch-dropdown.tsx` /
+        `ui/branches/branches-container.tsx`,而那两棵子树在我们的渲染路径上**不渲染**
+        ⇒ 改成语义等价的做法:开关直接作用在弹窗卡片下的链接上(插件根那一半在
+        `pref-adapt.ts`,因为 `.gw-root` 不在本面作用域内)。 */
+  &.gw-underline-links a,
+  &.gw-underline-links .link-button-component { text-decoration: underline; }
+
+  /* 11. 外观 ▸ Theme 色板的**图片比例** —— 让单选圈回到上游的位置(适配,不是新设计)。
+        上游 `_preferences.scss:170-173` 把单选圈绝对定位到 `left: calc(--spacing + --spacing-half)`、
+        `margin-top: calc(50.5%)`。**百分比 margin-top 相对的是包含块的宽度**,而上游那张色板图
+        (`app/static/common/ghd_light.svg`)是 228x120 ⇒ 图高恒等于宽的 52.6%,所以 50.5% 这个
+        手调值实际表达的是「放在图的下方、与标签同一行」(标签在 `<img>` 之后)。
+        我们这边那张图的 URL 由 `encodePathAsUrl(__dirname, 'static/...')` 拼出,而
+        `src/client/desktop-globals.ts:45` 把 `__dirname` 固定成 `/dsh-git-diff`,宿主没有这个路由
+        ⇒ **必然 404**,`<img>` 只剩 1px 高,色板塌成一行标签,单选圈于是被那 50.5% 推到
+        **色板下沿之外**。真 Chrome 实测(未修时):色板 31px 高、圈中心比色板中心低 17.3px、
+        探出下沿 8.3px —— 与用户截图里「圈贴在色板底边」完全一致。
+        修法是把**上游那张图自己的比例**还给 `<img>`(取自该文件的 width/height 属性),
+        于是它不再依赖资源能否取到;实测同宽下圈与标签重新对齐、圈回到色板内
+        (判据:`docs/probes/preferences-uitune-probe.mjs` 的 E1 组)。
+        **退役条件**:图真的能被渲染出来之后(宿主给静态资源路由,或把 SVG 换成 data URL)
+        删掉本条 —— 那时它就从「适配」退化成第二份真源。 */
+  .theme-selector .radio-button-component label > span img { aspect-ratio: 228 / 120; }
+
+  //
+  // ---------- 卡片形态:三个页面的横向页签 + 面板 ----------
+  //
+  // ⚠️ 2026-10 新增。它们**只**服务宿主设置里的那张卡片
+  // (`src/client/host-settings-card.tsx`):弹窗那一侧用的是上游**竖向** `TabBar`,
+  // 而卡片用的是宿主原语 `SegmentedTabs`(裁决:不要再手写一套页签控件)。
+  //
+  // 为什么必须写在这里而不是 `styles.ts`:这两个类名的作用域根就是 `.gw-prefs`,
+  // 而 `scripts/styles.mjs` 的 `findLeakedRules` 只允许注册过的顶层作用域根出现
+  // ⇒ 写进产物是**唯一**合法落点(同 `scss/pop-width.scss` 那条 `.gw-pop`)。
+  //
+  // 为什么不必给 `SegmentedTabs` 的 CSS Module 类名兜底:宿主自己的样式表
+  // (`dsh-web-frontend` 的 `index-*.css`)里已经有那三个哈希类
+  // (`.tabs` / `.indicator` / `.tab` 各自一行,见 `SegmentedTabs.module.css`),
+  // 而我们的用法是**同一个包、同一个类名的原生用法**(不覆盖、不换皮)。
+  //
+  //
+  // 卡片那层 `#preferences`(上游 `<dialog id="preferences">` 的角色)。它是页签 /
+  // 页面 / 配置表单三层的**直接父节点**,所以竖向 flex 挂在这里:
+  // `.gw-prefs` 自己只做作用域根与「Underline links」的落点,不再兼布局。
+  //
+  // ⚠️ 弹窗那一侧**没有**这个类(它用的是 `host-modal.tsx` 的 `.gw-prefs-body`),
+  // 所以这条规则不会影响它 —— 两边的布局各自独立,这正是把宿主卡片与自建模态的
+  // 样式分开的既有做法(`styles.ts` 的 `.gw-prefs-card` / `.gw-prefs-body`)。
+  .gw-prefs-preferences {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    /*
+     * 卡片高度由宿主设置面板决定,而我们**不能**假设它无限高:
+     * `max-height` 交给外层(宿主 `PluginsSettingsSection` 的 `.panel` 与设置弹窗
+     * 自己的滚动容器),这里只需要「中间那层可滚、上下两层不缩」。
+     */
+    flex: 1 1 auto;
+  }
+
+  .gw-prefs-tabs {
+    /*
+     * 32px ≈ 宿主给它的 34px,减掉本插件竖向节奏里的那 2px。
+     * 这一条是**布局覆盖**(不是上游配方):卡片里页签与内容区上下相接,
+     * 少这 2px 会让页签与第一行文字挤在一起。
+     */
+    --gw-prefs-tab-height: 32px;
+
+    flex: none;
+  }
+  .gw-prefs-tabs .tab {
+    height: var(--gw-prefs-tab-height);
+    padding: 0 var(--spacing);
+    border-radius: var(--border-radius);
+    font-family: var(--font-family-sans-serif);
+    font-size: var(--font-size);
+  }
+  .gw-prefs-tabs .indicator {
+    border-radius: var(--border-radius);
+  }
+
+  /*
+   * 页面本体。`tab-container` 这个类**不是**装饰:上游
+   * `ui/_preferences.scss:17` 的 `.preferences-container .tab-container` 给它
+   * `border-left` + `flex:1` + `min-width:0`,而我们是它的**后代**(作用域根在更外层),
+   * 所以那条规则照旧生效 —— 卡片里那句 `border-left` 正好把页签区与内容区分开。
+   */
+  .gw-prefs-page {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+    overflow-y: auto;
+    padding: var(--spacing) 0 0 var(--spacing);
+  }
+
+  /*
+   * 已有的宿主配置表单(`SettingsForm` 那一块)。它是**宿主配置文档**的一段,
+   * 与三个「当场生效」的页面不是同一类东西 ⇒ 视觉上也要分开(一条分隔线 + 间距)。
+   */
+  .gw-prefs-host-config {
+    flex: none;
+    margin-top: var(--spacing);
+    padding-top: var(--spacing);
+    border-top: var(--base-border);
+
+    > h3 {
+      margin: 0;
+      font-size: var(--font-size);
+      font-weight: var(--font-weight-semibold);
+      color: var(--text-secondary-color);
+    }
+  }
+
+  /*
+   * 7. 设备码登录面板(`preferences-dialog.tsx` 的 `DeviceFlowPanel`)—— **我们新增的 UI**,
+   *    不是上游控件。宿主已经有完整的设备码后端(`auth/device-start` / `auth/device-poll`),
+   *    但在此之前没有任何 UI 用它(详见 `preferences-dialog.tsx` 文件头「登录为什么是真的」)。
+   *    只给这一小块排版:颜色一律宿主 `--dsw-alias-*` 令牌,间距走本面的变量桥。
+   */
+  .gw-device-flow {
+    margin: 0 0 var(--spacing);
+    padding: var(--spacing);
+    border: 1px solid var(--dsw-alias-border-l1);
+    border-radius: var(--border-radius);
+    background: var(--dsw-alias-bg-layer-2);
+    font-size: var(--font-size-sm);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--spacing-half);
+  }
+  .gw-device-flow p { margin: 0; }
+  .gw-device-flow .gw-device-code {
+    font-family: var(--gw-mono);
+    font-size: 16px;
+    letter-spacing: 2px;
+    font-weight: 600;
+    user-select: all;
+  }
+  .gw-device-flow .gw-device-hint { color: var(--dsw-alias-label-tertiary); }
+  .gw-device-flow .gw-device-error { color: var(--dsw-alias-state-error-primary); }
+
+  //
+  // ==========================================================================
+  // 8. 内容区配方(`dialog .dialog-content`)—— **逐字对齐上游的值**
+  // ==========================================================================
+  //
+  // 上游 `ui/_dialog.scss:241-289`(顶层是 `dialog`,见文件末尾「刻意不 import」那段)。
+  // **唯一改动**:把祖先从 `dialog` 收敛到 `#preferences` —— 因为上游那条 min-height
+  // 就是按 `#preferences` 限定的(`:413-418` 的 `&#preferences`),而两个渲染面
+  // (模态 `host-modal.tsx:166`、宿主卡片 `host-settings-card.tsx:158`)**都有**
+  // `.gw-prefs > #preferences` 两层 ⇒ 正好覆盖这两处,不多不少。
+  //
+  // 改前实测(`preferences-geometry-probe.mjs` 的 `layoutAudit`):`.dialog-content` 的
+  // **padding 规则条数 = 0**、计算值 `padding:0px`;第一个 `h2` 是浏览器默认
+  // `font-size:24px / margin:19.92px` ⇒ 用户截图里「GitHub.com 贴着分隔线、标题巨大」。
+  //
+  // ⚠️ `--font-size-md` 必须一起补:上游 `h2 { font-size: var(--font-size-md) }` 的变量
+  // 来自 `_variables.scss:87`(14px),而它**不在** `_dsh-bridge.scss` 的桥里
+  // (那座桥只搬了 `--font-size` / `-sm` / `-xs`)。不补 ⇒ 该声明按
+  // invalid-at-computed-value-time **整条丢弃**,h2 又回退成浏览器默认的 24px。
+  --font-size-md: 14px; /* `_variables.scss:87`,逐字 */
+
+  #preferences .dialog-content {
+    padding: var(--spacing-double); /* `_dialog.scss:242` */
+
+    /* 让 `<Row>` 能撑起内容:非最后一个直接子级 Row 给下边距(`:246-248`)。 */
+    .row-component:not(:last-child) { margin-bottom: var(--spacing); }
+
+    p {
+      margin-top: 0;
+      margin-bottom: var(--spacing);
+      &:last-child { margin-bottom: 0; }
+    }
+
+    h2,
+    h3 {
+      font-weight: var(--font-weight-semibold);
+      margin-top: 0;
+      margin-bottom: var(--spacing);
+      &:last-child { margin-bottom: 0; }
+    }
+    h2 { font-size: var(--font-size-md); } /* `:277` */
+    h3 { font-size: var(--font-size); }    /* `:280` */
+
+    ul,
+    ol {
+      margin-top: 0;
+      padding-left: var(--spacing-double);
+      list-style-position: outside;
+      &:last-child { margin-bottom: 0; }
+      li {
+        margin-bottom: var(--spacing);
+        padding-left: var(--spacing-half);
+      }
+    }
+  }
+
+  //
+  // ==========================================================================
+  // 9. 高度契约:`#preferences` **接近满高**(上游 `_dialog.scss:413-418`)—— 已回收
+  // ==========================================================================
+  //
+  // 上游:`&#repository-settings, &#preferences { .dialog-content { min-height: calc(100vh - 150px) !important } }`
+  // ⇒ GitHub Desktop 的 Settings 是**接近满高**的窗口。
+  //
+  // 本仓曾经在 `styles.ts` 给 `.gw-prefs-body` 写死 `height:320px`(真 Chrome 实测
+  // 卡片 600×320、内容区只 225px 高、页脚被压在底边)。2026-10 的版式审计在这里先补了
+  // 一条同表达式的 **临时覆盖**,并把交接条件写成可 grep 的形式。
+  //
+  // ✅ **该条件已满足,临时覆盖已回收**:`calc(100vh - 150px)` 现在就在**单一真源**
+  // `src/client/styles.ts` 的 `.gw-prefs-body` 上(原来那条 `height:320px` 已删除),
+  // 本文件里不再有这条规则。`grep -n gw-prefs-body src/client/scss/preferences.scss`
+  // 现在只命中注释 —— 这正是原文写下的可回收判据。
+  //
+  // ## 为什么落点是 `.gw-prefs-body` 而不是上游的 `.dialog-content`(搬移后仍然成立)
+  //
+  // 1. **只作用于弹窗**:`gw-prefs-body` 这个类**只有**模态那一层有
+  //    (`host-modal.tsx:166`);宿主卡片那一层是 `gw-prefs-preferences`
+  //    (`host-settings-card.tsx:158`),高度由宿主设置面板自己决定 ⇒ 不碰卡片。
+  // 2. **必须写在外层**:我们的「对话框」角色由 `.gw-prefs-body` 扮演,而
+  //    `.tab-container` 是它下面那个 `overflow-y:auto` 的滚动容器;把 min-height 写在内层
+  //    内容上,只会让它在矮框里滚,窗口本身不会长高。
+  // 3. 用 `min-height`(不是 `height`):矮窗口下由同一处的 `max-height:100%`
+  //    与 `.tab-container{overflow-y:auto}` 兜住(探针的 `short` 档就是验这个)。
+  //
+  // ⚠️ 搬移前这里靠**特异性**赢(`.gw-prefs .gw-prefs-body` (0,2,0) >
+  // `styles.ts` 的 (0,1,0));搬进 `styles.ts` 之后那条比较消失了,因为只剩一份。
+  // 真 Chrome 几何由 `docs/probes/preferences-geometry-probe.mjs` 盯着
+  // (min-height / 内容区内边距 / h2 排版 / 页脚 20px + border-top + 按钮 120px)。
+  //
+  // ==========================================================================
+  // 10. 页脚配方(`dialog .dialog-footer`)—— **已搬走**,见上
+  // ==========================================================================
+  //
+  // 原处写着「上游 `ui/_dialog.scss:295-311`」的逐字沿用数值(`padding:var(--spacing-double)`
+  // + `border-top` + 按钮 `min-width:120px`,以及为什么 `gap:0` —— 上游用
+  // `button{margin-right}` 做间距,叠加 `gap` 会变成 11px)。
+  // 那些值连同理由现在都在 `src/client/styles.ts` 的 `.gw-prefs-body .dialog-footer`
+  // 一族规则上。**不要再在这里补一遍** —— 两份必然漂移,而且本文件是
+  // `#preferences` 作用域,搬进 `styles.ts` 的那份是 `.gw-prefs-body` 作用域,
+  // 两份同时存在时谁赢取决于特异性,那正是这次要消掉的问题。
+}
+
+//
+// ==========================================================================
+// 上游 partial —— **顶层** import(顺序 = 上游 `_ui.scss` 的相对顺序)
+// ==========================================================================
+//
+// 只 import 本面渲染路径**必然**用到的那几份。`ui/copilot-preferences`
+// (`_ui.scss:38`)**刻意不 import** —— Copilot 按 §1.3 与用户指令排除,
+// 那个 partial 服务的页签在本面不存在。
+//
+@import './upstream/ui/preferences';
+@import './upstream/ui/tab-bar';
+@import './upstream/ui/button';
+@import './upstream/ui/checkbox';
+@import './upstream/ui/radio-button';
+@import './upstream/ui/select';
+@import './upstream/ui/text-box';
+@import './upstream/ui/row';
+@import './upstream/ui/octicons';
+@import './upstream/ui/ref';
+/*
+ * ==========================================================================
+ * ⚠️ 这里**刻意不** `@import './upstream/ui/dialog'`(2026-10 版式审计实测结论)
+ * ==========================================================================
+ *
+ * 「内容区的内边距 + h2/h3/p 的排版」在上游确实住在 `ui/_dialog.scss`(`:241` 的
+ * `dialog .dialog-content`),看起来应该像其它 partial 一样 import 进来。**试过了,两道都过不去**:
+ *
+ *  1. **构建硬失败**(`node scripts/build.mjs` ⇒ exit 1,两个产物都不生成):
+ *     `_dialog.scss:2-20` 会带进 39 个 `dialogs/*` 子 partial,而其中
+ *     `dialogs/_release-notes.scss:1` / `_thank-you.scss:1` / `_icon_preview.scss:1` 写的是
+ *     `@import '../../../styles/variables'` —— 上游那三层是 `app/styles/ui/dialogs/`,
+ *     我们 vendored 时把 `app/styles/**` **拍平**进 `scss/upstream/**`,少了一层 `styles/`
+ *     ⇒ 解析到 `src/client/scss/styles/variables`(不存在),
+ *     Sass 抛 `Can't find stylesheet to import.`(实测栈顶就是 `_release-notes.scss 1:9`)。
+ *  2. **即使修好路径也修不了这个 bug**:`_dialog.scss` 的**顶层选择器是 `dialog`**
+ *     (第 37 行 `dialog { … }`,一直包到第 672 行),`.dialog-content`(`:241`)与
+ *     `&#preferences`(`:413-418`、`:528`)全在它里面 ⇒ 前缀化后得到
+ *     `.gw-prefs dialog .dialog-content` / `.gw-prefs dialog#preferences`,
+ *     而**我们根本不渲染 `<dialog>`**(宿主 `Modal` 接管,见 `host-modal.tsx:118-122`
+ *     与 `docs/preferences-port.md` §9)⇒ 全是**永不匹配**的死规则。
+ *     (这同时解释了本文件头部记的那条历史:旧版手写的 `dialog#preferences` 三条基底配方
+ *     为什么被删 —— 同一棵死树。)
+ *
+ * ⇒ 结论:按「对齐优先」取**值**,取不了**文件**。逐条值写在适配块的第 8 / 9 段里,
+ *    每条都标了上游 `file:line`。**不要**再试着 import 这个 partial,除非先
+ *    (a) 给 vendored 树补 `styles/variables` 那一层、且 (b) 证明我们渲染了 `<dialog>`。
+ */
