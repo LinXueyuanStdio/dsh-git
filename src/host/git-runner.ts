@@ -243,6 +243,12 @@ export function subprocessRunner(
     async run(argv, cwd, opts = {}) {
       const svc = service();
       if (svc === undefined) {
+        /*
+         * 服务缺席是**配置级**故障(整个 profile 里没有任何 git 操作能跑),
+         * 而它在上层会被播成「这个目录不是 git 仓库」—— 必须在这里喊一声。
+         */
+        console.warn('[dsh-git] 宿主没有提供 subprocess 服务(ctx.subprocess):'
+          + '所有 git 操作都会失败,并被上层报成「这个目录不是 git 仓库」');
         return { exitCode: 127, stdout: '', stderr: 'subprocess service unavailable' };
       }
       const bad = findNonStringArg(argv);
@@ -360,7 +366,7 @@ function spawnWith(
   try {
     handle = spawnOnce(service, argv, cwd, opts, wantsInput, observeStderr);
   } catch (error) {
-    return Promise.resolve({ exitCode: 127, stdout: '', stderr: messageOf(error) });
+    return Promise.resolve(spawnFailed(argv, cwd, error));
   }
   if (observeStderr && handle.stderr === undefined) {
     /*
@@ -375,7 +381,7 @@ function spawnWith(
     try {
       handle = spawnOnce(service, argv, cwd, { ...opts, onStderrLine: undefined }, wantsInput, false);
     } catch (error) {
-      return Promise.resolve({ exitCode: 127, stdout: '', stderr: messageOf(error) });
+      return Promise.resolve(spawnFailed(argv, cwd, error));
     }
   }
 
@@ -509,6 +515,25 @@ function spawnOnce(
 /** 有界等待(只给「等 stderr 排空」那一处用;不引真定时器语义)。 */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+
+/**
+ * spawn 起不来时的**唯一**出口:把现场打到宿主 stderr,再折成 `exitCode: 127`。
+ *
+ * 为什么要打日志:`127` 走到上层会被折成「这个目录不是 git 仓库」
+ * (`GitService.repoRoot` 只看退出码),于是「宿主受管子进程起不来」这件完全不同的事
+ * 在界面与日志里**一点痕迹都不留** —— 2026-10 在 Linux CI 上为此刻意白跑了好几轮
+ * (同一路径用本机 git 看明明是仓库,插件的受管路径却说不是)。`argv` 与 `cwd` 必须
+ * 一起打:少了任何一个都无法判断是「命令不对」还是「工作目录不对」。
+ * @param argv - 完整 argv(argv[0] 是可执行文件)。
+ * @param cwd - 子进程工作目录。
+ * @param error - `service.spawn` 抛出的原始异常。
+ * @returns 折给上层的失败结果。
+ */
+function spawnFailed(argv: readonly string[], cwd: string, error: unknown): GitRunResult {
+  const message = messageOf(error);
+  console.warn(`[dsh-git] 起不了子进程 ${argv.join(' ')}(cwd=${cwd}):${message}`);
+  return { exitCode: 127, stdout: '', stderr: message };
 }
 
 /**
