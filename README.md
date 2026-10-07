@@ -20,8 +20,6 @@
        alt="History 页签（实机截图）：左侧提交列表，右上是选中提交的说明、短 sha 与 +/− 统计，下方是该提交改动的文件与逐行 diff">
 </p>
 
-上面两张是**实机截图**（亮色主题）：Changes 与 History，都在 DSH 官方右侧栏里 —— 页签上那枚图标就是本插件的提交图形标记。
-
 ## 你会得到
 
 <p align="center">
@@ -63,7 +61,7 @@ dsh plugin --profile <profile> add /path/to/dsh-git
 
 注意是 `@linxueyuan/dsh-git` 而不是无 scope 的 `dsh-git`，后者已被他人占位（0.0.1，纯占位包，仓库链接 404）。
 
-安装后重启 DSH（host 半是 Node 模块，不随页面刷新重新加载）并硬刷新页面。
+安装后重启 DSH 并硬刷新页面（host 半是 Node 模块，不随页面刷新重新加载）。
 
 ## GitHub 登录与令牌
 
@@ -119,12 +117,6 @@ npm run check:static  # 一条命令跑齐所有静态闸门（check-all 自动�
 
 退出码契约：`0` = 通过（允许带**已登记**的棘轮债务）、`1` = 有**未登记**缺陷、`2` = 跳过。
 
-两个探针（都不在上面那条自动集合里）：
-
-- `node scripts/verify-install.mjs` —— 只读探针，回答「装没装 / 跑没跑 / 跑的是不是当前构建」。
-- `node scripts/verify-mirror.mjs` —— 把 `src/core/desktop/**` 里的 UI 源码与上游逐字节比对。**需要本机有一份上游 checkout**，拿不到时报 `SKIP`（退出码 2）。
-
-CI 在 push 与 pull request 上跑 `build → check → check:static → 干净工作区`（重跑构建，生成物必须逐字节一致）。
 
 ## License
 
