@@ -224,7 +224,9 @@ node_modules/
 /eslint-rules/
 /screenshots/
 
-# 部署测试(scripts/e2e-deploy.mjs)的截图产物:CI 里当 artifact 上传,
-# 本机跑完就是一次性的调试现场,没有任何理由进版本库。
+# 部署测试(scripts/e2e-deploy.mjs)的现场:截图进 artifact,
+# 临时克隆必须落在**工作区内**(插件的 git 走宿主受管子进程,工作区之外受沙箱管辖),
+# 所以它也需要被忽略 —— 两者都是一次性的调试现场,没有任何理由进版本库。
 /artifacts/
+/.e2e-scratch/
 

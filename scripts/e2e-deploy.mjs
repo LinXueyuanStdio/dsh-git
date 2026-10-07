@@ -699,6 +699,19 @@ info(`首屏按钮数 = ${shotButtons}`);
 
 step('准备一个真仓库(test 分支的浅克隆)');
 
+/**
+ * 临时克隆放**工作区内**,不放 `os.tmpdir()`。
+ *
+ * ⚠️ 这是 2026-10 在 CI 上踩出来的:插件的 git 全部走宿主受管子进程
+ * (`ctx.subprocess` = `dsh-subprocess-local`,见 `source/host/git-runner.ts` 头注释),
+ * 那条路径**受宿主沙箱管辖** —— Linux 上把仓库放在工作区之外,`git rev-parse`
+ * 直接非 0 退出,界面上表现为「这个目录不是 git 仓库」;而 macOS 的沙箱弱,
+ * 同一个脚本本地跑是通的(`/tmp` 也能过)。所以这里按**用户真实的姿势**来:
+ * 仓库就在工作区里。顺带这也是唯一有意义的判据 —— 沙箱本来就不允许碰工作区之外的东西。
+ */
+const SCRATCH_ROOT = resolve(flag('scratch-root', join(REPO, '.e2e-scratch')));
+mkdirSync(SCRATCH_ROOT, { recursive: true });
+
 /** 远端 URL:CI 里用 GITHUB_TOKEN,本地用当前 checkout 的 origin。 */
 function resolveOriginUrl() {
   const explicit = flag('origin');
@@ -714,8 +727,8 @@ function resolveOriginUrl() {
 }
 
 const originUrl = resolveOriginUrl();
-const scratch = mkdtempSync(join(tmpdir(), 'dsh-git-e2e-repo-'));
-info(`临时克隆 ${scratch}`);
+const scratch = mkdtempSync(join(SCRATCH_ROOT, 'repo-'));
+info(`临时克隆 ${scratch}(工作区内)`);
 info(`远端 ${redact(originUrl)}`);
 
 if (SKIP_PUSH) {
@@ -747,12 +760,27 @@ info(`推送前 ${BRANCH} = ${headBefore}`);
 
 step('走插件自己的路由:登记 → 改文件 → stage → commit');
 
-/** 登记仓库(host 侧没有目录选择器,所以必须给绝对路径)。 */
+/*
+ * ⭐ **先登记「宿主工作区里的仓库」**(= 本 checkout),再登记临时克隆。
+ *
+ * 它同时是**沙箱探针**:插件的 git 走宿主受管子进程,受宿主沙箱管辖。如果连
+ * 工作区里的仓库都登记不上,那就不是「临时目录选错了」,而是这条受管路径在这个
+ * 环境里根本不通 —— 那种失败必须指名道姓地说出来,否则下一个人只会看到
+ * 「这个目录不是 git 仓库」这种把真因藏起来的报错。
+ */
+const workspaceAdded = await call('repos/add', { path: REPO });
+if (workspaceAdded.added !== true) {
+  throw new Error(`连宿主工作区里的仓库都登记不上(${REPO}):`
+    + '插件的 git 走宿主受管子进程(ctx.subprocess),这条路径在这个环境里不通');
+}
+ok(`宿主工作区仓库已登记(${REPO.split('/').pop()})`);
+
+/** 登记临时克隆(host 侧没有目录选择器,所以必须给绝对路径)。 */
 const added = await call('repos/add', { path: scratch });
 if (added.added !== true) {
   throw new Error(`repos/add 没有登记成功:${JSON.stringify(added).slice(0, 200)}`);
 }
-ok(`仓库已登记(清单共 ${added.repos.length} 个)`);
+ok(`临时克隆已登记(清单共 ${added.repos.length} 个)`);
 
 /** 改一个文件 —— 用时间戳保证每次内容都不同,否则第二次跑就没有变更可提交。 */
 const marker = join(scratch, 'e2e-marker.txt');
@@ -830,9 +858,9 @@ ok('浏览器与服务端已关闭');
 if (KEEP) {
   warn(`--keep:保留 profile ${PROFILE_DIR} 与克隆 ${scratch}`);
 } else {
-  rmSync(scratch, { recursive: true, force: true });
+  rmSync(SCRATCH_ROOT, { recursive: true, force: true });
   rmSync(PROFILE_DIR, { recursive: true, force: true });
-  ok('临时仓库与 profile 已删除');
+  ok('临时克隆与 profile 已删除');
 }
 
 console.log(`\n${tag}: 全部通过(截图在 ${SHOTS})`);
