@@ -14,12 +14,9 @@
 **把本地 Git 装进 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的官方右侧栏**：多仓库下拉、Changes / History 本地操作、Code / Issues / Pull requests / Actions 远端页签，提交信息由 DSH 模型列表里的模型生成。
 
 <p align="center">
-  <img src="./assets/readme/Changes.png" width="100%"
+  <img src="./assets/readme/Changes.png" width="49%"
        alt="Changes 页签（实机截图）：仓库下拉显示 dsh-git 与 main 分支、工具栏「推送到 origin」的领先进度、六个页签、17 个变更文件的勾选列表、README.md 的逐行 diff，以及底部的提交区（摘要/描述、✨ 生成、提交按钮）">
-</p>
-
-<p align="center">
-  <img src="./assets/readme/History.png" width="100%"
+  <img src="./assets/readme/History.png" width="49%"
        alt="History 页签（实机截图）：左侧提交列表，右上是选中提交的说明、短 sha 与 +/− 统计，下方是该提交改动的文件与逐行 diff">
 </p>
 

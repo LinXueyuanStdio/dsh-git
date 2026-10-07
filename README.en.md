@@ -14,12 +14,9 @@
 **Local Git, inside the official [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) sidebar**: a multi-repo picker, local Changes / History work, Code / Issues / Pull requests / Actions tabs for the remote, and commit messages written by any model already configured in your DSH model list.
 
 <p align="center">
-  <img src="./assets/readme/Changes.png" width="100%"
+  <img src="./assets/readme/Changes.png" width="49%"
        alt="Changes tab (real screenshot): repo picker showing dsh-git on branch main, a 'Push to origin' ahead-count toolbar, six tabs, 17 changed files with checkboxes, a line-by-line diff of README.md, and the commit area at the bottom (summary/description, ✨ generate, commit button)">
-</p>
-
-<p align="center">
-  <img src="./assets/readme/History.png" width="100%"
+  <img src="./assets/readme/History.png" width="49%"
        alt="History tab (real screenshot): commit list on the left; top right shows the selected commit's message, short sha and +/− stats; below it the files that commit touched with their line-by-line diff">
 </p>
 

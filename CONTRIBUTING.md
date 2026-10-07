@@ -104,6 +104,42 @@ npm run check:generated:rebuild  # 重跑构建，逐字节比对生成物（改
   长期棘轮债，红着也不该拦下 PR；你想跑就跑，跑红了且不是你引入的，在描述里点名即可。
 - 不要提交任何令牌、`.credentials.yaml`、个人路径；`GITHUB_TOKEN` 只作为环境变量出现。
 
+## 发布
+
+发布是**手动**的（`.github/workflows/release.yml` 只挂 `workflow_dispatch`）：打 tag 是**标记**，
+发布是**动作**，两件事分开，才不会出现「给已发布的版本补个 tag，结果触发一次必然失败的发布」，
+也才可能在失败后重试。
+
+```bash
+# 1. 对齐版本号（package.json 与 package-lock.json 两处，锁用下面这条同步）
+npm version <x.y.z> --no-git-tag-version
+npm install --package-lock-only
+
+# 2. 提交并推 main
+git add package.json package-lock.json && git commit -m "chore(release): x.y.z"
+git push origin main
+
+# 3. 打 tag 并推（这一步**不会**发布任何东西）
+git tag v<x.y.z> && git push origin v<x.y.z>
+
+# 4. 去 Actions → Release → Run workflow，"Use workflow from" 选那个 tag
+```
+
+workflow 会跑**与 CI 相同的发布物检查**（构建 + 产物语法 + `verify-plugin`），
+再硬校验「tag 与 package.json 版本一致」，然后 `npm publish --provenance` 并建 GitHub Release
+（自动 release notes）。它需要仓库里配好 `secrets.NPM_TOKEN`；改用 npm 的 Trusted Publishing
+则不需要 token。
+
+⚠️ **如果 npm 把发布转成了「暂存发布」**（账号侧要求 proof-of-presence 时会发生），
+workflow 那一步会成功，但版本**不会立刻对外可见** —— 需要本机用 npm 12 批准：
+
+```bash
+npm stage list @linxueyuan/dsh-git
+npm stage approve <stage-id>     # 会提示 2FA
+```
+
+发完之后，记得把 `CHANGELOG.md` 里的 `[Unreleased]` 段落整理成新版本一节（并补上版本链接）。
+
 ## 报告问题
 
 用 [issue 模板](.github/ISSUE_TEMPLATE/) 提交，并带上：
