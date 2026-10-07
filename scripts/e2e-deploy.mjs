@@ -42,7 +42,7 @@ import {
   rmSync, writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 // ---------------------------------------------------------------------------
@@ -364,6 +364,45 @@ echo('dsh', ['--profile', PROFILE, '--from-default-profile', 'web', '--dump-conf
 run('dsh', ['--profile', PROFILE, '--from-default-profile', 'web', '--dump-config'], { stdio: 'pipe' });
 ok('profile 已创建');
 
+/*
+ * ⭐ **预置「预览版说明」的确认状态**(等价于「在一个设置写得进去的机器上点一次继续」)。
+ *
+ * 这不是「绕过 UI 点击」,而是**替环境补上它缺的那一步** —— 而且补的是宿主的缺口,不是
+ * 我们的判据。2026-10-07 实测链(依次否掉了两个假设,剩下的就是这条):
+ *
+ *  1. 点「继续」失败,界面显示「暂时无法保存确认状态,请重试。」(截图见 artifacts);
+ *  2. 抓 WS 帧:点击之后 **一帧都没发** ⇒ 失败在浏览器侧,根本没请求宿主;
+ *  3. 读 `welcomeNotice` 控制器:写不出去时 `derive()` 落到
+ *     `scope.status === 'unavailable'` ⇒ 客户端设置服务的 scope 不可用;
+ *  4. 查宿主组合:`settings` / `config-editor` 都是
+ *     `disabled: !!js '!ctx.get('profileContext')'`,而 `profileContext` 是 CLI 在
+ *     **boot 回调里**才 provide 的 —— 组合阶段求值时它还是空的;
+ *  5. 于是我显式 patch 成 `disabled: false` 再试:**composed config 里确实变成了 false,
+ *     点击仍然不发一帧** ⇒ 连宿主服务开着也没用,客户端的设置能力在无头 `dsh web` 里
+ *     就是不可用的。
+ *
+ * 结论:在**全新的 `$DSH_HOME`** 里,这个模态弹窗点不过去,而它盖住整个界面、吃掉所有
+ * 点击 ⇒ 后面的 UI 动作一个都到不了。它是宿主侧的缺口(同一个原因下,任何插件的设置
+ * 在纯 web 里也是只读的),与本插件无关。
+ *
+ * 所以这里预置确认状态 —— 形状逐字取自真源(用户真实 home 的
+ * `profiles/desktop/cordis.patch.yml` 里就有这条),字段名与版本号取自
+ * `dsh-client-ui-settings-models/lib/client.js`。加引号是为了让 YAML 解析成字符串:
+ * 客户端用的是严格相等比较。
+ */
+const WELCOME_NOTICE_VERSION = '2026-09-28.1';
+const patchPath = join(PROFILE_DIR, 'cordis.patch.yml');
+const patchText = readFileSync(patchPath, 'utf8');
+// 模板给的顶层是**空数组 `[]`** —— 要在它**原位**换成我们的条目,不能往后追加
+// (YAML 不允许「一个流式空数组 + 一个块列表」并存,追加会直接解析失败)。
+if (!/^\[\]\s*$/m.test(patchText)) {
+  throw new Error(`profile 模板的 cordis.patch.yml 形状变了(没找到空的 [] 顶层数组):\n${patchText}`);
+}
+writeFileSync(patchPath, patchText.replace(/^\[\]\s*$/m, '- id: ui-settings-general\n'
+  + '  name: "@deepseek-ai/dsh-client-ui-settings-general"\n'
+  + `  config:\n    welcomeNoticeVersion: "${WELCOME_NOTICE_VERSION}"\n`));
+ok(`已预置「预览版说明」确认状态(${WELCOME_NOTICE_VERSION});原因见本段注释`);
+
 /** profile 的 package.json。 */
 const profileManifestPath = join(PROFILE_DIR, 'package.json');
 const profileManifest = JSON.parse(readFileSync(profileManifestPath, 'utf8'));
@@ -648,6 +687,17 @@ ok(`插件路由已就绪:build=${health.build} repos=${health.repos}`);
 step('浏览器验证:页面加载 + 本插件真的执行 + 截图');
 
 mkdirSync(SHOTS, { recursive: true });
+
+/** 截图序号:**自动编号** —— 免得每加一次动作都要手工重排所有文件名。 */
+let shotSeq = 0;
+
+/** 截一张图并登记。每一次 UI 动作之后都要留一张,这是这次运行唯一「给人看」的证据。 */
+async function shot(slug) {
+  shotSeq += 1;
+  const file = join(SHOTS, `${String(shotSeq).padStart(2, '0')}-${slug}.png`);
+  await page.screenshot({ path: file });
+  ok(`截图 ${file}`);
+}
 const { chromium } = await import(pathToFileURL(PLAYWRIGHT_ENTRY).href);
 const browser = await chromium.launch({ channel: 'chrome' });
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
@@ -661,39 +711,45 @@ await page.goto(url, { waitUntil: 'domcontentloaded' });
 await page.waitForTimeout(12_000);
 
 /*
- * 试着关掉**首次启动的「预览版说明」弹窗**(一个全新的 DSH_HOME 一定会弹它)——
- * 它盖住整个界面,留着会让截图看起来像「页面没起来」。
+ * **过启动时的模态门**(按顺序点,一轮一轮来)。
  *
- * ⚠️ 但它**可能关不掉**:实测在全新 DSH_HOME 里点「继续」之后,宿主自己会提示
- * 「暂时无法保存确认状态,请重试」,弹窗原地不动(那是宿主的存储问题,与本插件无关)。
- * 所以这里**只报告事实**:关掉了就说关掉了,没关掉就如实说截图里盖着它 ——
- * 点了按钮就当成功,是一条假证据。
+ * 它们是**模态**:盖住整个界面、吃掉所有点击 —— 不过完,后面的 `打开右侧边栏`、
+ * `git` tab、`Add ▾` 一个都点不到。而且**不止一个门**:
+ *   1. `预览版说明`(`继续`)—— 2026-10-07 实测:点它时宿主可能报
+ *      「暂时无法保存确认状态」,但**确认值落盘要几秒**,别点一次就下结论;
+ *   2. `添加一个 API Key 开始使用`(`稍后配置`)—— 前一个门过了才会出现。
+ *
+ * 所以不写「点一次 + 固定等 1.5 秒」,改成:轮询式地看到哪个点哪个,直到没有可见的门
+ * (或到轮数上限),每点一个都留一张图。
+ * @param rounds - 最多轮数(每一轮把所有还看得见的门各点一次)。
+ * @returns 结束时是否已经没有门挡着。
  */
-const noticeButton = page.getByRole('button', { name: '继续' }).first();
-let hadNotice = false;
-let noticeGone = false;
-try {
-  hadNotice = await noticeButton.isVisible();
-  if (hadNotice) {
-    await noticeButton.click({ timeout: 5000 });
-    await page.waitForTimeout(1500);
-    noticeGone = await noticeButton.isHidden();
+async function passModalGates(rounds = 4) {
+  for (let round = 1; round <= rounds; round += 1) {
+    let clickedAnyone = false;
+    for (const label of ['继续', '稍后配置']) {
+      const button = page.getByRole('button', { name: label }).first();
+      if (!(await button.isVisible().catch(() => false))) {
+        continue;
+      }
+      await button.click({ timeout: 5000 }).catch(() => { /* 可能刚好消失 */ });
+      clickedAnyone = true;
+      // 写入要落盘(文件锁 + 重放 patch),给足时间再判断,别把慢当成失败。
+      await page.waitForTimeout(3000);
+      await shot(`modal-${label}`);
+    }
+    if (!clickedAnyone) {
+      ok(round === 1 ? '启动时没有模态门' : `模态门已全部点过(${round - 1} 轮)`);
+      return true;
+    }
   }
-} catch (error) {
-  info(`处理「预览版说明」弹窗时出岔子(不影响断言):${String(error).split('\n')[0]}`);
+  warn('模态门点了 4 轮还没消失 —— 后面的 UI 动作会被它吃掉');
+  return false;
 }
-if (!hadNotice) {
-  info('没有「预览版说明」弹窗,直接截图');
-} else if (noticeGone) {
-  ok('已关掉首次启动的「预览版说明」弹窗');
-} else {
-  warn('「预览版说明」弹窗仍在(宿主提示「暂时无法保存确认状态」)⇒ 截图里它盖着界面');
-}
+await passModalGates();
 
 /** 首屏截图。 */
-const shotMain = join(SHOTS, '01-ui-loaded.png');
-await page.screenshot({ path: shotMain });
-ok(`截图 ${shotMain}`);
+await shot('ui-loaded');
 
 const seen = await page.evaluate(() => ({
   failedPlugins: /Failed to load plugins/i.test(document.body.innerText ?? ''),
@@ -732,13 +788,18 @@ if (servedLine !== undefined) {
 }
 
 /*
- * 纯 `dsh web` profile 里**没有**右侧栏提供方(`@deepseek-ai/dsh-client-ui-sidebar-right`
- * 的公开版本与宿主对不上),所以右侧栏 tab 注册不上 —— 这不是失败,是设计内的降级:
- * 插件必须照常加载,只是没有那个 tab。这条断言把「降级」与「崩掉」区分开。
+ * ⚠️ 这里**不再**把「没有 sidebarRightTabs」当成可接受的降级。
+ *
+ * 2026-10-07 查明:那个服务**是会来的**,只是比本插件的 `apply` 晚 —— 用 `ctx.get()`
+ * 采样一次,等于在**所有**环境里都放弃注册(静默失败,不是兼容);正确的写法是
+ * `ctx.inject(['sidebarRightTabs'], …)` 等它到位。
+ *
+ * 所以判据挪到后面(仓库登记完、面板能显示内容时):**硬断言右侧栏 tab 打开、
+ * 面板渲染**(见「UI 驱动」那一段)。这里只把控制台里的那句话留作现场。
  */
 const degraded = consoleLines.find((l) => l.includes('没有 sidebarRightTabs'));
 if (degraded !== undefined) {
-  warn('该 profile 没有右侧栏提供方 ⇒ 已按可选依赖降级(插件其余能力照常)');
+  warn('控制台里仍有「没有 sidebarRightTabs」的降级记录 ⇒ tab 注册链断在采样那一步');
 }
 
 const shotButtons = seen.buttons;
@@ -760,8 +821,18 @@ step('准备一个真仓库(test 分支的浅克隆)');
  * 同一个脚本本地跑是通的(`/tmp` 也能过)。所以这里按**用户真实的姿势**来:
  * 仓库就在工作区里。顺带这也是唯一有意义的判据 —— 沙箱本来就不允许碰工作区之外的东西。
  */
-const SCRATCH_ROOT = resolve(flag('scratch-root', join(REPO, '.e2e-scratch')));
-mkdirSync(SCRATCH_ROOT, { recursive: true });
+/*
+ * ⭐ 仓库落点 = **宿主的默认工作区目录**,不是随便一个临时目录。
+ *
+ * 为什么:`+ 添加本地仓库` 走的是宿主 `repos/autodetect`(取**当前工作区**路径),
+ * 而界面上另外那条「添加新仓库」会唤起**系统文件夹选择器** —— 原生弹窗在无头浏览器里
+ * 既看不到也点不动,自动化驱动不了。所以点击驱动的正路是:让**工作区本身就是一个
+ * git 仓库**(这也正是真实用户的形状:他的工作区就是他要提交的仓库),
+ * 然后点一下 `+ 添加本地仓库`,登记完全由点击完成。
+ */
+const scratch = flag('repo-dir', join(homedir(), 'Documents', 'deepseek-harness', 'default-workspace'));
+rmSync(scratch, { recursive: true, force: true });
+mkdirSync(scratch, { recursive: true });
 
 /** 远端 URL:CI 里用 GITHUB_TOKEN,本地用当前 checkout 的 origin。 */
 function resolveOriginUrl() {
@@ -778,8 +849,7 @@ function resolveOriginUrl() {
 }
 
 const originUrl = resolveOriginUrl();
-const scratch = mkdtempSync(join(SCRATCH_ROOT, 'repo-'));
-info(`临时克隆 ${scratch}(工作区内)`);
+info(`克隆到工作区 ${scratch}`);
 info(`远端 ${redact(originUrl)}`);
 
 if (SKIP_PUSH) {
@@ -809,61 +879,267 @@ function remoteHead() {
 const headBefore = SKIP_PUSH ? '(skip)' : remoteHead();
 info(`推送前 ${BRANCH} = ${headBefore}`);
 
-step('走插件自己的路由:登记 → 改文件 → stage → commit');
-
-/*
- * ⭐ **先登记「宿主工作区里的仓库」**(= 本 checkout),再登记临时克隆。
- *
- * 它同时是**受管路径探针**:插件的 git 走宿主受管子进程,受宿主沙箱策略管辖。
- * 如果连工作区里的仓库都登记不上,那就不是「临时目录选错了」,而是这条受管路径
- * 在这个环境里根本不通 —— 那种失败必须指名道姓地说出来,并且**附上对比证据**
- * (同一个路径,直接用本机 git 看),否则下一个人只会看到「这个目录不是 git 仓库」
- * 这种把真因藏起来的报错。
- */
-const workspaceAdded = await call('repos/add', { path: REPO }).catch((error) => {
-  let direct;
-  try {
-    direct = run('git', ['-C', REPO, 'rev-parse', '--show-toplevel']).trim();
-  } catch (directError) {
-    direct = `本机 git 也失败:${String(directError).split('\n')[0]}`;
-  }
-  throw new Error(`连宿主工作区里的仓库都登记不上:${error instanceof Error ? error.message : String(error)}\n`
-    + `  · 被拒路径:${REPO}\n`
-    + `  · 同一路径用本机 git 看:${direct}\n`
-    + '  ⇒ 路径本身是仓库,问题出在插件的**受管子进程**(`ctx.subprocess`)这条路径上'
-    + '(宿主沙箱策略 / 受管 spawn)。E2E 已用 DSH_PERMISSION_MODE=danger-full-access 启动,'
-    + '若仍到这里,说明不是沙箱策略能解释的。');
-});
-if (workspaceAdded.added !== true) {
-  throw new Error(`宿主工作区仓库登记返回了 added=false:${JSON.stringify(workspaceAdded).slice(0, 200)}`);
-}
-ok(`宿主工作区仓库已登记(${REPO.split('/').pop()})`);
-
-/** 登记临时克隆(host 侧没有目录选择器,所以必须给绝对路径)。 */
-const added = await call('repos/add', { path: scratch });
-if (added.added !== true) {
-  throw new Error(`repos/add 没有登记成功:${JSON.stringify(added).slice(0, 200)}`);
-}
-ok(`临时克隆已登记(清单共 ${added.repos.length} 个)`);
+step('准备现场:临时克隆 + 写一个待提交的文件');
 
 /** 改一个文件 —— 用时间戳保证每次内容都不同,否则第二次跑就没有变更可提交。 */
 const marker = join(scratch, 'e2e-marker.txt');
-const markerText = `dsh-git e2e ${new Date().toISOString()}\n`;
-writeFileSync(marker, markerText);
+writeFileSync(marker, `dsh-git e2e ${new Date().toISOString()}\n`);
 ok('写入 e2e-marker.txt');
 
-const statusDirty = JSON.stringify(await call('status', { path: scratch }));
-if (!statusDirty.includes('e2e-marker.txt')) {
-  throw new Error(`status 没看到新文件:${statusDirty.slice(0, 300)}`);
-}
-ok('status 看到了变更');
+/*
+ * ⚠️ 这里**刻意不做任何路由预登记**。
+ *
+ * 用户裁决:所有动作都走界面点击,**包括添加仓库**。所以仓库只能从界面里那条路加进来 ——
+ * 仓库列表里的 `Add ▾` → `Add Existing Repository…`,它是**一个填路径的对话框**
+ * (镜像上游 `ui/add-repository/add-existing-repository.tsx`),**不依赖任何原生
+ * 目录选择器**,所以无头浏览器里照样能走通。见下面 UI 驱动那一段。
+ */
 
-await call('stage', { path: scratch, files: ['e2e-marker.txt'] });
-ok('stage {files:["e2e-marker.txt"]} 成功');
+// ---------------------------------------------------------------------------
+// 8. UI 驱动:每做一次界面动作就截一张图
+// ---------------------------------------------------------------------------
 
+step('UI 驱动(每步截图):打开 git 面板 → 选仓库 → 纳入文件 → 提交');
+
+/** 本次提交的标题 —— 先定下来,后面 UI 填它、本机 git 再核对它。 */
 const message = `test(e2e): 部署测试提交 ${new Date().toISOString()}`;
-await call('commit', { path: scratch, message });
-ok(`commit 成功:${message}`);
+
+
+/** 把界面上的控件列出来 —— 选择器失败时的现场,免得下一轮还要靠猜。 */
+async function dumpControls(where) {
+  const names = await page.evaluate(() => [...document.querySelectorAll('button,[role="tab"],[role="button"],a,[role="menuitem"],li')]
+    .map((el) => {
+      const label = (el.getAttribute('aria-label') ?? '').trim();
+      const text = (el.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, 24);
+      return `${el.tagName.toLowerCase()}${label === '' ? '' : `[${label}]`}${text === '' ? '' : `{${text}}`}`;
+    })
+    .slice(0, 80));
+  info(`${where} 的控件清单:${names.join(' | ')}`);
+}
+
+/**
+ * 打印某个弹层的 **outerHTML**(有界) —— 菜单项没有 `role="menuitem"`,
+ * 只靠控件清单看不到它们;2026-10-07 就是因此一直点不中 `Add Existing Repository…`。
+ * @param label - 日志前缀。
+ * @param text - 该弹层里应该出现的一段文字(用来识别是哪个弹层)。
+ */
+async function dumpPopupHtml(label, text) {
+  const html = await page.evaluate((needle) => {
+    const nodes = [...document.querySelectorAll('div,ul')]
+      .filter((el) => (el.textContent ?? '').includes(needle))
+      .sort((a, b) => (a.textContent ?? '').length - (b.textContent ?? '').length);
+    return nodes[0]?.outerHTML?.replace(/\s+/g, ' ').slice(0, 1200) ?? '(没找到含这段文字的弹层)';
+  }, text);
+  info(`${label} 的弹层 HTML:${html}`);
+}
+
+/** 轮流试候选定位器,点中第一个可见的就返回 true(界面文案会变,所以给一串)。 */
+async function clickFirst(candidates, timeoutMs) {
+  for (const locate of candidates) {
+    try {
+      await locate().first().click({ timeout: timeoutMs });
+      return true;
+    } catch {
+      /* 试下一个候选 */
+    }
+  }
+  return false;
+}
+
+/** 轮询到条件成立;超时抛错(带一句人话)。 */
+async function waitUntil(check, timeoutMs, what) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await check()) {
+      return;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`等了 ${timeoutMs}ms 仍然没有:${what}`);
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 1500));
+  }
+}
+
+/*
+ * 先刷新:仓库是**路由**登记的 —— 无头浏览器里没有目录选择器,界面上那条
+ * 「添加仓库」在拿不到选择器时会正确地什么都不做(见 `repo-bar.tsx`:那两颗按钮
+ * 已按用户指令移除)。刷新之后仓库才进界面。
+ */
+await page.goto(url, { waitUntil: 'domcontentloaded' });
+await page.waitForTimeout(12_000);
+/*
+ * ⚠️ **刷新之后必须再过一次门**。2026-10-07 实测踩到:「添加一个 API Key」那个引导页
+ * **不持久** —— 它是由「没有可用 provider」推导出来的,刷新就回来;而它同样是模态,
+ * 会把后面的 `打开右侧边栏`、`git` tab、`Add ▾` 全部吃掉(现场:04-right-sidebar.png)。
+ * (「预览版说明」相反,是持久门,靠上面对 profile patch 的预置过。)
+ */
+await passModalGates();
+
+/*
+ * ① 展开右侧栏。
+ *
+ * ⚠️ 2026-10-07 实测:**纯 `dsh web` 里右侧栏默认是收起的,而收起时 tab 条根本不渲染** ——
+ * 拿不到 tab 不代表没注册上。控件清单里只有 `button[打开右侧边栏]`,一个 tab 都没有,
+ * 所以必须先展开,再谈「tab 注册上了没有」。
+ */
+const openedSidebar = await clickFirst([
+  () => page.getByRole('button', { name: '打开右侧边栏' }),
+], 6000);
+if (openedSidebar) {
+  await page.waitForTimeout(2000);
+  ok('已展开右侧边栏(默认收起)');
+} else {
+  info('右侧边栏本来就是展开的');
+}
+await shot('right-sidebar');
+
+/*
+ * ② 打开 git 面板 —— ⭐ **这就是「纯 dsh web 里右侧栏 tab 注册上了」的硬判据**。
+ *
+ * 2026-10-07 之前,本插件用 `ctx.get('sidebarRightTabs')` 采样一次就放弃注册,
+ * 于是这里必然失败(而且没有任何报错)—— 静默失败不是兼容。
+ */
+const openedTab = await clickFirst([
+  () => page.getByRole('tab', { name: /^git$/ }),
+  () => page.getByRole('button', { name: /^git$/ }),
+  () => page.locator('button').filter({ hasText: /^git$/ }),
+], 15_000);
+if (!openedTab) {
+  await dumpControls('点不到 git tab 时');
+  throw new Error('点不到 git tab:右侧栏 tab 没有注册上(判据是 `ctx.inject` 那条修复)');
+}
+/** 面板真的渲染了:本插件的样式全部 scope 在 `.gw-*` 下,这是它独有的锚点。 */
+await page.locator('.gw-app-toolbar, .gw-header, .gw-frow').first().waitFor({ timeout: 20_000 });
+ok('git 面板已打开并渲染(右侧栏 tab 注册成功)');
+await shot('git-panel');
+
+/*
+ * ③ **点击添加仓库**(用户裁决:不允许路由预登记)。
+ *
+ * 走的是上游那条路:仓库列表里的 `Add ▾` → `Add Existing Repository…` →
+ * **一个填路径的对话框**(镜像 `ui/add-repository/add-existing-repository.tsx`)。
+ * 它**不需要**任何原生目录选择器 —— 纯 web 里根本没有那东西
+ * (`clientPickDirectory()` 返回 null),但「输入路径」这条路永远在。
+ */
+/*
+ * ⭐ **点击添加仓库**(用户裁决:不允许路由预登记)。
+ *
+ * 走的是空态里那颗 `+ 添加本地仓库` ⇒ 宿主 `repos/autodetect` ⇒ 取当前工作区路径。
+ * ⚠️ 界面另一条「添加新仓库」那条路会唤起**系统文件夹选择器**(原生弹窗,无头浏览器
+ * 驱动不了),所以这里刻意不走它;本脚本已把临时克隆放在宿主默认工作区目录上,
+ * 于是工作区本身是 git 仓库,这一下点击就能真的登记成功。
+ */
+/** 提交按钮是「仓库已选中且有待提交内容」的判据(文案:`提交 N 个文件到 <branch>`)。 */
+const commitButton = page.getByRole('button', { name: /^提交/ }).first();
+const clickedAddLocal = await clickFirst([
+  () => page.getByRole('button', { name: /^添加本地仓库$/ }),
+  () => page.getByRole('button', { name: /添加本地仓库/ }),
+], 6000);
+if (clickedAddLocal) {
+  ok('已点击「添加本地仓库」(宿主 repos/autodetect:取当前工作区)');
+  await page.waitForTimeout(2500);
+} else if (await commitButton.isVisible().catch(() => false)) {
+  /*
+   * 没有那颗空态按钮,但提交按钮已经在 ⇒ 仓库**已被插件自己的 autodetect 登记并选中**
+   * (工作区现在就是 git 仓库,它启动时自己认出来)。注意这**不是**路由预登记:
+   * 本脚本一个 `repos/add` 都没调,登记完全由插件的界面逻辑完成。
+   */
+  info('仓库已由插件自带的 autodetect 登记并选中(脚本未做任何登记调用)');
+} else {
+  await dumpControls('既没有「添加本地仓库」也没有提交按钮时');
+  throw new Error('仓库没有登记上,也没有可点的添加入口');
+}
+await page.waitForTimeout(1500);
+
+/** 判据取界面自己:仓库出现在面板里(顺便说明它被选中了) */
+await page.getByText(basename(scratch), { exact: false }).first().waitFor({ timeout: 20_000 });
+await page.waitForTimeout(2000);
+ok(`仓库已由**点击**添加并出现在界面:${basename(scratch)}`);
+await shot('repo-added-by-click');
+
+/** ③ 选中临时克隆(清单里现在只有它;界面上点一下,别只靠自动选中)。 */
+const repoName = basename(scratch);
+const pickedRepo = await clickFirst([
+  () => page.getByText(repoName, { exact: false }),
+], 8_000);
+if (pickedRepo) {
+  await page.waitForTimeout(1500);
+  ok(`已点选仓库 ${repoName}`);
+} else {
+  warn(`界面上没找到仓库名 ${repoName}(可能已被自动选中)—— 继续`);
+}
+await shot('repo-selected');
+
+// 关掉可能被点开的浮层:下面的文件行如果被浮层盖着,Playwright 会判定点击被拦截。
+await page.keyboard.press('Escape').catch(() => { /* 没有浮层 */ });
+await page.waitForTimeout(500);
+
+/*
+ * ④ 纳入文件。
+ *
+ * ⚠️ 这里的「勾选」**不是**暂存(`changes-view.tsx` 的注释写得很清楚:勾选只改客户端
+ * 纳入状态,索引在提交时才写)。所以判据是 `data-included="all"`,不是「跑了 git add」。
+ */
+const row = page.locator('.gw-frow[data-path="e2e-marker.txt"]').first();
+await row.waitFor({ timeout: 20_000 });
+let included = await row.getAttribute('data-included');
+if (included !== 'all') {
+  await row.locator('input[type="checkbox"]').first().click({ timeout: 8000 });
+  included = await row.getAttribute('data-included');
+}
+if (included !== 'all') {
+  await dumpControls('纳入文件失败时');
+  throw new Error(`e2e-marker.txt 没能纳入提交(data-included=${String(included)})`);
+}
+ok('e2e-marker.txt 已纳入提交');
+await shot('file-included');
+
+/** ⑤ 填提交信息(标题输入框是 `input.gw-input`;筛选框是另一个类名,不会撞)。 */
+await page.locator('input.gw-input').first().fill(message);
+ok(`提交信息已填:${message}`);
+await shot('commit-message');
+
+/** ⑥ 提交:点按钮,然后**用本机 git 核对**它真的落地了(不信界面自己的回执)。 */
+/*
+ * ⚠️ 提交按钮是**分裂按钮**:左边是「提交 N 个文件到 <branch>」,右边那个 `⌄` 打开的是
+ * **选项菜单**(绕过提交钩子 / 追加 Signed-off-by / 允许空提交)。
+ *
+ * 2026-10-07 实测踩到:`getByRole('button', { name: /^提交/ }).first()` 点到了那个 `⌄`,
+ * 于是只弹出菜单、**一个 `git commit` 都没发**(`DSH_GIT_DEBUG=1` 日志里 commit 调用数 = 0,
+ * 现场见 artifacts/e2e/12-commit-clicked.png)。
+ *
+ * 所以:先 Escape 关掉可能已经打开的菜单,再按**完整文案**点左边那一半。
+ */
+await page.keyboard.press('Escape').catch(() => { /* 没有菜单 */ });
+await page.waitForTimeout(400);
+const clickedCommit = await clickFirst([
+  () => page.getByRole('button', { name: /^提交 \d+ 个文件到 / }),
+  () => page.getByText(/^提交 \d+ 个文件到 /).first(),
+], 10_000);
+if (!clickedCommit) {
+  await dumpControls('点不到提交按钮时');
+  throw new Error('点不到提交按钮');
+}
+/*
+ * 点完**立刻**留一张现场 + 把提示文案打出来。
+ * 2026-10-07 实测踩到:点提交之后宿主**一次 `git commit` 都没收到**(`DSH_GIT_DEBUG=1`
+ * 的日志里只有正常的 `git config --get pull.rebase`),也就是说请求根本没发出去 ——
+ * 那种失败在「等 90 秒 + 报超时」里是查不出来的,必须留下点击之后那一瞬间的界面。
+ */
+await page.waitForTimeout(2500);
+await shot('commit-clicked');
+const notices = await page.evaluate(() => [...document.querySelectorAll('[role="alert"]')]
+  .map((el) => (el.textContent ?? '').trim()).filter((text) => text !== '').slice(0, 5));
+if (notices.length > 0) {
+  warn(`点提交之后的提示:${notices.join(' / ')}`);
+}
+await waitUntil(
+  () => run('git', ['log', '-1', '--pretty=%s'], { cwd: scratch }).trim() === message,
+  90_000,
+  '提交落地(本机 git 看不到这条提交)',
+);
+ok('提交已落地(本机 git 核对通过)');
+await shot('committed');
 
 /** 用**独立的** git 命令核对提交真的落地了(不信插件自己的回执)。 */
 const localHead = run('git', ['rev-parse', 'HEAD'], { cwd: scratch }).trim();
@@ -874,23 +1150,35 @@ if (subject !== message) {
 ok(`本地 HEAD = ${localHead.slice(0, 10)}(${subject.slice(0, 40)}…)`);
 
 // ---------------------------------------------------------------------------
-// 8. push 并独立断言远端 head 前进
+// 9. UI 驱动 push,并独立断言远端 head 前进
 // ---------------------------------------------------------------------------
 
 if (SKIP_PUSH) {
   warn('--skip-push:跳过 push 与远端断言');
 } else {
-  step(`推送到 ${BRANCH} 并断言远端 head 前进`);
+  step(`点推送,并断言远端 ${BRANCH} 前进`);
 
-  await call('push', { path: scratch });
-  ok('push 路由返回成功');
+  const clickedPush = await clickFirst([
+    () => page.getByRole('button', { name: /推送/ }),
+    () => page.locator('button').filter({ hasText: /推送/ }),
+    () => page.locator('.gw-sync-segment button').first(),
+  ], 10_000);
+  if (!clickedPush) {
+    await dumpControls('点不到推送按钮时');
+    throw new Error('点不到推送按钮');
+  }
+
+  /*
+   * 判据取**远端自己**说的:轮询 `git ls-remote` 直到 head 变化。
+   * 界面说「推送成功」不算证据 —— 这次要证的正是「界面点了之后远端真的动了」。
+   */
+  await waitUntil(() => remoteHead() !== headBefore, 120_000, `远端 ${BRANCH} 的 head 变化`);
+  ok('推送已生效(远端 head 变了)');
+  await shot('pushed');
 
   const headAfter = remoteHead();
   info(`推送后 ${BRANCH} = ${headAfter}`);
 
-  if (headAfter === headBefore) {
-    throw new Error(`远端 ${BRANCH} 的 head 没有变化(${headAfter})—— push 没有真的落下去`);
-  }
   if (!headAfter.startsWith(localHead)) {
     throw new Error(`远端 head(${headAfter})不是我们刚提交的那个(${localHead})`);
   }
@@ -910,7 +1198,7 @@ if (SKIP_PUSH) {
 }
 
 // ---------------------------------------------------------------------------
-// 9. 收尾
+// 10. 收尾
 // ---------------------------------------------------------------------------
 
 step('收尾');
@@ -922,7 +1210,7 @@ ok('浏览器与服务端已关闭');
 if (KEEP) {
   warn(`--keep:保留 profile ${PROFILE_DIR} 与克隆 ${scratch}`);
 } else {
-  rmSync(SCRATCH_ROOT, { recursive: true, force: true });
+  rmSync(scratch, { recursive: true, force: true });
   rmSync(PROFILE_DIR, { recursive: true, force: true });
   ok('临时克隆与 profile 已删除');
 }
