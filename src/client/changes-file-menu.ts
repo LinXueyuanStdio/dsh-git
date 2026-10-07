@@ -64,17 +64,22 @@ import type { ChangedFile } from '../core/types.ts';
 /**
  * 宿主有没有「往 `.gitignore` 追加规则」的能力。
  *
- * **今天是 `false`,而且是全仓一致的事实**:`src/host/routes.ts` 的 67 条路由里
- * 没有任何 gitignore 路由(逐条数是实测),`src/client/api.ts` 里也没有包装。
+ * ⚠️ **2026-10 起是 `true`** —— 宿主那两条路由已经建好(`src/host/routes.ts` 的
+ * `gitignore/append` + `gitignore/save`,真身 `src/host/gitignore.ts`:上游
+ * `lib/git/gitignore.ts` 的逐条移植,**纯文件 I/O、零 git argv**),
+ * 客户端包装在 `api.ts` 的 `gitignoreAppend` / `gitignoreSave`,产品调用点是
+ * `ChangesView` 的 `menuActions.appendIgnoreFile` / `appendIgnorePattern`。
  *
- * ⚠️ 它只是**给人读的事实声明**;`changesFileMenuItems` 的 `enabled` **不读它**,
+ * 改前的读数(**留痕,不是现状**):这个常量是 `false`,宿主 67 条路由里没有任何
+ * gitignore 路由、`api.ts` 里也没有包装 ⇒ 那 4 类菜单项**在列但诚实禁用**。
+ * 现在它们**可用**,而且写完 `store.appendGitIgnore` 会 `refreshStatus()`
+ * ⇒ 文件**当场**从 Changes 列表里消失(不需要刷新页面)。
+ *
+ * ⚠️ 它仍然只是**给人读的事实声明**;`changesFileMenuItems` 的 `enabled` **不读它**,
  * 读的是 `actions.appendIgnoreFile !== undefined`。两者必须一致 —— 探针的
  * I 组会同时量「不传动作 ⇒ 禁用」与「传了动作 ⇒ 可用」,所以这条常量漂了会被抓住。
- *
- * 回收条件:宿主提供该路由 ⇒ 在 `ChangesView` 传 `appendIgnoreFile`,
- * 并把这里改成 `true`。
  */
-export const GITIGNORE_ROUTE_AVAILABLE = false;
+export const GITIGNORE_ROUTE_AVAILABLE = true;
 
 /**
  * 宿主有没有 stash 路由。**今天是 `false`**,是**已登记的刻意排除**

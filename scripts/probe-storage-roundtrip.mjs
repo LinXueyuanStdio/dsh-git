@@ -11,6 +11,35 @@
  * 真 `defineDomain`、真 `JsonStorageBackend`。写的是临时目录,不是 ~/.dsh。
  *
  * 用法:`node scripts/probe-storage-roundtrip.mjs`
+ *
+ * ## ⚠️ 已退役的判据(2026-10-07;依据 commit `7099eba`,不是「懒得维护」)
+ *
+ * 本探针原先有两条读回判据:`githubToken()`(明文令牌经真后端落盘、重开之后还在)
+ * 与 `githubTokenTail()`(尾 4 位)。commit `7099eba`
+ * (2026-10-06 20:48,「fix(token): 令牌只存宿主凭据缝,删掉迁移与明文兜底路径」)
+ * **有意**删掉了「令牌进通用状态域」这条路径,原文:
+ *
+ * > - src/index.ts:zod schema 与 INITIAL_GLOBAL 去掉 `githubToken`(`z.object` 会 strip
+ * >   未声明键 ⇒ 老文件里的键读进来即丢、此后也不会写回);去掉 legacy 接线。
+ * > - repo-registry:删掉 `githubToken` 字段与 `legacyTokens()`;没有凭据服务时令牌只留在
+ * >   内存副本里,并记一条不含值的诊断。
+ *
+ * 代码侧核对:`src/index.ts:161-200` 的 `DOMAIN_SPEC` 里已经没有 `githubToken`
+ * (多了一个 `githubEndpoint`);`src/host/repo-registry.ts:348-362` 的 `githubToken()`
+ * 只读凭据桥或 `memoryToken`,**不读** `state`;`setGithubToken`(`:403-415`)在
+ * 没有凭据桥时只写 `memoryToken` + 持久化 `deviceId`。
+ * ⇒ 那两条判据**按设计就该为假**,已从本文件**删除**(不是放宽、不是留成「已知的红」、
+ * 更不是 `check(…, true)` 假绿)。
+ *
+ * | 删掉的判据 | 为什么它不再是判据 | 新家 |
+ * |---|---|---|
+ * | `githubToken()`(重开之后还读得到 `ghp_probe_token_1234`) | 令牌不再落通用状态域;`memoryToken` **本来就不跨重启**,所以「重启后读回」这件事在契约上已经不存在 | 本条下面新加的 `落盘 JSON 里没有明文令牌`;`docs/probes/credential-migration-probe.mjs`(读侧三条:+ `scripts/verify-install.mjs:158-170` 对**真 profile** 的同一条设计不变量) |
+ * | `githubTokenTail()`(尾 4 位) | 同上;它只是上一条的派生读数 | 同上 |
+ *
+ * ⚠️ 顺带修了同一族的**夹具漂移**:本文件底下那份「按 `src/index.ts` 的真实 DOMAIN_SPEC
+ * 逐字段复制」的 schema 里还留着 `githubToken`,而真的那份**已经换成** `githubEndpoint`
+ * (`src/index.ts:181`)。夹具与真源不一致时,这个探针证明的是**它自己那份想象**。
+ * 现在两份键集对齐。
  * @module dsh-git/scripts/probe-storage-roundtrip
  */
 
@@ -83,7 +112,12 @@ console.log('1) storageStatus 的三种状态(真 RepoRegistry)');
 
 // ---------- 2. 真后端:DOMAIN_SPEC 的 schema + 真 SingleJsonUnit ----------
 
-/** 按 src/index.ts 的真实 DOMAIN_SPEC 逐字段复制(只搬判据需要的形状)。 */
+/**
+ * 按 src/index.ts 的真实 DOMAIN_SPEC 逐字段复制(只搬判据需要的形状)。
+ *
+ * ⚠️ 2026-10-07:原先这里还留着 `githubToken`,而真源已经把它换成 `githubEndpoint`
+ * (`src/index.ts:181`)—— 夹具漂移,已对齐。见文件头「已退役的判据」。
+ */
 function specLikeIndexTs() {
   return defineDomain({
     name: 'dsh_git',
@@ -102,7 +136,7 @@ function specLikeIndexTs() {
           branch: z.string().optional(),
         })).default([]),
         hiddenRemotes: z.array(z.string()).default([]),
-        githubToken: z.string().default(''),
+        githubEndpoint: z.string().default(''),
         deviceId: z.string().default(''),
         prefs: z.object({
           model: z.string().optional(),
@@ -121,11 +155,11 @@ function specLikeIndexTs() {
         lastFetchedAt: z.record(z.string(), z.string()).default({}),
         lastSelected: z.string().default(''),
       }).default({
-        version: 1, entries: [], hiddenRemotes: [], githubToken: '', deviceId: '',
+        version: 1, entries: [], hiddenRemotes: [], githubEndpoint: '', deviceId: '',
         prefs: {}, remoteCache: null, lastFetchedAt: {}, lastSelected: '',
       }),
       initial: {
-        version: 1, entries: [], hiddenRemotes: [], githubToken: '', deviceId: '',
+        version: 1, entries: [], hiddenRemotes: [], githubEndpoint: '', deviceId: '',
         prefs: {}, remoteCache: null, lastFetchedAt: {}, lastSelected: '',
       },
     },
@@ -203,9 +237,24 @@ check('entries[].remote', e?.remote === 'owner/probe', String(e?.remote));
 check('entries[].branch(touch 后)', e?.branch === 'dev', String(e?.branch));
 check('entries[].missing(refreshMissing 后,/tmp/probe-repo 不存在)', e?.missing === true, String(e?.missing));
 check('lastSelected()', reg2.lastSelected() === '/tmp/probe-repo', reg2.lastSelected());
-check('githubToken()', reg2.githubToken() === 'ghp_probe_token_1234', reg2.githubToken());
-check('githubTokenTail()', reg2.githubTokenTail() === '1234', reg2.githubTokenTail());
+/*
+ * ⚠️ **已退役**:原先这里是 `check('githubToken()', reg2.githubToken() === 'ghp_probe_token_1234')`
+ * 与 `check('githubTokenTail()', reg2.githubTokenTail() === '1234')` —— 它们断言
+ * 「明文令牌经真后端落盘、重开之后还读得到」。那是 commit `7099eba` **有意**删掉的
+ * 行为(令牌只存宿主凭据缝,不在通用状态域)。两条判据**删除**,理由与替代覆盖写在
+ * 文件头的「已退役的判据」一节;**没有**改成 `check(…, true)`。
+ *
+ * 替代判据在下面那一条:同一份落盘文本里**没有**令牌明文,也没有 `githubToken` 键。
+ * 它是**非空过**的 —— 文件确实写出来了(`deviceId` 就在同一份文档里),分母不是 0。
+ */
+check('落盘 JSON 里没有明文令牌(7099eba 之后的设计不变量)',
+  !fileText.includes('ghp_probe_token_1234') && !Object.hasOwn(onDisk.global, 'githubToken'),
+  `githubToken 键 ${Object.hasOwn(onDisk.global, 'githubToken') ? '在' : '不在'};`
+  + ` 明文出现 ${fileText.includes('ghp_probe_token_1234') ? '是' : '否'}`);
 check('deviceId()', reg2.deviceId() === 'device-42', reg2.deviceId());
+/* 让报告里看得见退役这件事(惯例如 `docs/probes/toast-commit-button-probe.mjs` 文件头)。 */
+console.log('  [已退役] githubToken() / githubTokenTail():明文令牌不再落通用状态域'
+  + '(依据 7099eba);替代 = 上面那条「落盘 JSON 里没有明文令牌」');
 check('prefModel()', reg2.prefModel() === 'prov/model-a', reg2.prefModel());
 check('prefStagedOnly()', reg2.prefStagedOnly() === false, String(reg2.prefStagedOnly()));
 check('prefSystemPrompt()', reg2.prefSystemPrompt() === 'SYS', reg2.prefSystemPrompt());

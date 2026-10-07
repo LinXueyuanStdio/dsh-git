@@ -472,6 +472,17 @@ function diffKeyOf(file: string, staged: boolean, hideWhitespace: boolean, headS
 /** 完整快照。 */
 export interface Snapshot {
   ready: boolean;
+  /**
+   * **git 作者身份被写过的次数**(仓库设置弹窗 ▸ Git Config 页的保存)。
+   *
+   * 消费点只有一个:`src/client/changes-view.tsx` 的 `CommitAuthorAvatar` 把
+   * `snap.gitConfigRevision ?? 0` 列进那个「读 user.name / user.email」effect 的依赖 ——
+   * 于是「在仓库设置里改了作者」**当场**反映到提交区的「Committing as」浮层,
+   * 不需要刷新页面、也不需要先提交一次。完整理由见 `initial()` 里同名字段的注释。
+   *
+   * 可选:老夹具构造 `Snapshot` 字面量时不必补它(`?? 0`)。
+   */
+  gitConfigRevision?: number;
   /** 服务端返回的错误(仓库清单等全局错误)。 */
   globalError: GitError | null;
   /**
@@ -544,6 +555,18 @@ export interface Snapshot {
   includeState: Record<string, LineSelectionSpec>;
   diff: DiffResult | null;
   diffKey: string;
+  /**
+   * 最近一次**取 diff 失败**的原始错误;`null` = 当前这一份 `diff` 不是「取失败」来的。
+   *
+   * 为什么原样搬 `GitError` 而不是在这里折成文案:与 `pushFailure` /
+   * `generateFailure` 同一条契约 —— 类型/文案是**表现层**的判断,放两份必然分叉。
+   * 这里只搬运宿主机器可读的三样(`code` / `message` / `detail`)。
+   *
+   * ⚠️ **它必须与 `diff` 同生共死**:`diff` 被清成 `null` 的每一处都要把它也清掉,
+   * 否则「上一个文件的失败」会盖到「这一个文件的 diff」上 —— 那正是它要修的那类缺陷
+   * (判据:`docs/probes/diff-too-large-probe.mjs`)。
+   */
+  diffFailure: GitError | null;
   log: CommitEntry[];
   logHasMore: boolean;
   logLoading: boolean;
@@ -639,11 +662,29 @@ function initial(): Snapshot {
     status: null,
     sync: null,
     tagsToPush: [],
+    /*
+     * **git 作者身份的版本号**(2026-10,仓库设置弹窗那条线)。
+     *
+     * 为什么要一个计数器而不是让视图自己重读:`CommitAuthorAvatar` 的读配置 effect 的
+     * 依赖是 `[path, headSha]`(`src/client/changes-view.tsx` 的 `readEffectiveAuthor`)——
+     * 这是**上游的**触发时机(`ui/changes/commit-message.tsx:492-499,798` 的
+     * `commitAuthor` 变化 + `onRefreshAuthor()`),刻意不挂 `snap` 全量(否则每敲一个字
+     * 摘要都会打四发 host 调用)。而「在仓库设置里改了 user.name/user.email 但没有提交」
+     * 这一档,`headSha` **不变** ⇒ 不重读 ⇒ 「Committing as」浮层继续显示旧身份,
+     * 直到用户提交一次。上游靠 `dispatcher.refreshAuthor(repository)`
+     * (`repository-settings.tsx:380-382`)把 `commitAuthor` 换掉,我们没有那条路由
+     * (`repo/author-ident` 在 `goal-port-desktop.md` §10.10 的待建清单里),于是用这个
+     * 计数器顶替**同一件事**:写配置时 +1,视图把它列进那个 effect 的依赖。
+     *
+     * 可选字段:老夹具 / 别的泳道构造的 `Snapshot` 字面量不必补它(`?? 0`)。
+     */
+    gitConfigRevision: 0,
     branches: [],
     selectedFiles: [],
     includeState: {},
     diff: null,
     diffKey: '',
+    diffFailure: null,
     log: [],
     logHasMore: false,
     logLoading: false,
@@ -1171,6 +1212,12 @@ export class GitStore {
       branches: [],
       // 进行中的进度属于「上一个仓库的网络动作」:切仓库时它已经无意义。
       progress: null,
+      /*
+       * 上一个仓库的**取 diff 失败**不许跟过来:`restored` 里带着那个仓库上次的
+       * `diff`/`diffKey`,若把 A 的 `diffFailure` 留在快照里,新的仓库会一开屏就
+       * 顶着 A 的失败(而 `refreshAll()` 立刻会重取、重判)。理由同 `Snapshot.diffFailure`。
+       */
+      diffFailure: null,
       // `stagedOnly` **刻意不在这里重置**:它是全局生成偏好(落在 host 的
       // `prefs.stagedOnly`,由设置面板的勾选框写),不是按仓库的状态。
       // 以前这里写 `stagedOnly: true`,于是切一次仓库就把用户的偏好覆盖掉 ——
@@ -1417,7 +1464,8 @@ export class GitStore {
    *  2. 目标变了(`diffKey` 不等)就先把 `diff` 撤成 null。**这一条不只是观感**:
    *     `DiffPane` 传给 diff 渲染层的选区是 `includeState[diff.path]`,而行号勾选框
    *     又由它驱动 ⇒ 留着 A 的 diff 会让用户对着 A 的行勾选、却以为在改 B,
-   *     勾选会落到**另一个文件**上。撤成 null 时 diff 面板显示「读取 diff…」。
+   *     勾选会落到**另一个文件**上。撤成 null 时 diff 面板显示「读取 diff…」
+   *     (而**取失败**时显示的是那次失败本身 —— 见本方法末尾的 `diffFailure` 分支)。
    *
    * 为什么必须在这里:所有入口(`toggleFile` / `selectFiles` / `setHideWhitespace` /
    * `afterIndexChange`)都汇到这一个方法,守卫放在这一层只需一份。
@@ -1427,7 +1475,7 @@ export class GitStore {
     const file = this.state.selectedFiles[0];
     const seq = (this.diffSeq += 1);
     if (path === '' || file === undefined) {
-      this.emit({ diff: null, diffKey: '' });
+      this.emit({ diff: null, diffKey: '', diffFailure: null });
       return;
     }
     const entry = this.state.status?.files.find((f) => f.path === file);
@@ -1436,7 +1484,7 @@ export class GitStore {
     const key = diffKeyOf(file, staged, this.state.hideWhitespace, this.state.status?.headSha ?? '');
     // 守卫 2:目标与当前已加载的那份不是同一个 ⇒ 先撤掉,别让另一个文件的行勾选留在屏幕上。
     if (this.state.diffKey !== key) {
-      this.emit({ diff: null, diffKey: '' });
+      this.emit({ diff: null, diffKey: '', diffFailure: null });
     }
     const result = await api.diff({
       path,
@@ -1449,7 +1497,32 @@ export class GitStore {
     if (seq !== this.diffSeq) {
       return;
     }
-    if (result.ok) this.emit({ diff: result.value, diffKey: key });
+    if (result.ok) {
+      this.emit({ diff: result.value, diffKey: key, diffFailure: null });
+      return;
+    }
+    /*
+     * **失败不许被丢掉**(2026-10,审计 `docs/diff-view-gap-audit.md` §4 第 8 行 /
+     * §5 行动清单第 1 条;判据 `docs/probes/diff-too-large-probe.mjs`)。
+     *
+     * 以前这里只有上面那一行 `if (result.ok) …`,**没有 else** —— 而宿主在
+     * 「补丁大于收集器上限」时是**响亮拒绝**的(`OUTPUT_CAP_BYTES = 4 << 20`,
+     * `git-runner.ts:155`;`GitService.diff` 抛 `BlobTooLargeError`,
+     * `git-service.ts:611-613`;JSON 路由把 `code/message/detail` 原样放进信封,
+     * `routes.ts:109-114`)。宿主那半边是对的(它不再把截尾补丁当完整补丁),
+     * 但客户端把这一声喊叫**接住然后扔了**:`snap.diff` 停在 `null`,而
+     * `changes-view.tsx` 的 `lastShownRef` 会接着渲染**上一个文件**的 diff ⇒
+     * 用户看到的是「A 的内容 + B 的表头」。实测读数(8,130,113 B 的真补丁):
+     * 帧 B 的面板逐字是 A 的正文,首帧即大文件时则永久停在「读取 diff…」。
+     *
+     * 所以这里**照推送/生成失败那条已落地的模式**(`pushFailure` / `generateFailure`)
+     * 把宿主的机器可读错误原样搬进快照:`code` + `message` + `detail` 一个都不折、不截。
+     * 呈现落点选在**diff 面板自己的失败表面**(`changes-view.tsx` 的 `Empty`)而不是弹窗/toast
+     * —— 理由写在那处(弹窗/toast 都不换掉正文,而正文才是错的那一半)。
+     *
+     * `diffKey: ''`:这次没有可用的 diff ⇒ 行级选区也不该认为「这一个文件的 diff 已就绪」。
+     */
+    this.emit({ diff: null, diffKey: '', diffFailure: result.error });
   }
 
 
@@ -1652,6 +1725,189 @@ export class GitStore {
     // 否则暂存/取消暂存/丢弃一个文件会打**两个** diff 请求。
     // 判据:`docs/probes/commit-include-state-probe.mjs` 的 P6(恰好 1 次)。
     await Promise.all([this.refreshStatus(), this.refreshLog(true)]);
+  }
+
+  // ---------- 仓库设置:作者身份 / 远端地址 / .gitignore ----------
+
+  /**
+   * 读当前仓库根的 `.gitignore` 全文。
+   *
+   * 返回值**不是** `GitError | string|null` 的裸联合:上游
+   * `repository-settings.tsx:101-109` 要区分「没这个文件」(`null`)与
+   * 「读失败」(往弹窗的 `errors` 里推一句),两者在界面上是**两种不同的显示**。
+   * 所以失败走 `{ error }`,成功走 `{ text }`。
+   *
+   * @returns `{ text }`(text 为 `null` ⇒ 没有这个文件)或 `{ error }`。
+   */
+  public async readGitIgnore(): Promise<{ text: string | null } | { error: GitError }> {
+    const path = this.state.current;
+    if (path === '') { return { error: { code: 'workspace-unknown', message: '还没有选中仓库。' } }; }
+    const result = await api.gitignoreRead(path);
+    if (!result.ok) { return { error: result.error }; }
+    return { text: result.value.text };
+  }
+
+  /**
+   * 把全文写回当前仓库根 `.gitignore`,并**立刻**让 Changes 重新取数。
+   *
+   * ## 为什么写后必须 `refreshStatus()`(这是「注意 Changes」的承重一条)
+   *
+   * `.gitignore` 决定 `git status` **列不列出**那些未跟踪文件 ——
+   * 宿主 `status` 路由跑的就是 `git status --porcelain`(未跟踪目录受
+   * `.gitignore` 约束)。所以「加了一条忽略规则」的**唯一**用户可见后果,就是
+   * Changes 左栏那几个文件**当场消失**。
+   *
+   * 上游对应物:三个入口都不直接写文件,而是
+   * `AppStore._saveGitIgnore` / `_appendIgnoreRule` / `_appendIgnoreFile`
+   * (`references/desktop/app/src/lib/stores/app-store.ts:7774-7782`、`:8042-8056`),
+   * 每一个都在写完之后 `return this._refreshRepository(repository)` ——
+   * 而 `_refreshRepository`(`:4065`)里就有 `_loadStatus` ⇒ 文件清单重取。
+   * 我们这边的等价物是 {@link refreshStatus}(它内部**就是** `api.status` +
+   * 选中集合过滤 + 重取 diff,照上游 `_loadStatus` 的末尾)。
+   *
+   * 不接这一步的后果不是「慢一拍」而是**完全不动**:`store` 没有任何文件系统监听,
+   * 5s 轮询虽然也会捞到,但那是「碰巧」而不是「保存后生效」,而设置弹窗保存后是
+   * **关闭**的 —— 用户看到的是「我加了忽略规则,文件还在」。
+   *
+   * @param text - 文本框全文;`''` ⇒ 宿主删掉这个文件。
+   * @returns 失败原因;成功 `null`。
+   */
+  public async saveGitIgnore(text: string): Promise<GitError | null> {
+    const path = this.state.current;
+    if (path === '') { return { code: 'workspace-unknown', message: '还没有选中仓库。' }; }
+    /*
+     * ⚠️ **刻意不**置 `busy`:上游 `_saveGitIgnore`(`app-store.ts:7774-7782`)也不置。
+     * 我们的 `busy` 是**全局**单槽,`workbench.tsx:843/865/867` 用它禁掉「刷新状态与历史」
+     * 与同步按钮 —— 为一次文件写入顺手把整条同步面禁掉是**多余**的副作用,
+     * 而弹窗自己的 `disabled`(上游 `repository-settings.tsx:293`)已经盖住重复提交。
+     */
+    const result = await api.gitignoreSave(path, text);
+    if (!result.ok) { return result.error; }
+    await this.refreshStatus();
+    return null;
+  }
+
+  /**
+   * 往当前仓库根 `.gitignore` 追加规则,并让 Changes 重新取数。
+   *
+   * @param patterns - 规则 / 文件路径。
+   * @param escape - `true` ⇒ 走上游 `appendIgnoreFile` 的
+   *   `/[[\]!*#?]/g` 转义表(文件行右键);`false` ⇒ 走 `appendIgnoreRule`
+   *   的原样追加(「忽略此模式」,例如 `*.ts`)。**不能总是转义** ——
+   *   把 `*.ts` 写成 `\*.ts` 是一条匹配不到任何东西的规则,而 git 不报错。
+   * @returns 失败原因;成功 `null`。
+   */
+  public async appendGitIgnore(patterns: readonly string[], escape: boolean): Promise<GitError | null> {
+    const path = this.state.current;
+    if (path === '') { return { code: 'workspace-unknown', message: '还没有选中仓库。' }; }
+    if (patterns.length === 0) { return null; }
+    const result = await api.gitignoreAppend(path, patterns, escape);
+    if (!result.ok) { return result.error; }
+    await this.refreshStatus();
+    return null;
+  }
+
+  /**
+   * Changes 文件行右键「忽略此文件 / 忽略此文件夹 / 忽略 N 个选中文件」的落点
+   * (上游 `sidebar.tsx:269-276` 的 `onIgnoreFile`)。走**转义**那一支。
+   *
+   * 失败走 toast(上游那条路是 `dispatcher.postError`,不弹窗)。
+   */
+  public async appendIgnoreFile(paths: readonly string[]): Promise<void> {
+    const error = await this.appendGitIgnore(paths, true);
+    if (error !== null) { this.fail(error); }
+  }
+
+  /**
+   * Changes 文件行右键「忽略全部 `.<ext>` 文件」的落点(上游 `sidebar.tsx:278-287`
+   * 的 `onIgnorePattern`,传的是 `*<ext>`)。走**原样**那一支。
+   */
+  public async appendIgnorePattern(pattern: string): Promise<void> {
+    const error = await this.appendGitIgnore([pattern], false);
+    if (error !== null) { this.fail(error); }
+  }
+
+  /**
+   * 读当前仓库的远端清单(`name` + `url`)。
+   *
+   * 为什么不能直接从快照取:快照里只有 `sync.remotes: string[]`(**只有名字**,
+   * 见 `core/types.ts:213`)。而仓库设置弹窗的 Remote 页要显示**地址** ——
+   * 上游 `IRemote` 是 `{ name, url }`(`ui/repository-settings/remote.tsx:27`)。
+   * 宿主早就有这条路由(`routes.ts` 的 `remotes`,返回 `{ name, url }[]`),
+   * 只是客户端**一直没有包装**(所以 `remote-set-url` 路由的调用点计数是 0)。
+   *
+   * @returns 远端清单;失败回 `[]`(弹窗按「没有远端」那一支渲染,与上游一致)。
+   */
+  public async readRemotes(): Promise<{ name: string; url: string }[]> {
+    const path = this.state.current;
+    if (path === '') { return []; }
+    const result = await api.remotes(path);
+    return result.ok ? result.value.remotes : [];
+  }
+
+  /**
+   * 改某个远端的地址(上游 `repository-settings.tsx:296-314` 的
+   * `dispatcher.setRemoteURL` ⇒ `AppStore._setRemoteURL` ⇒ `gitStore.setRemoteURL`
+   * (`lib/stores/git-store.ts:1534-1543`))。
+   *
+   * 上游写完之后 `await this.loadRemotes()` + `emitUpdate()` —— 即**重取远端清单**。
+   * 我们这边等价物是 {@link refreshStatus}(它同时重取 `status` 与 `sync-state`,
+   * 而远端名清单就在 `sync-state` 里),于是顶栏「发布分支 / 同步段」显示的远端名
+   * 与弹窗里刚改的地址**当场**一致。
+   *
+   * @param name - 远端名。
+   * @param url - 新地址(**已 trim**;trim 是调用点的活,上游在
+   *   `repository-settings.tsx:297` 做,本方法不重复做)。
+   * @returns 失败原因;成功 `null`。
+   */
+  public async saveRemoteUrl(name: string, url: string): Promise<GitError | null> {
+    const path = this.state.current;
+    if (path === '') { return { code: 'workspace-unknown', message: '还没有选中仓库。' }; }
+    const result = await api.setRemoteUrl(path, name, url);
+    if (!result.ok) { return result.error; }
+    await this.refreshStatus();
+    return null;
+  }
+
+  /**
+   * 写 git 配置项(`user.name` / `user.email`,local 或 global)—— 仓库设置弹窗
+   * ▸ Git Config 页的保存落点。
+   *
+   * 上游对应物:`repository-settings.tsx:349-378` 的
+   * `setConfigValue(repository, 'user.name'|'user.email', …)` /
+   * `removeConfigValue(...)`(`lib/git/config.ts`,都是 `git config --local` 的写),
+   * 外加 `:380-382` 的 `dispatcher.refreshAuthor(repository)`。
+   *
+   * **最后那一步是本方法存在的理由**:写完之后把
+   * {@link Snapshot.gitConfigRevision} +1 并 `emit`。没有它,「在仓库设置里改作者」
+   * 在界面上完全不可见(`CommitAuthorAvatar` 的读配置 effect 只看 `path` 与 `headSha`)。
+   * 宿主侧的那条 `repo/author-ident`(`git var GIT_AUTHOR_IDENT`)路由**仍然缺**
+   * (`goal-port-desktop.md` §10.10 第 9 项)—— 这个计数器是它的等价物,不是它的替代品:
+   * 它只触发**重读 git 配置**,与上游 `refreshAuthor` 读完 `git var` 的效果同形。
+   *
+   * @param entries - 要写(`value` 是字符串)或要删(`unset: true`)的配置项。
+   *   作用域从 Local 切回 Global 时上游走的是**删键**而不是写空串
+   *   (`repository-settings.tsx:353-356` 的 `removeConfigValue`),写空串会让 git 在
+   *   提交时报 `empty ident name not allowed` —— 所以这里保留 `unset` 这一位。
+   * @returns 第一条失败的原因;全成功 `null`。
+   */
+  public async saveGitConfig(
+    entries: readonly (
+      | { key: string; value: string; scope: 'local' | 'global' }
+      | { key: string; unset: true; scope: 'local' | 'global' }
+    )[],
+  ): Promise<GitError | null> {
+    const path = this.state.current;
+    if (path === '') { return { code: 'workspace-unknown', message: '还没有选中仓库。' }; }
+    if (entries.length === 0) { return null; }
+    for (const entry of entries) {
+      const result = 'unset' in entry
+        ? await api.configUnset(path, entry.key, entry.scope)
+        : await api.configSet(path, entry.key, entry.value, entry.scope);
+      if (!result.ok) { return result.error; }
+    }
+    this.emit({ gitConfigRevision: (this.state.gitConfigRevision ?? 0) + 1 });
+    return null;
   }
 
   // ---------- 提交 ----------
@@ -2253,6 +2509,8 @@ async setHideWhitespace(value: boolean): Promise<void> {
     hideWhitespace: value,
     diff: null,
     diffKey: '',
+    // `diff` 被撤掉的每一处都要把上一次的失败一起撤掉(理由见 `Snapshot.diffFailure`)。
+    diffFailure: null,
     // 上游 `_setHideWhitespaceInChangesDiff`(`lib/stores/app-store.ts:7947-7957`,
     // 真值在 `:7956`)传的也是 `clearPartialState: true`。理由是同一个:隐藏空白是
     // **重跑 `git diff -w`**(键名与理由见本文件 `:979-982` 的注释),hunk 头会从
@@ -2270,7 +2528,7 @@ async setHideWhitespace(value: boolean): Promise<void> {
 /** 切换 History 的同一开关(Desktop 里两个开关独立);同样作废旧 diff 重取。 */
 async setHideWhitespaceHistory(value: boolean): Promise<void> {
   setHideWhitespaceInHistoryDiff(value);
-  this.emit({ hideWhitespaceHistory: value, diff: null, diffKey: '' });
+  this.emit({ hideWhitespaceHistory: value, diff: null, diffKey: '', diffFailure: null });
   await this.loadDiff();
 }
 

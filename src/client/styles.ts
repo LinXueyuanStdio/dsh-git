@@ -344,6 +344,63 @@ html[data-gw-toast-clamp] body > div[role="alert"]:has(> span > .gw-toast-mark){
 @keyframes gw-spin{to{transform:rotate(360deg)}}
 .gw-muted{color:var(--dsw-alias-label-tertiary)}
 
+/* ---------- 仓库设置弹窗(上游 ui/repository-settings/**;2026-10) ----------
+   卡片本体复用 .gw-dialog / .gw-dialog-scrim(与 Clone / Preferences 同一套外壳),
+   这里只补这个弹窗自己的排版:宽一点的卡片、竖向页签 + 内容盒、
+   文本框与文本域。颜色一律宿主 --dsw-alias-* 令牌,不写死十六进制。 */
+.gw-dialog.gw-repo-settings{width:min(560px,100%);max-height:100%;display:flex;flex-direction:column;
+  padding:0;overflow:hidden}
+.gw-dialog.gw-repo-settings > h4{margin:0;padding:12px 14px 10px;font-size:13px;
+  border-bottom:1px solid var(--dsw-alias-border-l2)}
+.gw-dialog.gw-repo-settings .gw-errbox{margin:10px 14px 0}
+.gw-rs-container{display:flex;flex:1 1 auto;min-height:0;overflow:hidden}
+/* 竖向页签:上游 _tab-bar.scss 的 .tab-bar.vertical;这里给本弹窗一份最小适配
+   (Preferences 那份挂在 .gw-prefs 作用域下,不适用于这里)。 */
+.gw-rs-container .tab-bar{display:flex;flex-direction:column;align-items:stretch;flex:none;
+  padding:10px 0;border-right:1px solid var(--dsw-alias-border-l2);min-width:150px}
+.gw-rs-container .tab-bar .tab-bar-item{display:flex;align-items:center;justify-content:flex-start;
+  gap:6px;padding:7px 10px;margin:2px 8px;border:none;border-radius:6px;background:none;
+  color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;cursor:pointer;text-align:left}
+.gw-rs-container .tab-bar .tab-bar-item:hover{background:var(--dsw-alias-interactive-bg-hover);
+  color:var(--dsw-alias-label-primary)}
+.gw-rs-container .tab-bar .tab-bar-item.selected{background:var(--dsw-alias-button-ghost-active-fill);
+  color:var(--dsw-alias-label-primary)}
+.gw-rs-container .tab-bar .tab-bar-item .icon{flex:none}
+.gw-rs-container > .tab-container{flex:1 1 auto;min-width:0;min-height:0;overflow-y:auto;display:flex;
+  flex-direction:column}
+.gw-dialog.gw-repo-settings .dialog-content{padding:16px 18px;display:flex;flex-direction:column;gap:6px}
+.gw-rs-desc{margin:0 0 10px;font-size:12px;line-height:1.6;
+  color:var(--dsw-alias-label-secondary)}
+.gw-rs-desc code{font-family:var(--gw-mono);font-size:11px}
+.gw-linkbtn{appearance:none;background:none;border:none;padding:0;font:inherit;cursor:pointer;
+  color:var(--dsw-alias-link);text-decoration:none}
+.gw-linkbtn:hover{text-decoration:underline}
+.gw-rs-field{font-size:11px;color:var(--dsw-alias-label-secondary)}
+.gw-rs-input{width:100%;background:var(--dsw-alias-bg-layer-1);
+  color:var(--dsw-alias-label-primary);border:1px solid var(--dsw-alias-border-l1);
+  border-radius:6px;padding:5px 7px;font:inherit;font-size:12px;outline:none}
+/* ⚠️ 文本域**单独**一条(不写成 .gw-rs-input,.gw-rs-textarea 的合并选择器再补一条):
+   构建的重复选择器检查会把「同一个选择器出现两次」列出来,拆开就不用加 dup-ok。 */
+.gw-rs-textarea{width:100%;background:var(--dsw-alias-bg-layer-1);
+  color:var(--dsw-alias-label-primary);border:1px solid var(--dsw-alias-border-l1);
+  border-radius:6px;padding:5px 7px;font:inherit;font-size:12px;outline:none;
+  flex:1 1 auto;min-height:220px;resize:vertical;font-family:var(--gw-mono);
+  white-space:pre;overflow:auto}
+.gw-rs-input:focus,.gw-rs-textarea:focus{border-color:var(--dsw-alias-state-business-primary)}
+.gw-rs-input:disabled{background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-tertiary)}
+.gw-rs-advanced{display:flex;flex-direction:column;gap:6px}
+.gw-rs-advanced h2{margin:0 0 4px;font-size:12px;font-weight:600}
+.gw-rs-radio{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}
+.gw-rs-radio label{display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer}
+.gw-rs-noremote{display:flex;flex-direction:column;gap:10px;font-size:12px;line-height:1.6;
+  color:var(--dsw-alias-label-secondary)}
+.gw-rs-noremote p{margin:0}
+.gw-rs-error{margin:0}
+.gw-rs-form{margin-top:auto;display:contents}
+/* ⚠️ NoRemote 那颗「发布」用**既有的** .gw-btn.primary(styles.ts:144-145),
+   刻意**不**在这里重定义它 —— 同名同特异性时后写的会赢,那会把全插件的
+   primary 按钮一起改掉(顶栏 / 别的弹窗都在用)。 */
+
 /* ---------- 窄屏紧凑档(<600px):树变覆盖抽屉、头部换行 ---------- */
 .gw-codepane{position:relative}
 /* 抽屉开关(CodeView 层悬浮,宽屏隐藏);treeOpen 时变为关闭钮 */

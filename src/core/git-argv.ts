@@ -491,6 +491,29 @@ export function configGetArgv(key: string, scope: 'local' | 'global' = 'local'):
   return ['config', scope === 'global' ? '--global' : '--local', '--get', key];
 }
 
+/**
+ * `git config --get <key>` —— **不带作用域**,读的是 git 自己那条合并链
+ * (system → global → local → worktree → command)。
+ *
+ * ## 为什么需要它(而不是复用 {@link configGetArgv})
+ *
+ * 那条 argv **带** `--local`,只读仓库自己的配置。上游 `getConfigValue(repository, key)`
+ * 的 `onlyLocal` 默认是 **false**(`references/desktop/app/src/lib/git/config.ts:11-23`)
+ * ⇒ 它读的是**合并**结果,全局设了 `core.autocrlf=true` 的仓库能被正确识别。
+ *
+ * 唯一的调用点是 `.gitignore` 的行尾规整
+ * (`references/desktop/app/src/lib/git/gitignore.ts:200-231` 的
+ * `formatGitIgnoreContents`):用 `--local` 去读,会在「仓库没设、全局设了」这个最常见的
+ * 档上拿到 `null` ⇒ 落进上游那条「`autocrlf == null` ⇒ 走 git 默认 `\n`」的兜底,
+ * 于是 `core.autocrlf=true` 的用户拿到 LF 而不是 CRLF —— 而 `core.safecrlf=true` 时
+ * 那正是让 `git add` 直接失败的那个形状(上游在 `:190-198` 的注释里写明了这层因果)。
+ *
+ * @param key - 配置键(例如 `core.autocrlf`)。
+ */
+export function configGetEffectiveArgv(key: string): readonly string[] {
+  return ['config', '--get', key];
+}
+
 export function configSetArgv(key: string, value: string, global = false): readonly string[] {
   return ['config', global ? '--global' : '--local', '--replace-all', key, value];
 }

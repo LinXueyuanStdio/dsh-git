@@ -28,6 +28,25 @@ import { ActionsView } from './actions-view.tsx';
 import { PreferencesDialog } from './preferences-dialog.tsx';
 import type { PreferencesTabId } from './preferences-dialog.tsx';
 /*
+ * **仓库设置弹窗**(2026-10 落地,上游 `ui/repository-settings/**`)。
+ *
+ * 它是**我们自己的**模态(与 Clone / Preferences 共用 `host-modal.tsx` 的
+ * `usePluginDialog` / `PluginDialog` 那些模态行为 —— 本轮**没有**新增第三个外壳),
+ * 入口是「Committing as」浮层里那两处 `repository settings` 链接
+ * (上游 `ui/changes/commit-message.tsx:801-807` 派发 `PopupType.RepositorySettings`
+ * + `RepositorySettingsTab.GitConfig`)。
+ */
+import { RepositorySettingsDialog } from './repository-settings-dialog.tsx';
+import type { RepositorySettingsTabId } from './repository-settings-dialog.tsx';
+/*
+ * 「发布仓库」那句实话 toast 的**单一真源** —— 仓库设置弹窗 `NoRemote` 页的
+ * `Publish` 按钮与顶栏「发布仓库」按钮(`toolbar.tsx:650`)、空态建议卡
+ * (`changes-view.tsx`)必须**同一句**。
+ */
+import { PUBLISH_REPOSITORY_UNAVAILABLE } from './unsupported-notices.ts';
+/* 主远端名的**唯一**投影(`ui/app.tsx:3620-3633` 的镜像)—— 仓库设置弹窗要它。 */
+import { remoteNameOf } from './sync-state.ts';
+/*
  * ⚠️ 2026-10:`./host-settings-open.ts` 的 import(`hostSettingsShortcutKeys` /
  * `openHostSettings`)已随「更多」菜单那两项一起撤掉 —— 那是它们唯一的调用点。
  * 模块本体(`host-settings-open.ts`)一个字没删,`isHostSettingsAvailable` 等导出照旧。
@@ -160,6 +179,43 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
    * 具名回调(不是 JSX 里的内联箭头):本仓 `react/jsx-no-bind` 连行内箭头都拦。
    */
   const openGitSettings = (): void => { openPreferencesAt('git'); };
+  /**
+   * **仓库设置弹窗**(2026-10)。
+   *
+   * | 入口 | 预选页 | 上游依据 |
+   * |---|---|---|
+   * | 「Committing as / 邮箱」浮层的 `repository settings` 链接 | `'git-config'` | `ui/changes/commit-message.tsx:801-807` 派发 `PopupType.RepositorySettings` + **`RepositorySettingsTab.GitConfig`** |
+   * | (将来)Repository 菜单 ▸ `Repository Settings…` | `'remote'`(第 0 页) | `main-process/menu/build-default-menu.ts:414-419` —— 浏览器半没有应用菜单,今天不可达 |
+   *
+   * 与偏好设置同一条纪律:**语义是初值**(弹窗自己的 `useState`),已经打开时再触发
+   * 另一个入口不会把用户正在编辑的页拽走(上游 `repository-settings.tsx:79-80` 同形)。
+   */
+  const [repositorySettingsTab, setRepositorySettingsTab] = useState<RepositorySettingsTabId>('git-config');
+  /*
+   * ⚠️ 两个 `useCallback` **不是风格洁癖**:本仓的 `react/jsx-no-bind` 会把
+   * 「传进 JSX 的标识符解析到组件内的箭头函数」判成违规(`openPreferences` 那一票
+   * 就是基线里的存量),而 `reportPanelError` 之所以干净正是因为它包了 `useCallback`。
+   * 新加的两个 handler 要进 JSX,所以必须包 —— 不然就是**净新增**违规(棘轮只拦上升)。
+   */
+  const openRepositorySettingsAt = useCallback((tab: RepositorySettingsTabId): void => {
+    setRepositorySettingsTab(tab);
+    setPopup(PopupType.RepositorySettings);
+    setMenuOpen(false);
+  }, []);
+  const openGitConfigSettings = useCallback((): void => {
+    openRepositorySettingsAt('git-config');
+  }, [openRepositorySettingsAt]);
+  /**
+   * 仓库设置 ▸ 远程页在「没有远端」时那颗 `Publish`。
+   *
+   * 上游开 `PopupType.PublishRepository`(`repository-settings.tsx:281-286`),而
+   * 浏览器半**没有**建库能力(`unsupported-notices.ts` 那条常量说得更细)⇒ 这里给
+   * **与顶栏「发布仓库」同一句**的实话 toast。之所以不传 `undefined`:那颗按钮必须
+   * 有反应,本仓那条「点了必须有反应、反应必须是实话」的约束正是为此。
+   */
+  const publishRepository = useCallback((): void => {
+    store.toast(PUBLISH_REPOSITORY_UNAVAILABLE, 'err');
+  }, [store]);
   const closePopup = (): void => { setPopup(null); };
   const preferencesOpen = popup === PopupType.Preferences;
   const [cloneOpen, setCloneOpen] = useState(false);
@@ -439,7 +495,8 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
                 resetKey={`${snap.tab}::${snap.current}`}
                 onError={reportPanelError}
               >
-                <ViewPort store={store} snap={snap} ghRef={ghRef} onOpenGitSettings={openGitSettings} />
+                <ViewPort store={store} snap={snap} ghRef={ghRef} onOpenGitSettings={openGitSettings}
+                  onOpenRepositorySettings={openGitConfigSettings} />
               </ErrorBoundary>
             </div>
           </>
@@ -520,6 +577,31 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
             />
           </ErrorBoundary>
         )}
+        {popup === PopupType.RepositorySettings && snap.current !== '' && (
+          /*
+           * **仓库设置弹窗**(上游 `ui/repository-settings/**`,2026-10 落地)。
+           *
+           * 与 Preferences 同一个边界纪律:一次渲染期抛错只废掉这个弹窗,插件其余部分
+           * 照常。`resetKey` 绑「仓库 + 预选页」⇒ 换仓库或从另一个入口再开时复位。
+           *
+           * `key` 绑 `snap.current`:上游那一个也带
+           * `key={`repository-settings-${repository.hash}`}`
+           * (`ui/app.tsx:1844`)—— 换仓库时**重新装载**根 `.gitignore` 与作者配置,
+           * 而不是把上一个仓库的文本框内容留在屏幕上。
+           */
+          <ErrorBoundary label="仓库设置" resetKey={`${snap.current}::${repositorySettingsTab}`}
+            onError={reportPanelError}>
+            <RepositorySettingsDialog
+              key={`repository-settings-${snap.current}`}
+              store={store}
+              path={snap.current}
+              remoteName={remoteNameOf(snap)}
+              initialSelectedTab={repositorySettingsTab}
+              onPublish={publishRepository}
+              onClose={closePopup}
+            />
+          </ErrorBoundary>
+        )}
         {pushFailure !== null && (
           <ErrorBoundary label="推送失败" resetKey={`${pushFailure.code}:${pushFailure.message}`}
             onError={reportPanelError}>
@@ -587,6 +669,14 @@ function ViewPort(props: {
    * `PopupType.Preferences` + `PreferencesTab.Git`。
    */
   onOpenGitSettings: () => void;
+  /**
+   * 打开**仓库设置**弹窗(Git 配置页)—— `WorkbenchApp` 的 `openGitConfigSettings`。
+   *
+   * `ChangesView` 的 prop 名是通用的 `onOpenRepositorySettings`(它只知道「要开仓库设置」),
+   * 绑定到哪一页留在**这一处**:上游 `ui/changes/commit-message.tsx:801-807` 派发的是
+   * `RepositorySettingsTab.GitConfig`。
+   */
+  onOpenRepositorySettings: () => void;
 }): ReactNode {
   const { store, snap, ghRef } = props;
 
@@ -609,7 +699,14 @@ function ViewPort(props: {
 
   switch (snap.tab) {
     case 'changes':
-      return <ChangesView store={store} snap={snap} onOpenPreferences={props.onOpenGitSettings} />;
+      return (
+        <ChangesView
+          store={store}
+          snap={snap}
+          onOpenPreferences={props.onOpenGitSettings}
+          onOpenRepositorySettings={props.onOpenRepositorySettings}
+        />
+      );
     case 'history':
       return <HistoryView store={store} snap={snap} />;
     case 'code':

@@ -1113,6 +1113,69 @@ export function createGitHandler(deps: RouteDeps): (request: IncomingMessage, re
       return { ok: true };
     },
 
+    /**
+     * 删掉一条配置(`git config [--global] --unset-all <key>`)。
+     *
+     * 上游 `lib/git/config.ts:279-297` 的 `removeConfigValueInPath`,argv 早已在
+     * `git-argv.ts` 的 `configUnsetArgv` 里。唯一调用点:仓库设置弹窗把 git 身份作用域
+     * 从 Local 切回 Global 时删掉仓库本地的 `user.name` / `user.email`
+     * (`repository-settings.tsx:353-356`)—— 用 `config-set` 写空串**不是**等价物:
+     * git 对「空的 user.name」与「没有 user.name」行为不同(前者可能让提交直接报
+     * `empty ident name not allowed`),那会变成一条静默的坏状态。
+     */
+    'config-unset': async (body) => {
+      const key = str(body, 'key');
+      if (key === undefined) {
+        throw new GitServiceError('bad-request', '缺少配置键。');
+      }
+      await deps.git.unsetConfig(requirePath(body), key, str(body, 'scope') === 'global');
+      return { ok: true };
+    },
+
+    // ---------- 仓库根 .gitignore(纯文件 I/O,零 git argv) ----------
+
+    /**
+     * 读仓库根 `.gitignore` 的全文(上游 `lib/git/gitignore.ts:81-96`)。
+     *
+     * 不存在 ⇒ `{ text: null }`(**不是**空串:上游用 `null` 区分「没有这个文件」与
+     * 「文件是空的」,设置弹窗的 `ignoreTextHasChanged` 判定依赖这个区分)。
+     * 符号链接 ⇒ `bad-request`。
+     */
+    'gitignore/read': async (body) => ({ text: await deps.git.readGitIgnore(requirePath(body)) }),
+
+    /**
+     * 把全文写回仓库根 `.gitignore`(上游 `gitignore.ts:104-135`)。
+     *
+     * ⚠️ `text` **允许是空串**(清空文本框 ⇒ 上游删掉整个文件),所以这里不能用
+     * {@link str}(它把 `''` 归一成 `undefined`)。缺字段 ⇒ `bad-request`。
+     */
+    'gitignore/save': async (body) => {
+      const text = typeof body.text === 'string' ? body.text : undefined;
+      if (text === undefined) {
+        throw new GitServiceError('bad-request', '缺少 .gitignore 文本。');
+      }
+      await deps.git.saveGitIgnore(requirePath(body), text);
+      return { ok: true };
+    },
+
+    /**
+     * 往 `.gitignore` 追加规则。两个消费方共用这一条路由:
+     *  - `escape=false`(默认)⇒ 上游 `appendIgnoreRule`(「忽略此模式」,原样);
+     *  - `escape=true` ⇒ 上游 `appendIgnoreFile`(文件行右键的「忽略此文件 / 文件夹 /
+     *    全部 .ts」,先过 `escapeGitSpecialCharacters`)。
+     *
+     * 为什么必须有 `escape` 这一位而不是「总是转义」:总是转义会把 `*.log` 写成 `\*.log`
+     * —— 一条**匹配不到任何东西**的规则,而 git 不报错(见 `host/gitignore.ts` 的文件头)。
+     */
+    'gitignore/append': async (body) => {
+      const patterns = strList(body, 'patterns');
+      if (patterns.length === 0) {
+        throw new GitServiceError('bad-request', '缺少要忽略的规则或路径。');
+      }
+      await deps.git.appendGitIgnore(requirePath(body), patterns, bool(body, 'escape'));
+      return { ok: true };
+    },
+
     // ---------- 全局 gitconfig 文件(两处「edit your global Git config」链接 + 锁文件) ----------
 
     /**

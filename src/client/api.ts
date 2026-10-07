@@ -585,10 +585,36 @@ const SHAPES: Readonly<Record<string, Shape>> = {
   // ---------- 配置 ----------
   'config-get': { record: { key: 'string', scope: 'string', value: 'string|null' } },
   'config-set': OkTrueShape,
+  'config-unset': OkTrueShape,
   'config-file-info': {
     record: { path: 'string|null', exists: 'boolean', lockPath: 'string|null', lockExists: 'boolean' },
   },
   'config-file-open': OkTrueShape,
+
+  /*
+   * `remotes` / `remote-set-url` —— **宿主早就有、客户端一直没有包装**的两条
+   * (`src/host/routes.ts:1022-1031`)。仓库设置弹窗的 Remote 页是它们的第一个调用点:
+   * 快照里只有 `sync.remotes: string[]`(**只有名字**,`core/types.ts:213`),
+   * 而那一页要显示**地址**(上游 `IRemote = { name, url }`)。
+   *
+   * 两条都不新增宿主能力,也不改任何既有契约 —— 这里只是把既有的信封**声明**出来
+   * (本条是被 `payload-shape-probe.mjs` 的 A7 棘轮要求的:api.ts 里出现的路由名
+   * 必须在形状表里)。
+   */
+  'remotes': { record: { remotes: { array: { record: { name: 'string', url: 'string' } } } } },
+  'remote-set-url': OkTrueShape,
+
+  /*
+   * 仓库根 `.gitignore` 的三条(纯文件 I/O,见 `src/host/gitignore.ts`)。
+   *
+   * `gitignore/read` 的 `text` **必须**是 `string|null`:`null` = 这个仓库根没有
+   * `.gitignore` 文件,与「文件存在但是空的」是**两种不同的状态** —— 设置弹窗靠这个区分
+   * 决定要不要在保存时删文件(`repository-settings.tsx:316`),把它收窄成 `string`
+   * 会让上游那条分支不可达。
+   */
+  'gitignore/read': { record: { text: 'string|null' } },
+  'gitignore/save': OkTrueShape,
+  'gitignore/append': OkTrueShape,
 
   // ---------- 模型与生成 ----------
   'commit-message/models': {
@@ -915,6 +941,63 @@ export const api = {
   // ---------- 配置 ----------
   configGet: (path: string, key: string, scope: 'local' | 'global') => call<{ key: string; scope: string; value: string | null }>('config-get', { path, key, scope }),
   configSet: (path: string, key: string, value: string, scope: 'local' | 'global') => call<{ ok: true }>('config-set', { path, key, value, scope }),
+
+  /**
+   * 删掉一条配置(`git config [--global] --unset-all <key>`,上游 `removeConfigValue`)。
+   *
+   * 唯一调用点:仓库设置弹窗 ▸ Git Config 页把作用域从 Local 切回 Global —— 上游那时
+   * 删掉**本地**的 `user.name` / `user.email` 让 git 回落全局
+   * (`references/desktop/app/src/ui/repository-settings/repository-settings.tsx:353-356`)。
+   * 键不存在时 git 返回非零 ⇒ `ok:false`(与上游一样不吞)。
+   */
+  configUnset: (path: string, key: string, scope: 'local' | 'global') =>
+    call<{ ok: true }>('config-unset', { path, key, scope }),
+
+  // ---------- 远端清单与远端地址(仓库设置弹窗 ▸ Remote 页) ----------
+
+  /**
+   * 远端清单(`name` + `url`)。
+   *
+   * 客户端此前**零调用点** ⇒ 宿主那条 `remotes` 路由一直没有包装(见
+   * `docs/unported-master-ledger.md` §3.3 的口径:路由在、包装不在)。
+   */
+  remotes: (path: string) =>
+    call<{ remotes: { name: string; url: string }[] }>('remotes', { path }),
+
+  /**
+   * 改远端地址(上游 `dispatcher.setRemoteURL`)。
+   *
+   * ⚠️ 与上游一样**不校验 URL 的形状**:`git remote set-url` 接受任意字符串,
+   * 真正的失败(例如不存在的远端名)由 git 的退出码变成 `ok:false`。
+   */
+  setRemoteUrl: (path: string, name: string, url: string) =>
+    call<{ ok: true }>('remote-set-url', { path, name, url }),
+
+  // ---------- 仓库根 .gitignore(纯文件 I/O;宿主 `src/host/gitignore.ts`) ----------
+
+  /**
+   * 读仓库根 `.gitignore` 全文。
+   *
+   * `text === null` ⇒ **这个仓库根没有 `.gitignore` 文件**(不是「空文件」)。
+   * 符号链接 ⇒ `ok:false`(`bad-request`)—— 与上游 `readGitIgnoreAtRoot` 同一条规则。
+   */
+  gitignoreRead: (path: string) => call<{ text: string | null }>('gitignore/read', { path }),
+
+  /**
+   * 把全文写回仓库根 `.gitignore`(上游 `saveGitIgnore`)。
+   *
+   * `text === ''` ⇒ 宿主**删掉**这个文件(上游 `gitignore.ts:110-116` 的既有语义,
+   * 不是我们的发明)。行尾由宿主按 `core.autocrlf` / `core.safecrlf` 规整。
+   */
+  gitignoreSave: (path: string, text: string) => call<{ ok: true }>('gitignore/save', { path, text }),
+
+  /**
+   * 追加规则。`escape=false` ⇒ 上游 `appendIgnoreRule`(「忽略此模式」,原样);
+   * `escape=true` ⇒ 上游 `appendIgnoreFile`(文件路径,先过
+   * `escapeGitSpecialCharacters` 那张 `/[[\]!*#?]/g` 表)。
+   */
+  gitignoreAppend: (path: string, patterns: readonly string[], escape: boolean) =>
+    call<{ ok: true }>('gitignore/append', { path, patterns: [...patterns], escape }),
 
   // ---------- 全局 gitconfig 文件(两处「edit global Git config」链接 + 锁文件) ----------
   /** 全局 gitconfig 的路径与存在性;锁文件同理。 */

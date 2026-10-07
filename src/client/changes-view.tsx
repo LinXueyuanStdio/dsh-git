@@ -5,7 +5,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { api } from './api.ts';
 import { Icon } from './icons.ts';
 import { ConfirmDialog, Empty, GenerateFailureDialog } from './bits.tsx';
@@ -35,6 +35,13 @@ import {
  * 逐文件菜单与仓库列表菜单走的是同一条链 —— 这里**复用同一个**,不新建第二套。
  */
 import { installContextMenuHost } from './context-menu-host.tsx';
+/*
+ * **模型选择器**(按钮 + 可滚动下拉列表)在它自己的模块里 —— 见 `model-select.tsx` 的文件头:
+ * ① 原生 `<select>` 满足不了用户那两条文案要求(headless Chrome 的 AX 实测,
+ *    `<option label>` 同时决定收起文案与列表项名字);
+ * ② 第一版复用的右键菜单宿主**没有滚动**(用户当场报「列表太长,无法上下滚动」)。
+ */
+import { ModelSelect, modelButtonText } from './model-select.tsx';
 import { showContextualMenu } from '../core/desktop/lib/menu-item.ts';
 import type { IMenuItem } from '../core/desktop/lib/menu-item.ts';
 import { SplitPane, toCommit, useSplitWidth, SIDEBAR_WIDTH_STORAGE_KEY } from './history-view.tsx';
@@ -108,6 +115,23 @@ export function ChangesView(props: {
    * 那份文件里写的回收条件删掉;本文件保留兜底是为了让「漏传 prop」仍然可见。
    */
   onOpenPreferences?: () => void;
+  /**
+   * 打开**仓库设置**弹窗(2026-10 接线;此前那两处链接是一条点名缺什么的 toast)。
+   *
+   * 上游两个入口都落在这里:
+   *  - `ui/changes/commit-message-avatar.tsx:260-263` / `:312-316` 的两处
+   *    `repository settings` 链接 ⇒ `onOpenRepositorySettings`;
+   *  - `ui/changes/commit-message.tsx:801-807` 派发
+   *    `PopupType.RepositorySettings` + **`RepositorySettingsTab.GitConfig`**
+   *    ⇒ 所以 `workbench.tsx` 传进来的回调**预选 Git 配置页**。
+   *
+   * **仍然可选**:直接挂 `ChangesView` 的探针可以自己传 spy;缺它时那两处链接
+   * 给一条**说实话**的 toast(`commit-avatar-notices.ts` 的
+   * `REPOSITORY_SETTINGS_UNAVAILABLE`),不是静默 no-op。
+   * ⚠️ 那条常量在本轮落地后于产品路径上**已经不可达**(workbench 一定传),
+   * 回收条件写在它自己的文件头里。
+   */
+  onOpenRepositorySettings?: () => void;
 }): ReactNode {
   const { store, snap } = props;
   const [confirmDiscard, setConfirmDiscard] = useState<ChangedFile[] | null>(null);
@@ -174,9 +198,12 @@ export function ChangesView(props: {
    *  · `revealInFileManager` / `openInExternalEditor` ⇒ `store.*`(`system/reveal` / `system/open-in-app`);
    *  · `copyText` ⇒ `navigator.clipboard`(`bits.tsx:799` 的 SHA 胶囊用的是同一个 API)。
    *
-   * **刻意不传** `appendIgnoreFile` / `appendIgnorePattern` / `stashAll`:
-   * 宿主没有那两条路由(见 `changes-file-menu.ts` 的 `GITIGNORE_ROUTE_AVAILABLE` /
-   * `STASH_ROUTE_AVAILABLE`),缺动作 ⇒ 那几项**在列但诚实禁用**(不是假装能点)。
+   * **本轮变更(2026-10)**:`appendIgnoreFile` / `appendIgnorePattern` **接上了** ——
+   * 宿主那两条路由已经建好(`gitignore/save` / `gitignore/append`,见
+   * `src/host/gitignore.ts`),`store.appendIgnoreFile` / `appendIgnorePattern` 写完之后
+   * 会 `refreshStatus()` ⇒ 文件**当场**从列表里消失(不是刷新页面之后)。
+   * `stashAll` **仍然刻意不传**:`STASH_ROUTE_AVAILABLE` 还是 `false`(没有 stash 路由,
+   * 已登记的取舍),缺动作 ⇒ 「贮藏全部改动」那一项**在列但诚实禁用**。
    */
   const menuActions = useMemo(() => ({
     discard: (targets: readonly ChangedFile[]) => { setConfirmDiscard([...targets]); },
@@ -186,6 +213,8 @@ export function ChangesView(props: {
       void store.openInExternalEditor(absolutePath, appId);
     },
     copyText: (text: string) => { void navigator.clipboard?.writeText(text); },
+    appendIgnoreFile: (paths: readonly string[]) => { void store.appendIgnoreFile(paths); },
+    appendIgnorePattern: (pattern: string) => { void store.appendIgnorePattern(pattern); },
   }), [store]);
 
   /** 逐文件右键 ⇒ 上游 `onItemContextMenu`(`filter-changes-list.tsx:839-857`)。 */
@@ -561,7 +590,8 @@ export function ChangesView(props: {
           })} />
 
           {/* 提交区固定在左栏底部(Desktop 的 ChangesSidebar 也是这样) */}
-          <CommitBox store={store} snap={snap} onOpenPreferences={props.onOpenPreferences} />
+          <CommitBox store={store} snap={snap} onOpenPreferences={props.onOpenPreferences}
+            onOpenRepositorySettings={props.onOpenRepositorySettings} />
           </SplitPane>
         </div>
 
@@ -973,7 +1003,30 @@ function onListKeyDown(
 }
 
 /**
- * 右侧 diff 面板。三个空态:没选文件 / 读取中 / 没有可显示的差异。
+ * 「取 diff 失败」那一帧的证据排版权重(纯内联样式,**不加新 CSS 类**)。
+ *
+ * 为什么不落进 `src/client/styles.ts`:那份文件整份是**一个**模板字符串
+ * (多一个反引号就会截断整份 CSS,`scripts/check-template-literals.mjs` 管这条),
+ * 而这里只要三个属性。语义与推送/生成失败弹窗的 `.gw-dialog pre` 逐条相同
+ * (`max-height:180px; overflow:auto; user-select:text`),
+ * **不共用**那个选择器只是因为它被 `.gw-dialog` 作用域锁住(那是个对话框)。
+ *
+ * `user-select:text`:与推送失败那轮的用户要求同一条 —— 这段原文必须能选中复制。
+ */
+const DIFF_FAILURE_DETAIL_STYLE: CSSProperties = {
+  maxHeight: 180, overflow: 'auto', padding: 8, margin: '0 0 6px', borderRadius: 6,
+  background: 'rgba(127,127,127,.14)', textAlign: 'left',
+  fontFamily: 'ui-monospace,SFMono-Regular,Menlo,monospace', fontSize: 11,
+  lineHeight: 1.5, whiteSpace: 'pre-wrap', userSelect: 'text',
+};
+/** 「错误码:<code>」那一行:它是证据行,不该抢正文的注意力(与弹窗那份同口径)。 */
+const DIFF_FAILURE_CODE_STYLE: CSSProperties = {
+  margin: 0, fontFamily: 'ui-monospace,SFMono-Regular,Menlo,monospace', fontSize: 11, opacity: 0.8,
+};
+
+/**
+ * 右侧 diff 面板。四个表面:没选文件 / 读取中 / 没有可显示的差异 / **取 diff 失败**
+ * (最后一个 2026-10 补,理由见下面那个 `snap.diffFailure` 分支)。
  *
  * **diff 正文由移植过来的 Desktop `Diff` 渲染**(`./desktop-diff.tsx`),
  * 全插件只有这一条渲染路径;二进制也交给它(上游 `DiffType.Binary` 分支)。
@@ -1078,6 +1131,47 @@ function DiffPane(props: {
       />
     </div>
   );
+
+  /*
+   * **取 diff 失败也要有落点**(2026-10;判据 `docs/probes/diff-too-large-probe.mjs`)。
+   *
+   * 修的是审计点名的那个缺陷(`docs/diff-view-gap-audit.md` §4 第 8 行):
+   * 补丁大于宿主收集器上限(`OUTPUT_CAP_BYTES = 4 << 20`,`git-runner.ts:155`)时,
+   * 宿主**响亮拒绝**(`BlobTooLargeError` → 信封 `ok:false` + `code/message/detail`),
+   * 而客户端以前把这一声喊叫丢在地上 ⇒ 这一帧会走下面那条「沿用上一份」的路,
+   * 把**上一个文件**的 diff 画在新文件的表头下(实测:8,130,113 B 的真补丁,
+   * 头部 = `big.txt`,面板正文逐字是 `small.txt` 的内容);首帧就是大文件时则永久
+   * 停在「读取 diff…」(那不是「加载中」,是骗人)。
+   *
+   * 为什么落在这里,而不是照推送/生成失败那样弹窗、也不是只 `store.fail()` 一条 toast:
+   *  1. 弹窗与 toast **都不换掉正文** —— 而错的那一半正是正文(上一份 diff 还在原地),
+   *     所以它们单独用**修不掉**这个缺陷;
+   *  2. 这个面板对「拿不到 diff」本来就有自己的表面(下面那两处 `Empty`:
+   *     「读取 diff…」/「没有可显示的差异」)⇒ 失败放进同一张表面,一个面板一种空态载体,
+   *     不新增外壳、不新增 CSS 类;
+   *  3. `store.fail()` 是 7 秒后消失、且对 `code === 'internal'` 刻意不附 `detail` 的
+   *     单行通知(`store.ts` 自己的注释记着这两条),而这里的证据契约与推送失败那轮相同:
+   *     **`message` 逐字 + `detail` 逐字 + 一行 `错误码:`**。`fail()` 一个字没删 ——
+   *     它仍是其它失败路径的出口。
+   *
+   * `lastShownRef.current = null`:失败**不是**「还在加载」,沿用下去就是本缺陷;
+   * 清掉之后,下一次切文件时那一帧给的是诚实的「读取 diff…」而不是又一份陈旧内容。
+   */
+  if (snap.diffFailure !== null) {
+    const failure = snap.diffFailure;
+    lastShownRef.current = null;
+    return (
+      <>
+        {head}
+        <Empty icon="x-circle" title={failure.message}>
+          {failure.detail !== undefined && failure.detail !== ''
+            ? <pre style={DIFF_FAILURE_DETAIL_STYLE}>{failure.detail}</pre>
+            : null}
+          <p style={DIFF_FAILURE_CODE_STYLE}>错误码:{failure.code}</p>
+        </Empty>
+      </>
+    );
+  }
 
   // 只有**首次**加载(`shown === null`)才给空态;此后加载期间沿用上一份。
   if (shown === null) { return <>{head}<Empty icon="file" title="读取 diff…" /></>; }
@@ -1248,8 +1342,16 @@ function CommitAuthorAvatar(props: {
    * 上游对应的触发是 app-state 的 `commitAuthor` 变化 + `onRefreshAuthor()`
    * (`ui/changes/commit-message.tsx:492-499,798`)。**不挂** `snap` 全量:那会在每次
    * 输入摘要时打四发 host 调用。
+   *
+   * ⚠️ 2026-10 **加了第三个触发源** `snap.gitConfigRevision`(仓库设置弹窗 ▸ Git 配置页
+   * 保存时 +1):「改了 user.name 但还没提交」这一档 `headSha` 不变 ⇒ 上面那两个依赖
+   * 都不会变 ⇒ 浮层继续显示旧身份。上游靠 `dispatcher.refreshAuthor(repository)`
+   * (`ui/repository-settings/repository-settings.tsx:380-382`)把 `commitAuthor` 换掉;
+   * 我们**没有** `repo/author-ident` 路由(`goal-port-desktop.md` §10.10 待建第 9 项),
+   * 这个计数器就是那一步的替代品,理由与差异写在 `store.ts` 的 `Snapshot.gitConfigRevision`。
    */
   const headSha = snap.status?.headSha ?? '';
+  const gitConfigRevision = snap.gitConfigRevision ?? 0;
 
   useEffect(() => {
     if (path === '') {
@@ -1284,7 +1386,7 @@ function CommitAuthorAvatar(props: {
       });
     })();
     return () => { dead = true; };
-  }, [path, headSha]);
+  }, [path, headSha, gitConfigRevision]);
 
   const repository = useMemo(() => {
     const alias = snap.repos.find((entry) => entry.path === path)?.name ?? null;
@@ -1614,43 +1716,24 @@ export async function showCommitOptionsMenu(store: GitStore, form: CommitForm): 
   await showContextualMenu(commitOptionsMenuItems(store, form));
 }
 
-/**
- * 「模型」按钮**收起时**显示的文字 —— **只有模型名**(用户 2026-10-07 第二轮裁决:
- * 「当前选中模型只用显示模型名称,不用显示 provider 名称」)。
- *
- * 找不到(宿主落盘的 pin 不在可用清单里 / 清单还没到)时退回原始 `provider/id` ——
- * 宁可显示一个丑但真实的值,也不假装它可用、更不显示空。
- * @param models - 宿主可用模型清单(`snap.models`)。
- * @param model - 当前 `provider/id`。
+/*
+ * `modelButtonText` 的**真源**搬到了 `model-select.tsx`(下拉控件自己的模块),
+ * 这里**转发导出**一次:老的消费方与他人写好的探针 import 路径不变(先做,不删)。
  */
-export function modelButtonText(
-  models: readonly { provider: string; id: string; name: string }[],
-  model: string,
-): string {
-  const found = models.find((m) => `${m.provider}/${m.id}` === model);
-  if (found !== undefined) {
-    return found.name;
-  }
-  return model === '' ? '未选模型' : model;
-}
+export { modelButtonText };
 
 /**
- * **模型选择器**的菜单项 —— 每一项是 `name · providerName`,**provider 名在末尾**
- * (用户裁决:下拉列表保持原设计)。
+ * **已被下拉控件取代**的菜单形态:把模型清单做成**右键菜单**的项列表。
  *
- * ## 为什么不是原生 `<select>` + `<option label>`(实测过的,别再走回头路)
+ * ⚠️ **产品里现在 0 个调用点** —— 2026-10-07 用户当场指出那个形态的缺陷:
+ * 「模型选择器的右键菜单的列表太长,**无法上下滚动**」(菜单宿主是给短菜单写的,
+ * 没有 `max-height`/滚动容器)。现在产品走 `model-select.tsx` 的 `ModelSelect`
+ * (按钮 + 可滚动 `role="listbox"`,max-height + overflow-y:auto,按空间向上/向下弹)。
  *
- * `<option>` 的 `label` 属性看起来正好是「收起时短、列表里长」的机制,而且**在 Chromium 里
- * 收起状态确实用它**(本机 headless Chrome 实测:`Accessibility.getPartialAXTree` 里
- * combobox 的 `value` 是 `label`「Model OK」,而不是文本内容
- * 「Model OK · Provider AAAA」;截图里渲染出来的也是短的)。
- * **但同一次实测也证明下拉列表里每一项用的还是 `label`**:AX 树里两个 `option` 节点的
- * `name` 分别是 `Model OK` / `Model B` ⇒ 一旦挂上 `label`,**列表里就再也看不到 provider 名**。
- * 用户的两条要求(收起只显示模型名 / 列表里 provider 名在末尾)**互相冲突**,
- * 原生 `<select>` 满足不了 ⇒ 这里的下拉用本仓**已有的**菜单宿主
- * (`context-menu-host.tsx` 的 in-browser 菜单,与齿轮同一个机制),两处文案各自可控。
- *
- * `checked` 标出当前模型(宿主菜单会画一个 ✓)—— 这是原生 select 的「选中项高亮」的等价物。
+ * 保留它的理由(「先做,不删」):它把「项文案 = `name · providerName`、provider 在末尾、
+ * 当前项 `checked`」这三条钉成一个**纯函数**,无渲染读数比渲染整棵树便宜。
+ * **退役条件**:确认不再需要这个形态(或探针改读 `ModelSelect` 的项)之后,
+ * 连同 `showModelMenu` 一起删。
  * @param store - store(选中一项就写偏好)。
  * @param models - 宿主可用模型清单。
  * @param model - 当前 `provider/id`。
@@ -1702,6 +1785,12 @@ function CommitBox(props: {
    * `GIT_SETTINGS_ENTRY_NOT_WIRED`(产品路径已不可达,只服务直接挂载的探针)。
    */
   onOpenPreferences?: () => void;
+  /**
+   * 打开**仓库设置**弹窗(Git 配置页)—— 2026-10 接通,落点在 `workbench.tsx`。
+   * 与上游 `commit-message.tsx:801-807` 同义;缺它时那两处链接给一条点名缺口的
+   * toast(`REPOSITORY_SETTINGS_UNAVAILABLE`),不是静默 no-op。
+   */
+  onOpenRepositorySettings?: () => void;
 }): ReactNode {
   /*
    * `onOpenPreferences` 在这里**解构出来**(而不是在回调里写 `props.onOpenPreferences`):
@@ -1709,7 +1798,7 @@ function CommitBox(props: {
    * 一律要求把整个 `props` 放进依赖,而 `props` 每次渲染都是新对象 ⇒ 回调恒变,
    * `useCallback` 也就白写了。解构之后依赖是**具体的那个函数**。
    */
-  const { store, snap, onOpenPreferences } = props;
+  const { store, snap, onOpenPreferences, onOpenRepositorySettings } = props;
   const form = snap.commitForm;
   const status = snap.status;
   const [optionsOpen, setOptionsOpen] = useState(false);
@@ -1943,6 +2032,22 @@ function CommitBox(props: {
    * 2026-10 在这里就地更正。文案真源仍是 `commit-avatar-notices.ts` 的
    * `REPOSITORY_SETTINGS_UNAVAILABLE`(那句只说「缺什么」,是对的),作用域警告是
    * 本调用点补的一句。
+   *
+   * ## `onOpenRepositorySettings`(2026-10 **已接线** —— 上面那段「刻意仍然是一条 toast」
+   * 的历史理由**已作废,留痕**)
+   *
+   * 上游 `:801-807` 派发 `PopupType.RepositorySettings` +
+   * `RepositorySettingsTab.GitConfig` ⇒ 我们打开 `RepositorySettingsDialog`
+   * 并**预选 Git 配置页**(`workbench.tsx` 的 `openRepositorySettings`)。那个弹窗
+   * (`src/client/repository-settings-dialog.tsx`)有 **3 个页签**
+   * (远程 / 忽略的文件 / Git 配置),上游第 4 个 `Fork Behavior` 因为缺 fork 状态而不渲染
+   * (理由写在那个文件头的「六.1」)。
+   *
+   * 上面那条「偏好设置 Git 页改的是全局,所以不能拿它当替身」的论断**仍然成立** ——
+   * 也正是新弹窗必须自己带 local / global 两个作用域的原因
+   * (上游 `git-config.tsx:25-28` 的 `GitConfigLocation`)。
+   *
+   * 没接上 prop 时说实话:一条点名缺什么的 toast(产品路径已不可达,只服务直接挂载的探针)。
    */
   const openGitSettings = useCallback((): void => {
     if (onOpenPreferences !== undefined) {
@@ -1953,11 +2058,15 @@ function CommitBox(props: {
   }, [onOpenPreferences, store]);
 
   const openRepositorySettings = useCallback((): void => {
+    if (onOpenRepositorySettings !== undefined) {
+      onOpenRepositorySettings();
+      return;
+    }
     store.toast(
       `${REPOSITORY_SETTINGS_UNAVAILABLE}\n` +
       '⚠️ 注意作用域:偏好设置里的 Git 页改的是**全局** gitconfig,不会改这个仓库的身份;'
     );
-  }, [store]);
+  }, [onOpenRepositorySettings, store]);
 
   return (
     <div className="gw-commit">
@@ -2054,12 +2163,10 @@ function CommitBox(props: {
           `text-overflow:ellipsis` 截断,完整 `provider/id` 仍在 `title` 与菜单里。
           观感(截断是否好看、宽度是否合适)只能由用户截图判定 —— jsdom 没有布局引擎。
         */}
-        <button type="button" className="gw-btn ghost gw-model-select" aria-haspopup="menu"
-          style={{ maxWidth: 132, minWidth: 0, flexShrink: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-          title={`生成用的模型:${snap.model === '' ? '未选' : snap.model}(点击选择;会被记住,与设置页的「默认模型」是同一个偏好)`}
-          onClick={() => { void showModelMenu(store, snap.models, snap.model); }}>
-          {modelButtonText(snap.models, snap.model)}
-        </button>
+        <ModelSelect
+          models={snap.models}
+          value={snap.model}
+          onSelect={(next) => { void store.setModelPersisted(next); }} />
         {/* 空操作 span:本面没有 `.gw-commit .row .grow` 规则(见上面操作行的注释),右对齐靠齿轮的 marginLeft。 */}
         <span className="grow" />
         <button className="gw-btn ghost" title="提交选项" aria-expanded={optionsOpen}

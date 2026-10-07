@@ -23,7 +23,7 @@ import type {
 import {
   addArgv, applyCachedArgv, applyReverseArgv, blobContentArgv, blobIndexEntryArgv, blobSizeArgv, blobTreeEntryArgv, branchCreateArgv, branchDeleteArgv, branchListArgv,
   branchRenameArgv, checkoutBranchArgv, checkoutDetachArgv, checkoutPathsArgv, checkoutRemoteArgv, cherryPickArgv,
-  cleanArgv, cloneArgv, commitArgv, commitDetailStatArgv, configGetArgv, configSetArgv, diffCommitArgv,
+  cleanArgv, cloneArgv, commitArgv, commitDetailStatArgv, configGetArgv, configGetEffectiveArgv, configSetArgv, configUnsetArgv, diffCommitArgv,
   diffCommitNumstatArgv, diffNumstatArgv, diffStagedArgv, diffUnstagedArgv, diffUntrackedArgv,
   fetchArgv, initArgv, logArgv, nameStatusCommitArgv, pullArgv, pushArgv, pushDeleteRemoteBranchArgv,
   lsFilesArgv, remoteListArgv, remoteSetUrlArgv, remoteUrlArgv, resetMixedArgv, resetPathsArgv, resetToCommitArgv,
@@ -43,6 +43,7 @@ import {
 import { buildPartialPatch, isSelectionEmpty, type FileStatusKind, type LineSelectionSpec } from '../core/partial-stage.ts';
 import { parseRawDiff } from '../core/diff-parse.ts';
 import { testForInvalidChars } from '../core/desktop/lib/sanitize-ref-name.ts';
+import * as gitignore from './gitignore.ts';
 
 /** 服务级选项:仓库白名单与凭据环境由插件决定。 */
 export interface GitServiceOptions {
@@ -1761,6 +1762,97 @@ export class GitService {
     // 同上;读与写必须走同一条 cwd 规则,否则会出现「读得到、写不进」。
     const root = global ? this.globalConfigCwd() : await this.gate(path);
     await this.must(configSetArgv(key, value, global), root, `写入配置 ${key}`);
+  }
+
+  /**
+   * 删掉一条配置(`git config [--global] --unset-all <key>`)—— 上游
+   * `lib/git/config.ts:279-297` 的 `removeConfigValueInPath` **逐字同一条 argv**
+   * (argv 早已在 `git-argv.ts` 的 `configUnsetArgv`,这里只是把它接到路由上)。
+   *
+   * 唯一的调用点是仓库设置弹窗 ▸ Git Config 页把作用域从 Local 切回 Global 时
+   * (`repository-settings.tsx:353-356`):上游删掉**仓库本地**的 `user.name` /
+   * `user.email`,让 git 回落到全局身份。
+   *
+   * ⚠️ 与上游一样**不吞**退出码:键本来就不存在时 `--unset-all` 返回非零,
+   * 于是弹窗的 `errors` 里会出现一条(上游同样如此)。
+   * @param path - 仓库内任意路径(过 `gate`)。
+   * @param key - 配置键。
+   * @param global - `true` 时删全局配置。
+   */
+  public async unsetConfig(path: string, key: string, global = false): Promise<void> {
+    const root = global ? this.globalConfigCwd() : await this.gate(path);
+    await this.must(configUnsetArgv(key, global), root, `删除配置 ${key}`);
+  }
+
+  /**
+   * `git config --get <key>`,**不带作用域** —— 读的是 git 的合并链
+   * (`system → global → local → worktree → command`)。
+   *
+   * 为什么不是 `config(path, key, 'local')`:后者的 argv 带 `--local`。上游
+   * `getConfigValue(repository, key)` 的 `onlyLocal` 默认 **false**
+   * (`references/desktop/app/src/lib/git/config.ts:11-23`),唯一消费方是
+   * `.gitignore` 的行尾规整(`lib/git/gitignore.ts:204-205`)。argv 的出处与
+   * 「为什么 `--local` 在这里是错的」写在 `git-argv.ts` 的
+   * `configGetEffectiveArgv` 上。
+   *
+   * ⚠️ 这是**私有**的:它不构成新的产品能力面,只服务 `.gitignore` 的格式化。
+   * @param root - **已过 gate** 的仓库根(调用方负责,避免二次 gate)。
+   * @param key - 配置键。
+   */
+  private async configEffective(root: string, key: string): Promise<string | null> {
+    const res = await this.optional(configGetEffectiveArgv(key), root);
+    return res.exitCode === 0 ? parseConfigValue(res.stdout) : null;
+  }
+
+  /** `.gitignore` 三个操作的公共输入:已过 gate 的根 + 配置读取接缝。 */
+  private gitIgnoreIo(root: string): gitignore.IGitIgnoreIo {
+    return { root, readConfig: (key) => this.configEffective(root, key) };
+  }
+
+  /**
+   * 读仓库根 `.gitignore` 的全文(上游 `lib/git/gitignore.ts:81-96`)。
+   *
+   * 文件不存在 ⇒ `null`;符号链接 ⇒ `bad-request`(**不**折成 `null`)。
+   * @param path - 仓库内任意路径(只用来过 `gate` 定位仓库根,与上游同口径)。
+   */
+  public async readGitIgnore(path: string): Promise<string | null> {
+    const root = await this.gate(path);
+    return gitignore.readGitIgnoreAtRoot(root);
+  }
+
+  /**
+   * 把全文写回仓库根 `.gitignore`(上游 `gitignore.ts:104-135`)。
+   *
+   * 文本为 `''` ⇒ 删文件。行尾按 `core.autocrlf` / `core.safecrlf` 规整。
+   * @param path - 仓库内任意路径(过 `gate`)。
+   * @param text - 全文。
+   */
+  public async saveGitIgnore(path: string, text: string): Promise<void> {
+    const root = await this.gate(path);
+    await gitignore.saveGitIgnore(this.gitIgnoreIo(root), text);
+  }
+
+  /**
+   * 往 `.gitignore` 追加规则。
+   *
+   * `escape=false` ⇒ 上游 `appendIgnoreRule`(`gitignore.ts:138-154`,**原样**追加,
+   * 供「忽略此模式」);`escape=true` ⇒ 上游 `appendIgnoreFile`(`:161-175`,
+   * 先过 `escapeGitSpecialCharacters`)。
+   * @param path - 仓库内任意路径(过 `gate`)。
+   * @param patterns - 一条或多条规则 / 文件路径。
+   * @param escape - 是否按上游的文件路径转义表处理。
+   */
+  public async appendGitIgnore(path: string, patterns: readonly string[], escape: boolean): Promise<void> {
+    const root = await this.gate(path);
+    const io = this.gitIgnoreIo(root);
+    // 展开成可变数组:上游那两个函数的签名是 `string | string[]`
+    // (`gitignore.ts:140`/`:163`),`Array.isArray` 对 `readonly T[]` 不产生收窄。
+    const list = [...patterns];
+    if (escape) {
+      await gitignore.appendIgnoreFile(io, list);
+    } else {
+      await gitignore.appendIgnoreRule(io, list);
+    }
   }
 
   async fetch(path: string, remote?: string): Promise<void> {
