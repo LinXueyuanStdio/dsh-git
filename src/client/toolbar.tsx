@@ -535,9 +535,11 @@ export function WorkbenchToolbar(props: WorkbenchToolbarProps): ReactNode {
    *
    * ## 为什么 `./host-settings-open.ts` 与它那套 DOM 驱动**一个字节都没删**
    *
-   * 它仍然是「打开宿主设置入口」这件事的**唯一**实现,而且**仍在被使用**:
-   * 「更多」菜单里的「设置(⌘,)」那一项走的就是它(`workbench.tsx:532`),所以宿主设置
-   * 面板的入口**没有消失**,只是不再挂在齿轮上。
+   * 它仍然是「打开宿主设置入口」这件事的**唯一**实现。⚠️ 2026-10 更正下面这一句:
+   * 「更多」菜单里那一项「设置(⌘,)」**已按用户指令移除**(见 `workbench.tsx` 的
+   * `MenuPopover` 头注释),所以 `openHostSettings()` **今天在 `src/**` 里没有调用点**了
+   * —— 这是**如实记账**,不是「它还在被使用」。模块本身与它的 4 条候选通路证据链
+   * (`docs/host-settings-card.md` §1)照旧保留,宿主的设置面板仍可从宿主的侧栏/账号菜单进入。
    *
    * **可回收条件**:若哪天要让齿轮改回开宿主设置,把本函数体换回
    * `void openHostSettings().then((result) => { if (result === 'unavailable') { props.onOpenSettings(); } })`
@@ -697,10 +699,6 @@ export function WorkbenchToolbar(props: WorkbenchToolbarProps): ReactNode {
                   snap={snap}
                   onClose={close}
                   onOpenClone={props.onOpenClone}
-                  onOpenAdd={() => {
-                    close();
-                    void store.addRepoViaDialog();
-                  }}
                 />
               ) : null
             }

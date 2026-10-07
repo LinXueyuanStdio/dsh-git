@@ -1437,13 +1437,18 @@ export function HistoryView(props: { store: GitStore; snap: Snapshot }): ReactNo
   /**
    * 「Delete tag <name>」→ 直接删本地标签。
    *
-   * ⚠️ **今天这个菜单项不会出现**,原因不是没接:`commit-list.tsx:889-899` 的
-   * `getDeleteTagsMenuItem` 要求「该提交有**未推送**的标签」,而
-   * `getUnpushedTags`(`:373-377`)比的是 `props.tagsToPush`。我们**没有**这个数据:
-   * `snap.sync.tagCount` 只是**个数**(`git-service.ts:336`),
-   * 「哪些 tag 还没推送」需要 `git log --tags --not --remotes` 那类**新的宿主路由**。
-   * 所以这里**不传一个假集合**(传 `[]` 会永远不出现、传全部会谎报「没推送」),
-   * 按「缺什么说什么」登记为缺口;回调本身照样给上 —— 数据一到就立即生效。
+   * ✅ **2026-10 该缺口已补**(Task 2):宿主路由 `tag-unpushed`(宿主侧跑上游那次
+   * `git push --dry-run --porcelain`,`core/git-argv.ts` 的 `unpushedTagsArgv`)
+   * ⇒ `store.refreshTagsToPush()` ⇒ `Snapshot.tagsToPush` ⇒ 传进下面那个 `CommitList`。
+   * 于是 `Delete tag <name>` 在「那个标签本地有、远端没有」时**真的可点**,
+   * 而已推送的标签仍然是灰的(阴性对照见 `docs/probes/unpushed-tags-route-probe.mjs`)。
+   *
+   * ⚠️ 同时更正本段原来的两处出处:`props.tagsToPush` 的比对**不是**
+   * `if (tagsToPush === undefined) return undefined`(逐字是
+   * `new Set(this.props.tagsToPush ?? [])`,所以 `undefined` 与 `[]` 等价),
+   * 上游的名字也不是 `loadTagsToPush`、argv 也不是 `git log --tags --not --remotes`
+   * —— 详见下面 `tagsToPush={snap.tagsToPush}` 上方那段。
+   * 回调本身照旧给上(它一直是好的)。
    * (与 `history-view.tsx` 文件头那条「不接的部分如实记录」同一纪律。)
    */
   const onDeleteTag = useCallback((tagName: string) => {
@@ -1612,29 +1617,35 @@ export function HistoryView(props: { store: GitStore; snap: Snapshot }): ReactNo
               isMultiCommitOperationInProgress={false}
               disableReordering={false}
               /*
-               * ⚠️ `tagsToPush` **必须保持 `undefined`(即:一个字都不传)** ——
-               * 这一条是**实测定下来的**,不是从类型上猜的:
+               * ✅ `tagsToPush` **现在传真数据**(2026-10,Task 2 落地)。
                *
-               * `getUnpushedTags`(`commit-list.tsx:373-377`)逐字是
-               * `if (tagsToPush === undefined) return undefined`,然后
-               * `getDeleteTagsMenuItem`(`:893-899`)在 `unpushedTags === undefined` 时
-               * **返回 null ⇒ 项根本不入列**。
+               * 它决定 `commit-list.tsx:889-924` 的 `Delete tag <name>` 那一项:
+               * `getUnpushedTags`(`:373-377`)是 `new Set(this.props.tagsToPush ?? [])`,
+               * 与 `commit.tags` 取交集 ⇒ 交集中有那个名字时 `enabled: true`。
                *
-               * 而**传一个空数组**会走另一条路:`commit.tags.length === 1` 时它返回
-               * `{ enabled: unpushedTags.includes(tagName) }` ⇒ 一个**在列但恒灰**的
-               * `Delete tag v1.0.0`。本探针第一次跑就是这个读数(见
-               * `history-commit-actions-probe.mjs` 的 N1),而它**是本轮引入的**:
-               * 改前不传 `tagsToPush`,`getUnpushedTags` 回 `undefined` ⇒ 项不入列。
+               * **改前为什么一个字都不传**(这段留着是为了不再犯):当时的结论是
+               * 「传 `[]` 与传 `undefined` 等价(`?? []`),都会得到一个**在列但恒灰**的项;
+               * 而『传全部标签』会谎报『都没推送』,让一个**已推送**的标签可以被本地删掉」。
+               * 那些判断都对,但缺的是**第三档**:传**真的**未推送集合。当时没有数据源
+               * (只有 `sync.tagCount` = **个数**),所以缺口被登记为
+               * 「需要一个『哪些 tag 未推送』的路由」。
                *
-               * ⇒ 结论:**不传**才是与改前一致、且不会多出一个假项的那一档。
-               * 「传全部标签」更不可接受:那会谎报「都没推送」,让一个**已推送**的标签
-               * 可以被本地删掉(与上游的守卫相反)。
+               * ⚠️ **同时更正这条注释与 `docs/dead-code-and-missing-state-audit.md` 里
+               * 那条出处**:上游的名字**不是** `loadTagsToPush`(全仓
+               * `grep -rn loadTagsToPush references/` = **0 命中**),argv 也**不是**
+               * `git log --tags --not --remotes`(`--not --remotes` 是
+               * `git-store.ts:626` 那条 **Undo Commit** 的查询,输出的是**提交**、不是标签)。
+               * 上游真正的实现是 `lib/git/tag.ts:86` 的 `fetchTagsToPush` ——
+               * 一次 `git push --dry-run --porcelain`(而且它在 `references/desktop` 里
+               * **零调用点**,是上游自己的死代码)。逐字的 argv/解析与我们的**唯一**分歧
+               * 写在 `core/git-argv.ts` 的 `unpushedTagsArgv` 上。
                *
-               * 缺口登记(要真正点亮这一项需要什么):一个「哪些 tag 还没推送」的数据源 ——
-               * 上游 `lib/stores/git-store.ts` 的 `loadTagsToPush` 走
-               * `git log --tags --not --remotes`;本插件**没有**这条路由,
-               * 而 `sync.tagCount` 只是**个数**(`git-service.ts:336`)。
+               * 数据链:`store.refreshTagsToPush()`(路由 `tag-unpushed`,宿主跑那次
+               * dry-run)→ `Snapshot.tagsToPush` → 这里 → `CommitList` → 菜单项 enabled。
+               * `[]`(拿不到数据:没远端 / 远端不可达 / 还没刷新)**仍然是安全的兜底**:
+               * 项在列但灰,与「没接」等价,绝不误报可删。
                */
+              tagsToPush={snap.tagsToPush}
               /*
                * ⭐ 必须传,否则上游 `commit-list.tsx:816-822` 的
                * 「Create Branch from Commit」是一个**没有 enabled 守卫、action 里却被

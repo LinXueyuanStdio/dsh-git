@@ -635,6 +635,9 @@ const SHAPES: Readonly<Record<string, Shape>> = {
   'cherry-pick-commit': OkTrueShape,
   'tag-create': OkTrueShape,
   'tag-delete': OkTrueShape,
+  // `tags` 是**身份清单**(不是个数):History 右键 `Delete tag <name>` 的 enabled 判据。
+  // 少这个键 ⇒ 载荷被拒 ⇒ 客户端静默保留旧值 ⇒ 那一项**恒灰**,与没接这条路由一样。
+  'tag-unpushed': { record: { tags: { array: 'string' } } },
   'remote-branch-delete': OkTrueShape,
 };
 
@@ -968,6 +971,16 @@ export const api = {
   cherryPickCommit: (path: string, sha: string) => call<{ ok: true }>('cherry-pick-commit', { path, sha }),
   tagCreate: (path: string, name: string, sha?: string) => call<{ ok: true }>('tag-create', { path, name, ...(sha !== undefined ? { sha } : {}) }),
   tagDelete: (path: string, name: string) => call<{ ok: true }>('tag-delete', { path, name }),
+  /**
+   * 「本地有、远端没有」的标签名 —— History 右键 `Delete tag <name>` 的 enabled 判据。
+   *
+   * 宿主侧是一次 `git push --dry-run --porcelain`(只问不推),**要碰网络**:
+   * 调用方必须能接受它失败(远端不可达 / 没认证 / 根本没远端),并在失败时**保留旧值**,
+   * 而不是把错误抛到界面上 —— 它是给一个菜单项做启用判定的辅助问询。
+   * 形状见 `SHAPES['tag-unpushed']`;`remote` 一般不给(宿主按 `push()` 同一顺序选)。
+   */
+  tagUnpushed: (path: string, remote?: string) =>
+    call<{ tags: string[] }>('tag-unpushed', { path, ...(remote !== undefined ? { remote } : {}) }),
   /** 删远端分支(git push <remote> --delete <branch>)。 */
   deleteRemoteBranch: (path: string, remote: string, branch: string) =>
     call<{ ok: true }>('remote-branch-delete', { path, remote, branch }),

@@ -24,6 +24,7 @@ import type { IRawDiff } from './desktop/models/diff/raw-diff.ts';
 import { DiffLine, DiffLineType } from './desktop/models/diff/diff-line.ts';
 import { DiffSelection, DiffSelectionType } from './desktop/models/diff/diff-selection.ts';
 import { WorkingDirectoryFileChange, AppFileStatusKind } from './desktop/models/status.ts';
+import type { AppFileStatus } from './desktop/models/status.ts';
 import { formatPatch } from './desktop/lib/patch-formatter.ts';
 import type { ParsedDiff as OurParsedDiff } from './diff-parse.ts';
 
@@ -52,6 +53,28 @@ const KIND_MAP: Record<FileStatusKind, AppFileStatusKind> = {
   conflicted: AppFileStatusKind.Conflicted,
   untracked: AppFileStatusKind.Untracked,
 };
+
+/**
+ * `FileStatusKind` → 镜像的 `AppFileStatus`(**`KIND_MAP` 的唯一构造点**)。
+ *
+ * 为什么把它抽成一个函数而不是让调用方各自 `{ kind: KIND_MAP[...] }`:
+ * 这个映射今天有**三个**使用者 —— `buildPartialPatch`(部分暂存补丁的文件头)、
+ * `buildPartialPatchFromRaw`(客户端行级暂存/丢弃)、以及 `store.ts` 的
+ * **状态机投影**(把扁平的 `ChangedFile` 投影成镜像的
+ * `WorkingDirectoryFileChange`,见 `src/client/store.ts` 的 `mirroredClearPartial`)。
+ * 三份各写一次必然漂移,而漂移的后果很贵:镜像的 `FileChange.id` 是
+ * `${status.kind}+${path}`(`models/status.ts:262-273`),投影两侧的 kind 一旦不一致,
+ * `updateChangedFiles` 就**认不出同一个文件**,于是「旧选择原样保留」那条路走不到 ——
+ * 表现为**用户的行级勾选静默丢失**。
+ *
+ * `as never` 与同文件另两处同一手法:`AppFileStatus` 是判别联合,`Renamed` / `Copied`
+ * 还要求 `oldPath` 之类的伴随字段,而这三个调用点(含镜像的
+ * `updateChangedFiles`)只读 `status.kind`。如实只给 `kind`,不编造伴随字段。
+ * @param kind - 我们对一个文件的分类。
+ */
+export function appFileStatusOf(kind: FileStatusKind): AppFileStatus {
+  return { kind: KIND_MAP[kind] } as never;
+}
 
 const LINE_TYPE_MAP: Record<string, DiffLineType> = {
   Context: DiffLineType.Context,

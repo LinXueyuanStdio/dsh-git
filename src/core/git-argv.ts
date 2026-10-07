@@ -684,6 +684,73 @@ export function tagDeleteArgv(name: string): readonly string[] {
 }
 
 /**
+ * **「本地有、远端没有」的标签问询** —— History 右键 `Delete tag <name>` 的启用判据。
+ *
+ * ## 上游的真身与它的 argv(`references/desktop/app/src/lib/git/tag.ts:86-137`)
+ *
+ * 上游把这个问询叫 **`fetchTagsToPush(repository, remote, branchName)`**(**不是**
+ * `loadTagsToPush` —— 全仓 `grep -rn loadTagsToPush references/` = **0 命中**),
+ * 它的 argv 逐字是:
+ *
+ * ```ts
+ * const args = [
+ *   'push', '--follow-tags', '--dry-run', '--no-verify', '--porcelain',
+ *   '--', remote.name, branchName,
+ * ]
+ * const result = await git(args, repository.path, 'fetchTagsToPush', {
+ *   env: await envForRemoteOperation(remote.url),
+ *   successExitCodes: new Set([0, 1, 128]),
+ * })
+ * ```
+ *
+ * 解析规则(上游 `:118-137`,逐字):stdout 从**第 2 行**开始扫(`currentLine = 1`,
+ * 第 1 行是 `To <url>`),遇到行 `Done` 停下;每行按 `\t` 切三段,
+ * `parts[0] === '*' && parts[2] === '[new tag]'` 时取 `parts[1].split(':')[0]`
+ * 并去掉 `refs/tags/` 前缀。
+ *
+ * ## 本函数与上游的**一处有意分歧**(以及为什么必须分)
+ *
+ * | | 上游 | 这里 |
+ * |---|---|---|
+ * | 选标签的开关 | `--follow-tags` | **`--tags`** |
+ * | 位置参数 | `<remote.name> <branchName>` | `<remote>` |
+ *
+ * **理由是可实测的,不是口味**:`--follow-tags` 只推**附注标签**
+ * (git 文档 `--follow-tags`:「push annotated tags … that are missing from the remote
+ * but are pointing at commit-ish that are reachable from the refs being pushed」),
+ * 而本仓的冻结契约建的是**轻量标签**(`tagCreateArgv` 的
+ * `git tag <name> [<sha>]`,`docs/discard-lines-contract.md` §6)。
+ * 实测(`/tmp` 里真仓库 + 真裸远端,本探针复现的正是这一档):
+ *
+ * ```
+ * 本地标签:v1.0.0(已推送)、v2.0.0(轻量,未推送,指向**已推送**的提交)、
+ *          v3.0.0(轻量,未推送,指向未推送的提交)、a1(附注,未推送)
+ *
+ * 上游 argv  `push --follow-tags … -- origin main` ⇒ 只认到 `a1`(漏掉两个轻量标签)
+ * 本函数 argv `push --tags … -- origin`          ⇒ 三个未推送标签一个不漏
+ * ```
+ *
+ * ⇒ 照抄上游 argv 的话,**我们自己建出来的标签永远不会被判成「未推送」**,
+ * 那个菜单项会永远灰着 —— 也就是「镜像了 argv、功能却是死的」。
+ * `--tags` 与上游的**解析规则**仍然逐字相同(输出格式一样,`Porcelain v1`),
+ * 所以 `parseUnpushedTags` 那份实现是上游原文的逐字搬运。
+ *
+ * 另一处记账:上游的 `successExitCodes` 是 `{0,1,128}` 且在 **128** 时
+ * `throw result.gitError`(即「不把这些码当成可解析的成功」)。这里把
+ * `{0,1}` 交给 `must` 的 `allow`,其余(含 128)走既有的 `classifyGitFailure`
+ * —— 与上游同向(128 不是可解析的成功),差别只是错误被命名成可操作的中文提示
+ * (本仓既有约定,`git-service.ts` 的 `classifyGitFailure`)。
+ *
+ * ⚠️ `--tags` **必须写在 `--` 之前**:`--` 之后的 `--tags` 会被当成 refspec
+ * (实测 `git push --dry-run --porcelain -- origin --tags` 报
+ * `src refspec --tags does not match any`)。
+ * @param remote - 远端名(**不是** URL);调用方负责确认它在 `git remote` 清单里。
+ */
+export function unpushedTagsArgv(remote: string): readonly string[] {
+  return ['push', '--tags', '--dry-run', '--no-verify', '--porcelain', '--', remote];
+}
+
+/**
  * 删**远端**分支。
  *
  * 上游:`deleteRemoteBranch`(`references/desktop/app/src/lib/git/branch.ts:119-143`)——

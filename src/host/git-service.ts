@@ -28,11 +28,11 @@ import {
   fetchArgv, initArgv, logArgv, nameStatusCommitArgv, pullArgv, pushArgv, pushDeleteRemoteBranchArgv,
   lsFilesArgv, remoteListArgv, remoteSetUrlArgv, remoteUrlArgv, resetMixedArgv, resetPathsArgv, resetToCommitArgv,
   revertArgv, rmCachedAllArgv,
-  statusArgv, tagCreateArgv, tagDeleteArgv, tagListArgv, topLevelArgv, updateRefDeleteArgv,
+  statusArgv, tagCreateArgv, tagDeleteArgv, tagListArgv, topLevelArgv, unpushedTagsArgv, updateRefDeleteArgv,
   isSafeObjectName, isSafeRev, type ResetMode } from '../core/git-argv.ts';
 import {
   buildRepoStatus, operationFromMarkers, parseBranches, parseConfigValue, parseGithubRemoteText,
-  parseLog, parseNameStatus, parseNumstat, parseRemotes, parseStatus, parseTags,
+  parseLog, parseNameStatus, parseNumstat, parseRemotes, parseStatus, parseTags, parseUnpushedTags,
 } from '../core/parse.ts';
 import type { GitRunner, GitRunResult } from './git-runner.ts';
 import { DEFAULT_TIMEOUT_MS, OUTPUT_CAP_BYTES } from './git-runner.ts';
@@ -1477,6 +1477,59 @@ export class GitService {
     this.assertValidRefName(name, '标签名');
     const root = await this.gate(path);
     await this.must(tagDeleteArgv(name), root, '删除标签');
+  }
+
+  /**
+   * **哪些本地标签还没到远端** —— History 右键 `Delete tag <name>` 的启用判据。
+   *
+   * 上游的真身是 `lib/git/tag.ts:86` 的 `fetchTagsToPush(repository, remote, branchName)`:
+   * 一次 `git push --dry-run --porcelain`(**只问、不推**),再从 porcelain 输出里认出
+   * `[new tag]`。argv 的逐字对照、本仓与上游**唯一**那处有意分歧(`--tags` 取代
+   * `--follow-tags`,因为我们的契约建轻量标签、而 `--follow-tags` 只认附注标签)、
+   * 以及失败码的归属,全部写在 `unpushedTagsArgv` 的 JSDoc 上 —— 这里是它的宿主侧调用。
+   *
+   * **只读性**:`--dry-run` 不写远端(判据 `docs/probes/unpushed-tags-route-probe.mjs`
+   * 的 A4:调用前后 `git ls-remote --tags` 的读数字节相同)。但它**要碰网络** ——
+   * 远端不可达时按既有分类抛错,由路由转成信封;客户端那侧**静默保留旧值**
+   * (不弹错:这是一个给菜单项用的辅助问询,不该打断用户)。
+   *
+   * **远端怎么选**:与 `push()` 同一套顺序(上游 remote 名 ⇒ 否则清单里的第一个),
+   * 所以「问哪个远端」与「推送会推到哪里」是同一个答案,不会出现
+   * 「按 origin 判可删、实际推到 upstream」那种错位。没有远端 ⇒ 回 `[]`
+   * (没有远端就没有「推没推过」这回事,菜单项保持灰)。
+   *
+   * @param path - 仓库路径(过 `gate` 的白名单)。
+   * @param remoteName - 可选的远端名(客户端一般不给,由宿主按上面那条顺序定)。
+   * @returns 远端还没有的标签名(不含 `refs/tags/` 前缀);无远端时 `[]`。
+   */
+  public async unpushedTags(path: string, remoteName?: string): Promise<string[]> {
+    const root = await this.gate(path);
+    const names = parseRemotes((await this.must(remoteListArgv(), root, '读取远端')).stdout);
+    if (names.length === 0) {
+      return [];
+    }
+    const status = await this.status(root);
+    const upstreamRemote =
+      status.upstream !== null && status.upstream.includes('/')
+        ? status.upstream.slice(0, status.upstream.indexOf('/'))
+        : '';
+    const remote = remoteName ?? (names.includes(upstreamRemote) ? upstreamRemote : names[0]);
+    if (!names.includes(remote)) {
+      throw new GitServiceError('bad-request', `这个仓库没有名为 ${remote} 的远端。`);
+    }
+    /*
+     * `allow: [0, 1]` 对应上游 `successExitCodes: new Set([0, 1, 128])` 里**可解析**的那两个
+     * (128 上游也是直接 `throw result.gitError`,只是它抛原始对象、我们走既有的分类器)。
+     * 60s 超时:这是一次网络往返(远端不可达时 git 自己也要等 TCP),而菜单只是灰着等它。
+     */
+    const res = await this.must(unpushedTagsArgv(remote), root, '读取未推送的标签', {
+      allow: [0, 1],
+      ...(this.credentialEnv() !== undefined
+        ? { env: this.credentialEnv() as Readonly<Record<string, string>> }
+        : {}),
+      timeoutMs: 60_000,
+    });
+    return parseUnpushedTags(res.stdout);
   }
 
   // ---------- 历史 ----------

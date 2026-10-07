@@ -204,7 +204,6 @@ export function DshGitCard(props: DshGitCardProps): ReactNode {
             tab={entry.id}
             auth={live.auth}
             store={props.pages.store}
-            snap={live.snap}
             fontScale={fontScale}
             onFontScale={props.onFontScale}
             onLogout={props.onLogout}

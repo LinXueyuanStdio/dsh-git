@@ -623,7 +623,7 @@ function buildGitHubRepository(entry: RepoEntry, index: number): GitHubRepositor
  * | 上游发什么 | 上游 `repositories-list.tsx` | 上游真正的落点 | 我们的落点 |
  * |---|---|---|---|
  * | `PopupType.CloneRepository` | `:441-446` `onCloneRepository` | Clone 弹窗 | `props.onOpenClone()`(`CloneDialog`,已在 `workbench.tsx:275` 渲染) |
- * | `PopupType.AddRepository` | `:448-450` `onAddExistingRepository` | 选目录 | `props.onOpenAdd()`(`store.addRepoViaDialog()`,宿主目录选择器) |
+ * | `PopupType.AddRepository` | `:430-433` `onAddExistingRepository` | `ui/add-repository/add-existing-repository.tsx`(填路径的对话框) | `props.onEnterPath()` ⇒ 我们那条**同一形状**的路径输入框 + `git init` 那一半 |
  * | `PopupType.CreateRepository` | `:452-454` `onCreateNewRepository` | 新建向导 | **没有这个流程** ⇒ 只报清楚,不开空窗 |
  * | `PopupType.ChangeRepositoryAlias` | `:456-461` `onChangeRepositoryAlias` | `ui/rename-branch`… 同族的别名弹窗 | `props.onChangeAlias(path)` ⇒ `RepositoryPanel` 的 `ConfirmDialog`(`aliasFor` 那条) |
  * | `PopupType.AddWorktree` | `:467-472` `onCreateWorktree` | `ui/toolbar/worktree-dropdown.tsx` | **host 没有 worktree 路由** ⇒ toast 点名缺什么 |
@@ -670,12 +670,16 @@ class RepoListDispatcher extends Dispatcher {
   /**
    * 「手动输入路径」那条入口(`RepositoryPanel` 的 `addingPath`)。
    *
-   * ⚠️ 与 `onAdd` **不是**同一件事,虽然上游把两者都归在 `Add ▾` 下:
-   * `onAdd` 是宿主目录选择器(`store.addRepoViaDialog`,拿到路径后走
-   * `repos/add`,对非 git 仓库只会报错);这一条是**能填路径 + 能 offer `git init`**
-   * 的那条路(审计第 3 项)。两个入口都留,由 `showPopup` 的 `PopupType.AddRepository`
-   * 分派到 `onEnterPath`(上游那一项的名字就是「Add **Existing** Repository…」,
-   * 而「已存在」正是这一条要处理的情形:目录在,仓库还不一定在)。
+   * 它就是上游 `Add ▾` 的第二项「Add **Existing** Repository…」的**唯一**落点
+   * (`ui/repositories-list/repositories-list.tsx:430-433` → `PopupType.AddRepository`
+   * → 上游 `ui/add-repository/add-existing-repository.tsx` 的路径输入对话框)。
+   * 我们这条比上游多**一半**:接到宿主回 `not-a-repository` 时 offer 一次 `git init`
+   * (审计第 3 项,`api.addExisting(path, true)`)。
+   *
+   * ⚠️ 2026-10:此前面板上还并列着两颗手写按钮(「输入路径添加仓库…」/「选择目录」)
+   * 并且 `PopupType.AddRepository` 与它们的关系被写成「两个入口都留」;
+   * 用户指令把那两颗按钮**移除了**,现在这条是 `Add ▾` 唯一的下游
+   * (理由与「为什么没有留下洞」见 `RepositoryPanel` 里那段注释)。
    */
   private readonly onEnterPath: () => void
 
@@ -711,12 +715,14 @@ class RepoListDispatcher extends Dispatcher {
         return Promise.resolve()
       case PopupType.AddRepository:
         /*
-         * 上游那一项叫 `Add Existing Repository…`(`repositories-list.tsx:448-450`,
-         * 落点 `dispatcher.showPopup({ type: PopupType.AddRepository })`)。
-         * 我们把它接到**能填路径**的那条入口 —— 因为它是唯一能处理
-         * 「目录存在、但还不是 git 仓库」的入口(宿主 `repos/add` 对那种目录
-         * 只会抛 `not-a-repository`)。面板上另有一颗「选择目录」按钮走
-         * 宿主选择器(`this.onAdd`),两条并列,不互相取代。
+         * 上游那一项叫 `Add Existing Repository…`(`repositories-list.tsx:430-433`,
+         * 落点 `dispatcher.showPopup({ type: PopupType.AddRepository })`),
+         * 上游的落点是一个**填路径的对话框**(`ui/add-repository/add-existing-repository.tsx`)。
+         * 我们接到**同一形状**的入口(`onEnterPath` ⇒ `RepositoryPanel` 的路径输入框)——
+         * 而且它多一半能力:宿主对「目录存在、但还不是 git 仓库」只会抛
+         * `not-a-repository`,那条路会 offer 一次 `git init`。
+         * ⚠️ 2026-10:原先这里还写着「面板上另有一颗『选择目录』按钮走宿主选择器,
+         * 两条并列」—— 那颗按钮已按用户指令移除(见 `RepositoryPanel` 里那段注释)。
          */
         this.onEnterPath()
         return Promise.resolve()
@@ -960,7 +966,6 @@ export function RepositoryPanel(props: {
   snap: Snapshot;
   onClose: () => void;
   onOpenClone: () => void;
-  onOpenAdd: () => void;
 }): ReactNode {
   const { store, snap } = props;
   const panelRef = useRef<HTMLDivElement>(null);
@@ -1351,29 +1356,24 @@ export function RepositoryPanel(props: {
         ].join('')}</style>
         <div className="gw-repo-local" data-gw-repo-local>
           {/*
-            上游没有这一行(`Add ▾` 只有三个菜单项),所以这里**如实标注**它是我们补的:
-            审计第 3 项那条路(「目录还不是 git 仓库」)需要一个**能填路径**的入口 ——
-            `store.addRepo` 原有的兜底提示一直在指「用『手动输入路径』直接填写」,
-            而那个入口从来不存在。位置放在列表上方(与工具栏 `+` 那条目录选择器并列),
-            因为它做的是**同一件事的另一种输入方式**,不是列表的一部分。
+            ⚠️ 2026-10:**这里原先有「输入路径添加仓库…」与「选择目录」两颗按钮,已按用户指令移除**
+            (用户原话:「【当前仓库】的下拉 repo list 列表界面里,多了【输入路径添加仓库】
+            【选择目录】这两个按钮,原来的 `references/desktop` 是没有这两个按钮的」)。
+
+            上游那两样**都不在列表体里**:`ui/repositories-list/repositories-list.tsx:370-381`
+            的 `renderPostFilter` 只渲染**一颗 `Add ▾` 按钮**(`.new-repository-button`),
+            点它弹一个三项菜单(`:417-437`:`Clone Repository…` / `Create New Repository…` /
+            `Add Existing Repository…`),其中 `Add Existing Repository…` 落到
+            `PopupType.AddRepository` ⇒ 上游 `ui/add-repository/add-existing-repository.tsx`
+            —— **一个填路径的 TextBox 对话框 + 校验**,正是我们那条路。
+
+            ⇒ **移除没有留下洞**:`Add ▾` 仍在(它在上游组件里,不是我们的),
+            它的 `AddRepository` 分支经 `RepoListDispatcher`(`:707-722`)接到
+            `onEnterPath` ⇒ `openPathEntry` ⇒ 我们的路径输入框(**上游那个对话框的形状**)。
+            「选择目录」那条路(宿主目录选择器)原本只是这两颗按钮里的第二颗;
+            清单为空时的「添加本地仓库」按钮(`workbench.tsx:357`)仍走
+            `store.addRepoViaDialog()`,所以那条**能力**也没丢(见文件头「空态」一节)。
           */}
-          <div className="gw-repo-addbar" style={{ display: 'flex', gap: 6, padding: '0 8px 6px' }}>
-            <button
-              className="gw-btn ghost"
-              style={{ flex: 1, minWidth: 0 }}
-              title="填写/粘贴一个目录的绝对路径;如果它还不是 git 仓库,可以在这里 git init"
-              onClick={openPathEntry}
-            >
-              输入路径添加仓库…
-            </button>
-            <button
-              className="gw-btn ghost"
-              title="用系统的目录选择器挑一个已经在 git 里的仓库"
-              onClick={props.onOpenAdd}
-            >
-              选择目录
-            </button>
-          </div>
           <DesktopRepositoriesList
             store={store}
             snap={snap}
@@ -1384,10 +1384,10 @@ export function RepositoryPanel(props: {
             onOpenClone={props.onOpenClone}
             /*
              * ⭐ 手动输入路径(以及「不是 git 仓库 ⇒ 要不要 `git init`」那条路)。
-             * 上游那一项是 `Add Existing Repository…`(`repositories-list.tsx:448-450`),
-             * 我们在这里补的是它**缺的另一半**:见上面那段长注释。
-             * 与面板上那颗「选择目录」(⇒ `props.onOpenAdd` ⇒ 宿主目录选择器)是
-             * **两条并列入口**,后者不删(「先做,不删」)。
+             * 上游那一项是 `Add Existing Repository…`(`repositories-list.tsx:430-433`,
+             * 落点 `ui/add-repository/add-existing-repository.tsx`),**它就是这个入口**;
+             * 我们补的是它**缺的另一半**:宿主对非 git 目录只有 `not-a-repository`,
+             * 而 `api.addExisting(path, true)` 那条 init 分支此前 0 调用点(审计第 3 项)。
              */
             onEnterPath={openPathEntry}
             onChangeAlias={onChangeAlias}

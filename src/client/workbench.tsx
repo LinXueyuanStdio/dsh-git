@@ -27,7 +27,11 @@ import { PullsView } from './pulls-view.tsx';
 import { ActionsView } from './actions-view.tsx';
 import { PreferencesDialog } from './preferences-dialog.tsx';
 import type { PreferencesTabId } from './preferences-dialog.tsx';
-import { hostSettingsShortcutKeys, openHostSettings } from './host-settings-open.ts';
+/*
+ * ⚠️ 2026-10:`./host-settings-open.ts` 的 import(`hostSettingsShortcutKeys` /
+ * `openHostSettings`)已随「更多」菜单那两项一起撤掉 —— 那是它们唯一的调用点。
+ * 模块本体(`host-settings-open.ts`)一个字没删,`isHostSettingsAvailable` 等导出照旧。
+ */
 /*
  * 「更多」菜单改用的**上游原语**:`src/core/desktop/ui/lib/popover.tsx`(GitHub Desktop
  * `ui/lib/popover.tsx` 的与上游一致,`verify-mirror` 盯着它 —— 我们**只能调用**,不能改)。
@@ -329,12 +333,14 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
          * (镜像在 `src/core/desktop/ui/toolbar/**`,接线层是 `src/client/toolbar.tsx`)。
          * 移植前这里是手写的 `RepoBar`(`.gw-header` + 三个裸 button)。
          *
-         * ⚠️ 2026-10(用户当面纠正后)三个入口的分工**改了**:
-         *  - **齿轮 → 直接打开宿主的设置面板**(`host-settings-open.ts`;拿不到就回退到
-         *    我们自己的弹窗) —— 用户原话「应该直接弹出弹窗,而不是有下拉 popup」;
-         *  - **kebab(`⋮`)→ 「更多」菜单**(仓库操作 + 设置 + dsh-git 偏好设置,**一项不少**);
-         *  - **「更多」菜单里的「dsh-git 偏好设置」→ 我们自己的弹窗**(宿主表达不了
-         *    账号 / 仓库 / 无障碍三页,那个入口必须留着 —— `docs/host-settings-card.md` §4)。
+         * ⚠️ 2026-10(用户当面纠正后)三个入口的分工**改了**;
+         *   同期「更多」菜单里的两项也按用户指令撤掉(见 `MenuPopover` 头注释):
+         *  - **齿轮 → 直接打开我们自己的偏好弹窗**(`props.onOpenSettings` ⇒ `openPreferences`;
+         *    `toolbar.tsx` 的 `ariaLabel="设置"`)—— 用户原话
+         *    「【设置】按钮不要打开宿主设置页面了,直接打开【dsh-git 偏好设置】那个弹窗吧」;
+         *  - **kebab(`⋮`)→ 「更多」菜单**(仓库操作 + 在浏览器打开仓库,**7 项**;
+         *    原来的「设置(⌘,)」与「dsh-git 偏好设置」两项**已移除**);
+         *  - ⇒ 本插件偏好弹窗的入口只剩齿轮与「Committing as」浮层的 `Open Git Settings`。
          */}
         <ErrorBoundary label="顶栏" resetKey={snap.current} onError={reportPanelError}>
           <WorkbenchToolbar store={store} snap={snap}
@@ -500,7 +506,6 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
               endpoint: snap.auth.endpoint,
             }}
             store={store}
-            snap={snap}
             fontScale={fontScale}
             /* 直接给总线那个写入口(`prefs-bus.ts:99` 的 `setFontScale`):弹窗与卡片
                写的是**同一份**值,于是「弹窗改字号」与「卡片改字号」不再各写各的。 */
@@ -529,7 +534,6 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
         {menuOpen && (
           <ErrorBoundary label="「更多」菜单" resetKey={menuOpen} onError={reportPanelError}>
             <MenuPopover store={store} snap={snap} onClose={() => setMenuOpen(false)}
-              onOpenSettings={openPreferences}
               onOpenClone={() => { setMenuOpen(false); setCloneOpen(true); }} />
           </ErrorBoundary>
         )}
@@ -734,17 +738,29 @@ function MenuPopover(props: {
   snap: ReturnType<GitStore['snapshot']>;
 
   onClose: () => void;
-  onOpenSettings: () => void;
   onOpenClone: () => void;
 }): ReactNode {
   const { store, snap } = props;
   const remote = currentEntryOf(snap)?.remote ?? '';
   /*
-   * 「设置」那一项带上**宿主自己**的键位(从 `ctx.shortcuts.catalog` 的 `settings.open`
-   * 行读回来;用户改键位这里跟着变)。读不到就只写「设置」两个字 —— **不编一个假的快捷键**。
+   * ⚠️ 2026-10:**「设置(⌘,)」与「dsh-git 偏好设置」两项已按用户指令从这里移除**
+   * (用户原话:「右上角【更多】按钮的 popover 里,移除【设置】和【dsh-git 设置】这两项」)。
+   *
+   * 两项原来做的是两件不同的事,现在都由**别处**承担,所以这里不是「删了功能」:
+   *  - 「设置」驱动宿主自己渲染的设置控件(`host-settings-open.ts` 的 `openHostSettings`),
+   *    拿不到时回退我们自己的弹窗。上游 Desktop 的对应入口在**应用菜单**
+   *    (`ui/app-menu.ts` 的 Preferences / `ui/app.tsx:496`),不在任何工具栏 kebab 里 ——
+   *    而「更多」这个 kebab 本身就是**本插件的产品面**(上游顶栏没有它,见 `toolbar.tsx` 的
+   *    文件头),所以它少一项不构成与上游的偏离;宿主的设置面板仍旧可从宿主的侧栏/账号菜单进入。
+   *  - 「dsh-git 偏好设置」= 我们自己的 `PreferencesDialog`。它的主入口是顶栏那颗**齿轮**
+   *    (`toolbar.tsx` 的 `ariaLabel="设置"`,`:903` ⇒ `props.onOpenSettings()` ⇒
+   *    `workbench.tsx` 的 `openPreferences`),所以这份弹窗**仍然可达**;
+   *    另外「Committing as」浮层的 `Open Git Settings` 也会带页签打开它
+   *    (`commit-avatar-notices.ts` / `changes-view.tsx`)。
+   *
+   * ⇒ `openHostSettings` / `hostSettingsShortcutKeys` 在本文件的 import 一并撤掉
+   * (它们唯一的调用点就是被删掉的那一项);模块本体一个字没删。
    */
-  const settingsKeys = hostSettingsShortcutKeys();
-  const settingsLabel = settingsKeys.length > 0 ? `设置(${settingsKeys.join('')})` : '设置';
   /*
    * 锚点 = kebab(`更多`)按钮 —— 由 `toolbar.tsx` 导出的 `menuAnchorElement()` 从
    * **动作组的 ref** 里取(不是 `document.querySelector('[aria-label="更多"]')`:
@@ -853,34 +869,16 @@ function MenuPopover(props: {
         {item('在浏览器打开仓库', () => {
           if (remote !== '') window.open(`https://github.com/${remote}`, '_blank', 'noopener');
         }, remote === '')}
-        {item(settingsLabel, () => {
-          /*
-           * ⭐ 「设置」= **宿主的**设置面板(2026-10 用户报「点击右上角的设置出的是我们自己
-           * 的弹窗,我期望是弹出宿主的」)。
-           *
-           * 宿主**没有**可编程打开设置的服务 —— 四条候选通路(Service / command / slot /
-           * overlay)逐条走死的证据链见 `./host-settings-open.ts` 的文件头与
-           * `docs/host-settings-card.md` §1。所以这里驱动的是**宿主自己渲染的**设置控件:
-           * 点它自己的按钮 / 菜单项 ⇒ 走它自己的 `onClick` ⇒ 它自己的 `actions.open()`。
-           * 拿不到宿主控件时返回 `'unavailable'`,回退到我们自己的弹窗 ⇒ **不会点了没反应**。
-           *
-           * 注:`item()` 先 `onClose()` 再 `run()`,所以菜单(浮层,z-index 50)不会压在
-           * 宿主刚拉起来的模态层上;`openHostSettings()` 内部也先等一帧再找控件。
-           */
-          void openHostSettings().then((result) => {
-            if (result === 'unavailable') {
-              props.onOpenSettings();
-            }
-          });
-        })}
         {/*
-         * 我们自己那份 GitHub-Desktop 形状的偏好弹窗**必须仍然可达**:无障碍
-         * (`diff-check-marks-visible` 要真的驱动 diff 勾选列)、仓库(仓库清单/别名/默认分支
-         * 是本插件的产品面)、账号(设备码面板接的是本插件 host 半的 `auth/device-*`)
-         * 这三页宿主表达不了 —— 删掉这个入口就等于删掉那三页。逐页保留/删除的裁决与理由
-         * 见 `docs/host-settings-card.md` §4。
-         */}
-        {item('dsh-git 偏好设置(登录 / 模型 / 仓库)', () => props.onOpenSettings())}
+          ⚠️ 2026-10:**这里原先还有两项,已按用户指令移除**(理由与两项各自的
+          替代入口写在 `MenuPopover` 头注释里):
+            - `设置(⌘,)` —— 驱动宿主设置控件的 `openHostSettings()`;
+            - `dsh-git 偏好设置(登录 / 模型 / 仓库)` —— 打开我们自己的 `PreferencesDialog`。
+          ⇒ 菜单现在**7 项**:Clone a repository… / 刷新状态与历史 / 抓取远端(fetch) /
+          拉取(pull) / 推送(push) / 强推(--force-with-lease) / 在浏览器打开仓库。
+          本插件的偏好弹窗**仍然可达**:顶栏齿轮(`toolbar.tsx` 的 `ariaLabel="设置"`)+
+          「Committing as」浮层的 `Open Git Settings`。
+        */}
       </div>,
     ),
     portalHost,

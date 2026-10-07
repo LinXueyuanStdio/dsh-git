@@ -934,6 +934,27 @@ export function createGitHandler(deps: RouteDeps): (request: IncomingMessage, re
       return { ok: true };
     },
 
+    /**
+     * **哪些本地标签还没到远端** —— History 右键 `Delete tag <name>` 的启用判据。
+     *
+     * 这条路由补的是审计文 `docs/dead-code-and-missing-state-audit.md` §2.3 记的
+     * 「`Delete tag` 的数据缺口」:那一项在菜单里恒灰,因为
+     * 「哪些 tag 未推送」当时只有**个数**(`sync-state.tagCount`)没有**身份**。
+     *
+     * 真身与 argv 见 `git-service.ts` 的 `unpushedTags()` 与 `core/git-argv.ts` 的
+     * `unpushedTagsArgv()`(上游 `lib/git/tag.ts:86` 的 `fetchTagsToPush`,一次
+     * `git push --dry-run --porcelain`,**只问不推**)。
+     *
+     * 语义边界(照实写,免得被读成「远端标签清单」):
+     *  - 它回答的是「**把标签推到那个远端**会发生什么」,所以**只**看远端 refs;
+     *  - 没有远端 ⇒ `[]`(没有「推没推过」这回事 ⇒ 菜单项保持灰);
+     *  - 远端不可达 / 认证失败 ⇒ 走既有错误信封(客户端对这条问询**静默保留旧值**)。
+     * `remote` 可选:缺省时宿主按 `push()` 同一套顺序选(上游 remote ⇒ 否则第一个)。
+     */
+    'tag-unpushed': async (body) => ({
+      tags: await deps.git.unpushedTags(requirePath(body), str(body, 'remote')),
+    }),
+
     // ---------- 历史 ----------
     'log': async (body) => deps.git.log(requirePath(body), {
       limit: num(body, 'limit', 50),

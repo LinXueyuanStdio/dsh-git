@@ -65,12 +65,13 @@
  *     的一条硬断言钉住(「Integrations 页按设计账本整页删除(不在页签表 ⇒ 其 Shell 段
  *     不可能存在)」),把它加回页签表会立刻变红;
  *   - Git 与通知两页**在**表里(`TABS`),原表漏了。
- * 下表按 `TABS` 的**实际六页**重写。
+ * 下表按 `TABS` 的**实际五页**重写(2026-10:**「仓库」页按用户指令移除**,
+ * 见 `preferences-pages.tsx` 的 `TABS` 注释 —— 仓库管理回到顶栏的仓库下拉)。
  *
  * | 页签 | 处置 | 导致处置的控件 |
  * |---|---|---|
  * | **账号** | 保留,全部接线 | 登录 CTA → 宿主**设备码流程**(`api.deviceStart`/`devicePoll`,见下);`Sign Out` → `store.logout()`(`auth/logout` 路由) |
- * | **仓库** | 保留(我们独有的一页,不含上游控件) | 切换/移除/添加仓库 + 字号,全部走 store 既有方法 |
+ * | ~~**仓库**~~ | **按用户指令整页移除**(2026-10) | 原先是切换/移除/添加仓库 + 字号,全部走 store 既有方法。现在:仓库管理在顶栏「当前仓库」下拉(`repo-bar.tsx` 的 `RepositoryPanel`,本体是逐字镜像的 `ui/repositories-list/**`);**字号搬到了「外观」页**(`FontScaleSection`)。`store.selectRepo`/`removeRepo`/`addRepoViaDialog` 与 `IPreferencesStore` 上的三个声明**都没删**(「先做,不删」) |
  * | **Git** | 保留:**三个子页签全部接线**,并补上上游的两条行为(自动识别 / 姓名校验) | Author:全局 `user.name`/`user.email` 读、写 + **按 GitHub 账号自动识别**(上游 `preferences.tsx:267-278`)+ **姓名校验**(`ui/lib/identifier-rules.ts` → `preferences.tsx:866-871/1004`);Default branch:`init.defaultBranch`(上游 `lib/helpers/default-branch.ts`);Hooks:客户端镜像 `lib/hooks/config.ts` + 写穿到宿主偏好域。全部细节在 `src/client/git-page.tsx` 的文件头 |
  * | **外观** | 保留:**Theme 接线**(宿主主题服务)、格式与 tab size 接线;worktree 开关**删除** | Theme:读 `theme.getTheme().preference` / 写 `theme.setTheme` / 订阅 `theme/change`(宿主 `ui-theme` 的 `ctx.provide('theme', …)`;桥在 `src/client/host-theme.ts`,由 `index.ts` 的 `apply()` 可选注入)。**服务缺席时**卡片带 `gw-prefs-no-theme`,由 `scss/preferences.scss` 的适配块**删掉该分区** —— 不会出现点了没反应的色板;worktree(`.always-show-worktree-list`):产品里**没有 worktree**(§1.3 排除),上游那个值也没有任何消费方 |
  * | **通知** | 保留,**换成浏览器通知**(不是上游那条 Electron 原生链) | 上游那两样(`desktop-notifications` 原生插件、`main-process-proxy` 的权限请求)在我们的替身里恒 false ⇒ 沿用就是死开关。这一页走 Web Notifications + 一个真的生产者(`notify.ts`),页面本体是手写的 `notifications-panel.tsx`(上游 `notifications.tsx` **不在镜像里**) |
@@ -88,7 +89,7 @@
  *
  * | 控件 | 它守卫什么(上游) | 为什么在这里不存在 |
  * |---|---|---|
- * | Removing repositories | 移除仓库前的确认框 | 我们**有**这个动作(本弹窗的「仓库」页),但确认框属于该页自己的实现;上游那条 `dispatcher.confirmRepositoryRemoval` 路径不存在 ⇒ 该开关不会影响任何东西 |
+ * | Removing repositories | 移除仓库前的确认框 | 我们**有**这个动作,但它今天**不在本弹窗里**:「仓库」页已按用户指令移除,移除仓库走顶栏仓库下拉的右键 `Remove…` ⇒ `repo-bar.tsx` 自己的 `ConfirmDialog`;上游那条 `dispatcher.confirmRepositoryRemoval` 路径不存在 ⇒ 该开关不会影响任何东西 |
  * | Discarding changes | 丢弃改动前的确认框 | 我们的丢弃确认写在 **`changes-view.tsx` 自己的** `ConfirmDialog` 里(无开关);接它要改那个文件的状态机,而本轮只授权了它的编辑器一处 |
  * | Discarding changes permanently | 「永久丢弃」(绕过回收站)确认框 | 我们只有一条丢弃路径(`api.discard` → `git checkout`/删未跟踪文件),**没有**「可恢复 vs 永久」两档 |
  * | Discarding stash | 丢弃 stash 确认框 | **没有 stash 界面**(host 也没有 stash 路由;§10.10 把 stash 族列为「必须补的宿主路由」) |
@@ -114,9 +115,10 @@
  *
  *  1. **没有 Copilot 页签**:用户明确排除;上游只在 `isCopilotSdkEnabled` 为真时渲染它,
  *     而我们的替身恒 `false` ⇒ 与上游在同一条件下的可见结果**一致**。
- *  2. **没有「Repositories」页签**:上游把它放在左栏,我们放在手写设置里;本弹窗的
- *     「仓库」页是**我们独有**的一页(见下)。它**不是**上游页面的替身,所以不受
- *     「7 个页面字节一致」那条约束。
+ *  2. **没有「Repositories」页签**:上游把它放在左栏(`ui/app.tsx` 的 `<RepositoriesList>`),
+ *     我们**本来**在手写设置里放了一页 —— 2026-10 按用户指令**把它也移除了**
+ *     (理由:「仓库的管理应该在当前仓库的 repo list 里管理」)。所以现在两边都不在
+ *     Preferences 里,仓库管理只有一个落点:顶栏的仓库下拉。
  *  3. **没有 `onSave`**:页签里的开关**当场生效**(无障碍页的勾选标记、外观页的格式与
  *     tab size 都是写偏好并广播),而 `OkCancelButtonGroup` 的「保存 / 取消」都只是关闭。
  *     ⚠️ 这条**有两个已登记的后果**,不要读成「和上游一样」:
@@ -254,13 +256,16 @@ export interface IPreferencesDialogProps {
    */
   readonly onPreferencesChanged: () => void;
   /**
-   * 「仓库」页签的数据源(我们独有的那一页)。
+   * 本插件 store 的最小子面(账号页的设备码流程 / 退出登录读它)。
    *
    * 只声明本弹窗真正用到的成员(**结构化类型**),声明窄一点可以让「谁改了 store 的这几个
    * 方法」立刻在这里编译报错,而不是拖到最后才发现。
+   *
+   * ⚠️ 2026-10:这里原来还有一个 `snap: IPreferencesSnapshot` —— 它是被移除的
+   * 「仓库」页的数据源,页面没了,prop 也一起删(留着就是一条
+   * `react/no-unused-prop-types` 新增违规)。类型本身仍从本文件转出(见 `:205`)。
    */
   readonly store: IPreferencesStore;
-  readonly snap: IPreferencesSnapshot;
   /**
    * **打开时预选哪一页**。省略 = 账号页(上游 `preferences.tsx:222` 的
    * `selectedIndex: this.props.initialSelectedTab || PreferencesTab.Accounts`)。
@@ -398,7 +403,6 @@ export function PreferencesDialog(props: IPreferencesDialogProps): ReactNode {
       tab={selected}
       auth={props.auth}
       store={props.store}
-      snap={props.snap}
       fontScale={props.fontScale}
       onFontScale={props.onFontScale}
       onLogout={onLogout}

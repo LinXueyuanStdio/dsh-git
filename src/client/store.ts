@@ -6,8 +6,33 @@
 
 import { api, unwrap, waitForRoutes, type AuthStatePayload, type HealthPayload, type RemoteRepo } from './api.ts';
 import { fileStatusKindOf, supportsLineSelection } from './file-kind.ts';
-import { RepoStateCache, type RepoScopedSnapshot } from './repo-state-cache.ts';
-import { buildPartialPatchFromRaw, type LineSelectionSpec } from '../core/partial-stage.ts';
+import { RepoStateCache, noopStatsStore, type RepoScopedSnapshot } from './repo-state-cache.ts';
+import { appFileStatusOf, buildPartialPatchFromRaw, toDiffSelection, type FileStatusKind, type LineSelectionSpec } from '../core/partial-stage.ts';
+/*
+ * **上游那份状态机**(2026-10 采纳,`docs/changes-state-adoption.md` §4.3 第 1 步)。
+ *
+ * `applyChangesStatus` 是 `src/core/desktop/lib/stores/app-store.ts` 里的**接缝纯函数**,
+ * 它逐字合成上游 `_loadStatus` 对 `changesState` 的两处写入
+ * (`app-store.ts:2999-3004` → `updates/changes-state.ts` 的 `updateChangedFiles` /
+ * `updateConflictState`)。在它接通之前,同一个规则由本文件的 `clearPartialAfterCommit`
+ * 在跑 —— 也就是**同一件事的两份实现**。现在产品这条链走它。
+ *
+ * 为什么 import 用别的模块的**类实例**(`WorkingDirectoryFileChange` /
+ * `DiffSelection`):上游那条规则按 `FileChange.id`(`kind+path`)合并,且**只**认
+ * `WorkingDirectoryFileChange.selection`(DiffSelection)。所以走它就必须把我们的扁平
+ * `includeState` 投影成那两个类型 —— 这是本文件 `mirroredClearPartial` 存在的唯一理由,
+ * 也是文档 §4.3 记的「第 1 步的代价」。
+ */
+import { applyChangesStatus } from '../core/desktop/lib/stores/app-store.ts';
+import {
+  WorkingDirectoryFileChange, WorkingDirectoryStatus,
+} from '../core/desktop/models/status.ts';
+import { DiffSelection, DiffSelectionType } from '../core/desktop/models/diff/index.ts';
+import { ChangesSelectionKind } from '../core/desktop/lib/app-state.ts';
+import { DefaultCommitMessage } from '../core/desktop/models/commit-message.ts';
+import { RepoRulesInfo } from '../core/desktop/models/repo-rules.ts';
+import type { IChangesState } from '../core/desktop/lib/app-state.ts';
+import type { IStatusResult } from '../core/desktop/lib/git/index.ts';
 /*
  * `parsePatch` 是**客户端**那份解析器(`src/client/diff-rows.ts`,内部就是镜像的
  * `DiffParser`)—— 行级丢弃的补丁必须由与屏幕上**同一份**解析结果构造,因为
@@ -115,7 +140,192 @@ export function includeStateOf(spec: LineSelectionSpec | undefined): IncludeStat
 }
 
 /**
+ * `DiffSelection` → 我们的 `LineSelectionSpec`(**`desktop-diff.tsx:502` 的
+ * `selectionToSpec` 的同一个口径**)。
+ *
+ * 为什么这里**不**直接 import `selectionToSpec`:那个函数住在 `desktop-diff.tsx`,
+ * 而那个模块 import 整个 diff 渲染层(`side-by-side-diff` 一族、虚拟列表、
+ * 上下文菜单宿主)。store 引它会把渲染层拖进**每一个**打包 store 的探针与
+ * `changes-cache` 那条链;而这 6 行本身就是纯数据变换。⇒ 两处必须同口径,
+ * 判据把它们逐例比对(`docs/probes/changes-state-adoption-probe.mjs` 的 P5)。
+ * @param selection - 镜像回来的一份选择。
+ * @param selectable - 该文件的可选中行(**只有调用方知道**;投影里就是原 spec 的那一份)。
+ */
+function specOfMirrorSelection(
+  selection: DiffSelection,
+  selectable: readonly number[] | undefined,
+): LineSelectionSpec {
+  const kind: 'all' | 'none' =
+    selection.getSelectionType() === DiffSelectionType.None ? 'none' : 'all';
+  if (selectable === undefined) {
+    // 没有可选中行清单时**如实不写这个键**(不编一个 `[]`:那会让
+    // `includeStateOf` 的「diverging 覆盖全部可选行 ⇒ 真实 All/None」那条判据失真)。
+    return { kind, diverging: [] };
+  }
+  const diverging = selectable.filter((index) =>
+    kind === 'all' ? !selection.isSelected(index) : selection.isSelected(index));
+  return { kind, diverging, selectable: [...selectable] };
+}
+
+/** 宿主 `ChangedFile` → `fileStatusKindOf` 要的那个形状(与 store 里既有的两处调用同口径)。 */
+function statusLikeOf(file: ChangedFile): { status?: ChangedFile['unstaged']; untracked?: boolean; conflicted?: boolean } {
+  return {
+    ...(file.unstaged !== undefined ? { status: file.unstaged } : {}),
+    ...(file.untracked !== undefined ? { untracked: file.untracked } : {}),
+    ...(file.conflicted !== undefined ? { conflicted: file.conflicted } : {}),
+  };
+}
+
+/**
+ * **扁平的纳入状态 → 上游状态机**(`docs/changes-state-adoption.md` §4.3 的**第 1 步**,2026-10 已落地)。
+ *
+ * ## 它做什么
+ *
+ * 「状态刷新 / 提交成功之后,每个文件的纳入状态怎么变」这条规则在上游**只有一份实现**:
+ * `lib/stores/updates/changes-state.ts` 的 `updateChangedFiles(state, status, clearPartialState)`
+ * —— 那份 353 行**逐字镜像**已在树里(`cmp` 无输出),`app-store.ts:2999-3004` 是它唯一的
+ * 上游调用点。本函数把我们的扁平数据投影成它要求的两个入参、调它、再把结果投影回来:
+ *
+ * ```
+ * includeState + RepoStatus ──投影──▶ IChangesState + IStatusResult
+ *        │                                      │
+ *        │                    applyChangesStatus(state, status, noopStatsStore, /* clearPartialState *\/ true)
+ *        │                                      │
+ *        └────────── 投影回来 ◀── IChangesState.workingDirectory.files[i].selection
+ * ```
+ *
+ * 上游为什么要求那两个类型(以及这层投影为什么不可省):
+ *  - `updateChangedFiles` 按 **`WorkingDirectoryFileChange.id`** 合并 ——
+ *    id 是 `${status.kind}+${path}`(`models/status.ts:262-273`),所以「同一个文件」的判定
+ *    依赖 kind,而不是只看路径(`repo-state-cache.ts` 文件头的偏差 1 说的是同一件事);
+ *  - 它读的是 **`DiffSelection`**(`file.selection.getSelectionType()` /
+ *    `file.withSelection(...)` / `file.withIncludeAll(false)`),不是我们的三态字符串。
+ *
+ * ## 语义(逐条对应上游,判据 `docs/probes/changes-state-adoption-probe.mjs`)
+ *
+ * | 旧状态 | 结果 | 上游依据 |
+ * |---|---|---|
+ * | `Partial`(有 diverging) | `{kind:'none', diverging:[]}` | `changes-state.ts:47-54` 的 `withIncludeAll(false)` |
+ * | `All` | **原样**(同一份 selection) | `:56` 的 `file.withSelection(existingFile.selection)` |
+ * | `None` | **原样** | 同上 —— 这是「用户显式取消勾选」被记住的那条路 |
+ * | status 里新出现的文件 | 不写键(缺失 = 默认 All) | `:57-59` 走 `else` 分支,该文件出厂就是 All |
+ *
+ * ## 与退役的 `clearPartialAfterCommit` 的关系
+ *
+ * 两者**逐例同值**(判据 P4 用四档夹具逐个比对过),但**真源不同**:上面那张表才是规则,
+ * 本函数只是把我们的形状喂进那份真源。旧的那份**保留但不再被调用**(用户裁决「不删」),
+ * 退役条件写在它自己的 JSDoc 上。
+ *
+ * ## 诚实边界
+ *
+ * 1. 我们的 `RepoStatus` **没有** `rebaseInternalState` / `squashMsgFound` 这些字段
+ *    (它们在宿主载荷里、客户端没投影),所以 `IStatusResult` 的这两项如实填
+ *    `null` / `false`;`updateConflictState` 的**返回**被本函数丢弃(我们的快照里没有
+ *    `conflictState` 这个槽)。投影的**输入**够用,是因为这条链只关心 `workingDirectory`。
+ * 2. `statsStore` 是 no-op(遥测不在本插件范围内),所以 `performEffectsFor*` 的计数不产生
+ *    任何可观察后果 —— 与 `stats-store.ts` 文件头核实过的结论一致(除计数外零副作用)。
+ * @param includeState - 变换前的纳入状态表(键 = 仓库内相对路径)。
+ * @param status - 当前 `RepoStatus`;**`null`(还没刷新过)时按「只有 includeState 这些文件」投影**,
+ *   绝不因此把整张表抹掉(那是本仓咬过的「静默丢选区」缺陷)。
+ * @returns 新的表,键集与入参**完全相同**(不新增、不删除)。
+ */
+export function mirroredClearPartial(
+  includeState: Record<string, LineSelectionSpec>,
+  status: RepoStatus | null,
+): Record<string, LineSelectionSpec> {
+  const paths = Object.keys(includeState);
+  if (paths.length === 0) {
+    return {};
+  }
+
+  const files = status?.files ?? [];
+  const kindByPath = new Map<string, FileStatusKind>();
+  for (const file of files) {
+    kindByPath.set(file.path, fileStatusKindOf(statusLikeOf(file)));
+  }
+  const kindOf = (path: string): FileStatusKind => kindByPath.get(path) ?? 'modified';
+
+  // ---- 旧状态:每个键一条 file,选择由我们的 spec 投影而来 ----
+  const state: IChangesState = {
+    workingDirectory: WorkingDirectoryStatus.fromFiles(paths.map((path) =>
+      new WorkingDirectoryFileChange(path, appFileStatusOf(kindOf(path)), toDiffSelection(includeState[path])))),
+    commitMessage: DefaultCommitMessage,
+    showCoAuthoredBy: false,
+    coAuthors: [],
+    conflictState: null,
+    stashEntry: null,
+    selection: {
+      kind: ChangesSelectionKind.WorkingDirectory as ChangesSelectionKind.WorkingDirectory,
+      selectedFileIDs: [],
+      diff: null,
+    },
+    currentBranchProtected: false,
+    currentRepoRulesInfo: new RepoRulesInfo(),
+    fileListFilter: {
+      filterText: '', isIncludedInCommit: false, isExcludedFromCommit: false,
+      isNewFile: false, isModifiedFile: false, isDeletedFile: false,
+    },
+  };
+
+  // ---- 新 status:工作区那一批(默认 All)+ 「在 includeState 里但不在 status 里」的补集 ----
+  const statusPaths = files.map((file) => file.path);
+  const inStatus = new Set(statusPaths);
+  const allNewPaths = [...statusPaths, ...paths.filter((path) => !inStatus.has(path))];
+  const nextStatus: IStatusResult = {
+    exists: true,
+    mergeHeadFound: status?.operation === 'merge',
+    squashMsgFound: false,
+    rebaseInternalState: null,
+    isCherryPickingHeadFound: status?.operation === 'cherry-pick',
+    doConflictedFilesExist: files.some((file) => file.conflicted === true),
+    workingDirectory: WorkingDirectoryStatus.fromFiles(allNewPaths.map((path) =>
+      new WorkingDirectoryFileChange(
+        path,
+        appFileStatusOf(kindOf(path)),
+        DiffSelection.fromInitialSelection(DiffSelectionType.All),
+      ))),
+    ...(status !== null
+      ? {
+        currentBranch: status.branch,
+        currentTip: status.headSha,
+        currentUpstreamBranch: status.upstream ?? undefined,
+        branchAheadBehind: { ahead: status.ahead, behind: status.behind },
+      }
+      : {}),
+  };
+
+  // ---- 调**上游那条规则**,再把结果投影回来 ----
+  const result = applyChangesStatus(state, nextStatus, noopStatsStore, true);
+  const byPath = new Map(result.workingDirectory.files.map((file) => [file.path, file]));
+  const out: Record<string, LineSelectionSpec> = {};
+  for (const path of paths) {
+    const file = byPath.get(path);
+    out[path] = file === undefined
+      ? includeState[path]
+      : specOfMirrorSelection(file.selection, includeState[path].selectable);
+  }
+  return out;
+}
+
+/**
  * 状态刷新/提交之后对既有纳入状态的**唯一**变换 —— 上游 `clearPartialState: true`。
+ *
+ * > ⚠️ **2026-10 已退役(不再被调用,但按用户裁决「不删」保留在这棵树上)。**
+ * > 它当年是本插件对同一条规则的**第二份实现**。现在产品两个调用点
+ * > (`setHideWhitespace` 与 `commit()` 的 emit)都走
+ * > {@link mirroredClearPartial} → 镜像的 `applyChangesStatus`
+ * > (`src/core/desktop/lib/stores/app-store.ts`,逐字合成上游 `app-store.ts:2999-3004`)。
+ * > **退役条件(满足后即可删除本函数)**:① `docs/probes/changes-state-adoption-probe.mjs`
+ * > 的等价性判据(P4)不再需要这一份对照物(例如 `Snapshot.includeState` 被容器切换
+ * > 换成 `IChangesState` 本身 —— 即 `docs/changes-state-adoption.md` §4.3 的第 2 步);
+ * > ② 且没有任何探针/文档再引用它(实证命令:`grep -rn clearPartialAfterCommit src/ docs/` 只剩本注释)。
+ * > 在那之前留着它,是因为**删掉它就少一个能证明新链等价的对照物**(而且用户明确说「不删」)。
+ *
+ * **为什么它是 `export` 的**:退役之后它在本文件里**零调用点**,而 `tsconfig.base.json`
+ * 开着 `noUnusedLocals` —— 不导出就编译不过(TS6133),而删掉它违反「不删」。导出还带来
+ * 一件真事:新链的判据需要一个**对照物**来证明「换实现之后四档结果逐例不变」
+ * (`docs/probes/changes-state-adoption-probe.mjs` 的 P4 直接 import 本函数当 oracle),
+ * 所以这个导出是**判据用的**,不是预留 API。
  *
  * 上游把这条规则写成纯函数 `updateChangedFiles(state, status, clearPartialState)`
  * (`lib/stores/updates/changes-state.ts:32-116`),三条依据逐字核过:
@@ -135,7 +345,7 @@ export function includeStateOf(spec: LineSelectionSpec | undefined): IncludeStat
  * @param state - 变换前的纳入状态表(键 = 仓库内相对路径)。
  * @returns 新的表:`partial` → `none`,其余**原样**(含 `selectable`)。
  */
-function clearPartialAfterCommit(
+export function clearPartialAfterCommit(
   state: Record<string, LineSelectionSpec>,
 ): Record<string, LineSelectionSpec> {
   const next: Record<string, LineSelectionSpec> = {};
@@ -283,6 +493,20 @@ export interface Snapshot {
   tab: TabId;
   status: RepoStatus | null;
   sync: SyncState | null;
+  /**
+   * **本地有、远端没有的标签名**(宿主路由 `tag-unpushed` 的读数)。
+   *
+   * 它存在的唯一理由是 History 右键菜单那一项:`ui/history/commit-list.tsx:373-377` 的
+   * `getUnpushedTags` 把 `commit.tags` 与它取交集,`:893-899` 再用交集决定
+   * `Delete tag <name>` 的 `enabled`。**`[]` 与 `undefined` 在这里等价**
+   * (那份实现是 `new Set(this.props.tagsToPush ?? [])`)—— 所以「拿不到数据」时回 `[]`
+   * 的净效果是「项在列但灰」,不会误报可删(那才是危险的:删掉一个**已推送**的标签只删
+   * 本地、远端还在)。
+   *
+   * **不是按仓库缓存的字段**(照 `status`/`sync`/`branches` 的处置):它由宿主现算、
+   * 切仓库时清空,`refreshAll()` / 打开 History 页签立刻拿回来。
+   */
+  tagsToPush: string[];
   branches: BranchEntry[];
   selectedFiles: string[];
   /**
@@ -397,6 +621,7 @@ function initial(): Snapshot {
     tab: 'changes',
     status: null,
     sync: null,
+    tagsToPush: [],
     branches: [],
     selectedFiles: [],
     includeState: {},
@@ -876,6 +1101,9 @@ export class GitStore {
       current: path,
       status: null,
       sync: null,
+      // 同上:`tagsToPush` 是**上一个仓库**的标签身份清单,留着会让菜单项按错仓库判定
+      // (`Delete tag` 会对着 B 的标签问 A 的未推送集合)。`refreshAll()` 立刻重取。
+      tagsToPush: [],
       branches: [],
       // 进行中的进度属于「上一个仓库的网络动作」:切仓库时它已经无意义。
       progress: null,
@@ -890,6 +1118,57 @@ export class GitStore {
 
   async refreshAll(): Promise<void> {
     await Promise.all([this.refreshStatus(), this.refreshBranches(), this.refreshLog(true)]);
+  }
+
+  /**
+   * **刷新「本地有、远端没有」的标签名**(宿主路由 `tag-unpushed`)。
+   *
+   * 上游把这份清单**记在本地**(`lib/stores/git-store.ts:144` 的 `_tagsToPush` +
+   * `helpers/tags-to-push-storage.ts` 落 localStorage,`addTagToPush`/`removeTagToPush`/
+   * `clearTagsToPush` 三处维护),而它的**权威来源**是问一次远端
+   * (`lib/git/tag.ts:86` 的 `fetchTagsToPush` —— 一次 `git push --dry-run --porcelain`;
+   * 注意那份上游实现在 `references/desktop` 里**零调用点**,是上游自己的死代码)。
+   * 我们直接问宿主(它真的跑那次 dry-run),因为「记在本地」会在
+   * 「用户从命令行建的标签」「在别处推过」这两种情况下说谎。
+   *
+   * **失败一律静默**:远端不可达、没认证、仓库没有远端 —— 这些都是**正常状态**,
+   * 而这条问询只服务一个菜单项的启用判定 ⇒ 保留旧值、不弹 toast、不写 `globalError`
+   * (`api.ts` 的 `tagUnpushed` 注释里写明调用方必须能接受它失败)。
+   *
+   * ## 为什么**只**在切页签时调(而不是挂在 `refreshAll()` / 轮询上)
+   *
+   * 它**要碰网络**(一次真 `git push --dry-run`),所以调用点必须贵得有理:
+   *  - 挂在 `refreshLog(true)` 上 ⇒ 每次暂存/取消暂存/丢弃一个文件都多一次网络往返
+   *    (`afterIndexChange()` 就走它);
+   *  - 挂在 `refreshAll()` 上 ⇒ 每次提交 / 切分支 / reset / revert / cherry-pick 都多一次
+   *    (而那些动作**都不改变标签集合**),并且会让既有的 `history-commit-actions-probe.mjs`
+   *    的 Z2 实测转红(它的 fetch 桩没有这一档 ⇒ 载荷被拒);
+   *  - **5 秒轮询不经过这里** —— 实测 `startPolling` 的 `setInterval` 体只调
+   *    `refreshStatus()`(`src/client/store.ts:922-929`),所以这条问询**不会**每 5 秒发一次;
+   *  - 两个消费者都在页签里(History 的 `Delete tag` 菜单项 / Changes 空态的推送卡)⇒
+   *    `setTab('history')` 与 `setTab('changes')` 各问一次(见 `setTab` 里那段注释)。
+   *
+   * ⚠️ **与 Changes 侧的一处已知耦合**(写在这里免得接手的人误判):`snap.tagsToPush`
+   * 在**进入过 Changes 或 History 之前**恒为 `[]`。对 Change 空态的推送卡来说那只意味着
+   * 「只有未推送标签」那一档**少一次机会**,不会**错报**(空表 ⊂ 真表);而 `Delete tag`
+   * 那一项在空表下是**灰的**,与「没接」等价,不会误报可删。
+   *
+   * 三处**不需要**重问(逐条给理由,不是漏了):
+   *  1. **push 之后**:本仓的 `push()` 走 `pushArgv` 且**从不传 `tags`**
+   *     (`git-service.ts` 的 `push()` 只推分支)⇒ 一次推送**不会**改变未推送标签集合;
+   *  2. **createTag 之后**:我们在本地**增量**加一条(上游 `git-store.ts:501-507` 的
+   *     `addTagToPush`)—— 而且因为 push 从不推标签,刚建的标签**按定义**就是未推送;
+   *  3. **deleteTag 之后**:同理本地减一条(上游 `:509-515` 的 `removeTagToPush`)。
+   * 第 2/3 条是上游的本地记账手法(`_tagsToPush` + `helpers/tags-to-push-storage.ts`),
+   * 这里只借用「增量维护」这一半(权威读数仍然是本条路由,下次切进 History 会覆盖它)。
+   */
+  public async refreshTagsToPush(): Promise<void> {
+    const path = this.state.current;
+    if (path === '') { return; }
+    const result = await api.tagUnpushed(path);
+    if (result.ok) {
+      this.emit({ tagsToPush: result.value.tags });
+    }
   }
 
   async refreshStatus(): Promise<void> {
@@ -1005,6 +1284,37 @@ export class GitStore {
      * 唯一的调用方是页签栏(`workbench.tsx:285` 的 `onSelect`),不会在启动时触发。
      */
     if (tab === 'changes') void this.refreshStatus();
+    /*
+     * 切到 **History** 或 **Changes** ⇒ 重取「哪些标签还没推送」。
+     *
+     * ## 为什么是这两个页签(而不是 `refreshLog` / `refreshAll` / 轮询)
+     *
+     * 这条问询**要碰网络**(一次 `git push --dry-run --porcelain`,`refreshTagsToPush` 的
+     * JSDoc 有完整成本表)。它的两个消费者**都在页签里**:
+     *  - `Delete tag <name>` 的 `enabled`(`ui/history/commit-list.tsx:373-377,889-924`)⇒ History;
+     *  - Changes 空态那张「推送未推送的标签」卡(`ui/changes/no-changes.tsx:379-384` 的
+     *    `aheadBehind.ahead > 0 || (tagsToPush !== null && tagsToPush.length > 0)`)⇒ Changes。
+     * 所以「用户**进入**这两个页签时问一次」正好覆盖两个消费面,而且频率是**用户点击级**的。
+     *
+     * **被排除的三处(逐条给理由,免得下一个人以为漏了)**:
+     *  1. `refreshAll()` —— 它是提交 / 切分支 / reset / revert / cherry-pick / 换仓库的收尾,
+     *     挂上去等于给每一个**都不改变标签集合**的动作加一次网络往返;而且本仓既有的
+     *     `history-commit-actions-probe.mjs` 的 fetch 桩当时**没有** `tag-unpushed` 这一档,
+     *     挂 `refreshAll()` 会让它的 Z2(零载荷被拒)**实测转红 30/31**;
+     *  2. **5 秒轮询** —— 实测它**不**经过 `refreshAll()`:`startPolling` 的
+     *     `setInterval` 体只调 `refreshStatus()`(本文件 `:922-929`)。这一条要写下来,
+     *     因为「`refreshAll` 被轮询」这个印象曾被当成成本模型用过;
+     *  3. **暂存/取消暂存/丢弃** —— `afterIndexChange()` 只走 `refreshStatus()` + `refreshLog(true)`。
+     *
+     * ## 没有做 TTL / 去重(以及什么时候该做)
+     *
+     * 频率是**用户点击级**(切页签),不是自动级;重复点击同一页签确实会重复问一次。
+     * 没有加 TTL 的原因:那会引入一个「最长 N 秒的陈旧窗口」用于一个**启用判定**,
+     * 而收益只在高频来回切页签时显现。**该做的信号**:若真机上观察到切页签时的
+     * 网络往返有感知,就在 `refreshTagsToPush` 里加「同仓库 N 秒内不重复读」——
+     * 那时的判据应当写成「连续切两次只发一次请求」(本文件的探针已经能读请求流水)。
+     */
+    if (tab === 'history' || tab === 'changes') void this.refreshTagsToPush();
   }
 
   /** 远端页签回填角标计数。 */
@@ -1682,6 +1992,18 @@ export class GitStore {
       return;
     }
     this.toast(`已创建标签 ${name}(轻量标签:没有 tagger / 日期 / 消息)`);
+    /*
+     * 本地**增量**记账 —— 上游 `lib/stores/git-store.ts:501-507` 的 `addTagToPush`
+     * (`_tagsToPush = [..._tagsToPush, tagName]`)。
+     *
+     * 这里不需要重新问一次宿主(`refreshTagsToPush`):刚建出来的标签**按定义**就是
+     * 「本地有、远端没有」—— 而且本仓的 `push()` 走 `pushArgv` 且**从不传 `tags`**
+     * (只推分支)⇒ 没有任何别的路径能把它推上去。权威读数仍然归 `tag-unpushed` 路由
+     * (下次切进 History 时覆盖这一条)。
+     */
+    if (!this.state.tagsToPush.includes(name)) {
+      this.emit({ tagsToPush: [...this.state.tagsToPush, name] });
+    }
     await this.refreshAll();
   }
 
@@ -1705,6 +2027,8 @@ export class GitStore {
       return;
     }
     this.toast(`已删除本地标签 ${name}(远端上的同名标签没有被删除)`);
+    /** 本地增量记账的另一半 —— 上游 `git-store.ts:509-515` 的 `removeTagToPush`。 */
+    this.emit({ tagsToPush: this.state.tagsToPush.filter((tag) => tag !== name) });
     await this.refreshAll();
   }
 
@@ -1856,7 +2180,10 @@ async setHideWhitespace(value: boolean): Promise<void> {
     // `@@ -1,5 +1,6 @@` 变成别的形状 ⇒ **行号空间变了**,旧的 partial 选区对新 diff
     // 没有意义。以前这里只撤 diff、不动 `includeState`,于是模型里留下一个按**旧行号**
     // 记着的 partial,提交时 `commit()` 会拿它去 materialize ⇒ 可能提交到错误的行。
-    includeState: clearPartialAfterCommit(this.state.includeState),
+    //
+    // 2026-10:这条变换改由**镜像那份规则**执行(见 `mirroredClearPartial`);
+    // 原来的本地实现 `clearPartialAfterCommit` 已退役、不再被调用。
+    includeState: mirroredClearPartial(this.state.includeState, this.state.status),
   });
   await this.loadDiff();
 }
@@ -2057,7 +2384,10 @@ async setHideWhitespaceHistory(value: boolean): Promise<void> {
       //  → `lib/stores/updates/changes-state.ts:47-56`)。
       // 以前这里是 `includeState: {}`(整张抹掉),而本仓「缺失 = 默认 All」,
       // 于是用户明确排除的文件会在下一次提交里被静默带上。
-      includeState: clearPartialAfterCommit(this.state.includeState),
+      //
+      // 2026-10:这条变换改由**镜像那份规则**执行(见 `mirroredClearPartial`);
+      // 原来的本地实现 `clearPartialAfterCommit` 已退役、不再被调用。
+      includeState: mirroredClearPartial(this.state.includeState, this.state.status),
     });
     this.toast(form.amend ? '已修改上一次提交' : `已提交 ${result.value.sha.slice(0, 7)}`);
     await this.refreshAll();

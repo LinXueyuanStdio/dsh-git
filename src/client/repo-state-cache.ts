@@ -85,8 +85,14 @@ import type { Snapshot } from './store.ts';
  * `repository-state-cache.ts:131,159` 只在一个地方用它记**两条 submodule diff 遥测计数**,
  * 而那两个 `private record*IfNeeded()` 除计数外**零副作用**(不写状态、不返回值、不决定分支)
  * ⇒ 对界面与状态**零影响**。逐条核实写在 `src/core/desktop/lib/stats/stats-store.ts` 的文件头。
+ *
+ * **2026-10 起有第二个消费方**:`src/client/store.ts` 的状态机投影
+ * (`mirroredClearPartial`)要把这份 no-op 传给镜像的 `applyChangesStatus(…, statsStore, …)`
+ * —— 那条链里的 `updateConflictState` 会调 `statsStore.increment('mergeAbortedAfterConflictsCount')`
+ * 一族。**刻意从这一份导出**(而不是在 store.ts 里再写一个 no-op):两个 no-op 是两份
+ * 会各自漂移的「遥测替身」,而这里只需要一份语义(什么都不记)。
  */
-const noopStatsStore: IStatsStore = {
+export const noopStatsStore: IStatsStore = {
   increment: async () => { /* 遥测:本插件没有上报端点,§1.3 不沿用 lib/stats */ },
 };
 

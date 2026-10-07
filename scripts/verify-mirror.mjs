@@ -210,8 +210,13 @@ const EXPECTED = new Map([
       '也走这个桶文件;那份 353 行的「状态合并」纯函数(updateChangedFiles / updateConflictState /' +
       'selectWorkingDirectoryFiles)是 Changes 页失效规则的上游原文,已逐字落到' +
       'src/core/desktop/lib/stores/updates/changes-state.ts,所以这个类型名必须像上游一样从这里可解析。' +
-      '**回收条件**:若将来 changes-state.ts 被裁掉(那套合并规则不再逐字保留),这里的 IStatusResult' +
-      '也应一并删除 —— 它没有别的消费方。',
+      '**2026-10 状态更新:它已被真的消费,不再是「只有一份镜像需要它」** —— ' +
+      '`src/client/store.ts` 的 `mirroredClearPartial` import 了本类型(`import type { IStatusResult } from' +
+      '\'../core/desktop/lib/git/index.ts\'`),因为产品那条链现在真的把 `RepoStatus` 投影成 ' +
+      '`IStatusResult` 再交给镜像的 `applyChangesStatus`(判据 ' +
+      '`docs/probes/changes-state-adoption-probe.mjs`)。**回收条件(已改写)**:只有当 ' +
+      '`changes-state.ts` 被裁掉**且** `src/client/store.ts` 的投影一并删掉时,这里的 `IStatusResult` ' +
+      '才该删 —— 单看镜像那一侧不再成立(原记述的「它没有别的消费方」已过期)。',
   ],
   // --- Preferences ▸ 弹窗移植(task:PORT A WHOLE SURFACE / Preferences)带进来的 shim ---
   // `ui/preferences/preferences.tsx` **没有被移植**(它把 Copilot 页签、`../dispatcher`
@@ -327,11 +332,15 @@ const EXPECTED = new Map([
       '**刻意不复刻**:AppStore 类、repositoryStateCache/gitStoreCache/emitUpdate、' +
       '`gitStore.loadStatus()`(一次真 git 调用,属 host)、`_loadStatus` 末尾的 ' +
       '`updateChangesWorkingDirectoryDiff`(`:3018`,我们已落在 `src/client/store.ts` 的 `refreshStatus()`)。' +
-      '**退役条件**:`src/client/store.ts` 的授权模型换成镜像的 ' +
+      '**2026-10 状态更新(docs/changes-state-adoption.md §4.3 的「第 1 步」已落地)**:' +
+      '`applyChangesStatus` **不再是探针专用入口** —— `src/client/store.ts` 的 `mirroredClearPartial` ' +
+      '已经有两个产品调用点(`setHideWhitespace` 与 `commit()` 的 emit,都传 `clearPartialState: true`),' +
+      '证据在 `docs/probes/changes-state-adoption-probe.mjs`(计数 + 阴性对照)。' +
+      '**退役条件(第 2 步,未满足)**:`src/client/store.ts` 的授权模型换成镜像的 ' +
       '`WorkingDirectoryFileChange.selection` 之后,它会直接 import 那个镜像模块并丢掉自己的 ' +
-      '`clearPartialAfterCommit` —— 那一刻本文件的 `applyChangesStatus` 与那三条 re-export ' +
-      '**必须删掉**(否则就是第二份必然漂移的真源),同时 `lib/git/index.ts` 的 `IStatusResult` ' +
-      '也一并删。计划见 `docs/changes-state-adoption.md`。',
+      '`mirroredClearPartial` 与退役的 `clearPartialAfterCommit` —— 那一刻本文件的 ' +
+      '`applyChangesStatus` 与那三条 re-export **必须删掉**(否则就是第二份必然漂移的真源),' +
+      '同时 `lib/git/index.ts` 的 `IStatusResult` 也一并删。计划见 `docs/changes-state-adoption.md`。',
   ],
   [
     'lib/stores/git-store.ts',

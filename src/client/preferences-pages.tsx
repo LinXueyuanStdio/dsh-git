@@ -43,7 +43,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ChangeEvent, MouseEvent, ReactNode } from 'react';
+import type { ChangeEvent, ReactNode } from 'react';
 
 import { Accessibility } from '../core/desktop/ui/preferences/accessibility.tsx';
 import { Accounts } from '../core/desktop/ui/preferences/accounts.tsx';
@@ -111,31 +111,48 @@ import {
 } from './prefs.ts';
 
 /**
- * 本模块能渲染的分区。**5 页**(2026-10:`appearance` 与 `git` 按用户指令**加进来**,
- * 见 `TABS` 上面那张表里它们那两行的接线证据)。
+ * 本模块能渲染的分区。**5 页**(2026-10:`appearance` 与 `git` 按用户指令**加进来**;
+ * 同月 **`repositories` 按用户指令移除** —— 见 `TABS` 上面那张表)。
  *
  * 类型从 `preferences-dialog.tsx` 搬来(那份逐页账本留在那边;这里是不含任何
  * 「宿主能表达什么」判断的机械类型)。
  */
 export type PreferencesTabId =
   | 'accounts'
-  | 'repositories'
   | 'git'
   | 'appearance'
   | 'notifications'
   | 'accessibility';
 
 /**
- * 页签表 —— **5 页**。前 3 页各有一份「为什么必须是我们的 UI」的理由;后 2 页
+ * 页签表 —— **5 页**。前 2 页各有一份「为什么必须是我们的 UI」的理由;另 2 页
  * (`appearance` / `git`)是 2026-10 用户**明确要求加入**的(见下)。
  *
  * | 页 | 为什么留 |
  * |---|---|
  * | `accessibility` | `docs/goal-port-desktop.md` §11.3 要求 `diff-check-marks-visible` **可达且真的驱动 diff 的勾选列**;宿主的 `Config` 表单模型是**单段路径 + 只认 volatile 字段**,表达不了「一个开关驱动客户端渲染」这种跨面行为 |
- * | `repositories` | 仓库清单 / 别名 / 默认分支是**本插件的产品面**(host 半的 `RepoRegistry` + 我们自己的 storage domain),宿主没有这一层 |
  * | `accounts` | **设备码面板**接的是本插件 host 半的 `auth/device-*`,宿主没有对应 UI |
  * | `git` | **2026-10 加入**(见下) |
- * | `appearance` | **2026-10 加回**(见下) |
+ * | `appearance` | **2026-10 加回**(见下);同月**接手了原「仓库」页的「界面缩放」控件** |
+ *
+ * ## `repositories` 为什么被移除(2026-10 用户指令,**这是一次产品裁决**)
+ *
+ * > 用户原话:「现在偏好设置 dialog 里,可以移除【仓库】这个 tab。一方面,仓库的管理
+ * > 应该在当前仓库的 repo list 里管理;另一方面,这个 tab 里的**字号设置应该移动到
+ * > 【外观】**这个 tab。」
+ *
+ * 三条事实,免得下一个人把它当成「抄漏了一页」:
+ * 1. **上游 Preferences 里根本没有「仓库」页**。Desktop 把仓库清单放在**左栏**
+ *    (`ui/app.tsx` 的 `<RepositoriesList>`),`ui/preferences/**` 没有对应文件 ——
+ *    这一页从一开始就是我们手写的产品面,不是镜像。
+ * 2. **仓库管理今天仍然完整可达**,只是换了地方:顶栏「当前仓库」下拉
+ *    (`repo-bar.tsx` 的 `RepositoryPanel`,本体是逐字镜像的
+ *    `ui/repositories-list/**`)提供 **切换 / 右键改名 / 右键移除 / `Add ▾`(Clone /
+ *    Create / Add existing)/ 过滤**;空态那屏还有一颗「添加本地仓库」
+ *    (`workbench.tsx:357`)。⇒ **没有留下洞**。
+ * 3. **被移除的是页面,不是能力**:`store.selectRepo` / `removeRepo` /
+ *    `addRepoViaDialog` 与 `IPreferencesStore` 上对应的声明**一个字没删**
+ *    (用户的长期规则是「先做,不删」,本轮的移除令只针对这四处 UI 添加)。
  *
  * ## `appearance` 的来龙去脉(两次裁决,都记下来)
  *
@@ -187,7 +204,6 @@ export const TABS: ReadonlyArray<{
   symbol: typeof octicons.home;
 }> = [
   { id: 'accounts', label: '账号', symbol: octicons.home },
-  { id: 'repositories', label: '仓库', symbol: octicons.repo },
   /*
    * **Git —— 2026-10 用户明确要求加入**(「Git 要加入」)。页面本体是**逐字节镜像**的
    * 上游 `ui/preferences/git.tsx`,接线层在 `src/client/git-page.tsx`(那个文件头
@@ -222,7 +238,6 @@ export const TABS: ReadonlyArray<{
 /** 上游 `preferences.tsx:447-482` 的 `getTabId` —— 决定 CSS 挂哪个 id。 */
 export const TAB_DOM_ID: Readonly<Record<PreferencesTabId, string>> = {
   accounts: 'preferences-tab-accounts',
-  repositories: 'preferences-tab-repositories',
   git: 'preferences-tab-git',
   appearance: 'preferences-tab-appearance',
   notifications: 'preferences-tab-notifications',
@@ -239,7 +254,6 @@ export const TAB_DOM_ID: Readonly<Record<PreferencesTabId, string>> = {
  */
 export const PAGE_PANEL_ID: Readonly<Record<PreferencesTabId, string>> = {
   accounts: 'dsh-git-preferences-panel-accounts',
-  repositories: 'dsh-git-preferences-panel-repositories',
   git: 'dsh-git-preferences-panel-git',
   appearance: 'dsh-git-preferences-panel-appearance',
   notifications: 'dsh-git-preferences-panel-notifications',
@@ -247,9 +261,14 @@ export const PAGE_PANEL_ID: Readonly<Record<PreferencesTabId, string>> = {
 };
 
 /**
- * 「仓库」页签 + 账号页/设备码流程需要的**最小** store 面(结构化类型,不是 `GitStore` 的别名)。
+ * 账号页/设备码流程 + **原「仓库」页**需要的**最小** store 面(结构化类型,不是 `GitStore` 的别名)。
  *
  * 声明窄一点可以让「谁改了 store 的这几个方法」立刻在编译期报错,而不是拖到最后才发现。
+ *
+ * ⚠️ 前三条(`selectRepo` / `removeRepo` / `addRepoViaDialog`)是**原「仓库」页**的输入。
+ * 那一页已按用户指令移除(见 `TABS` 上面那段),所以这三个成员今天在本模块里**没有消费点**;
+ * 它们**故意留着**(长期规则「先做,不删」,且 `store.ts` 上那三个方法的真身也一个字没删)
+ * ⇒ 将来任何一面要重新暴露仓库管理,契约还在。
  */
 export interface IPreferencesStore {
   /** 切换当前仓库(`store.ts` 的 `selectRepo`)。 */
@@ -709,19 +728,31 @@ export function useAppearanceWiring(onPreferencesChanged: () => void): {
 /**
  * {@link PreferencesPageBody} 的全部输入。
  *
- * 这份 prop 面**刻意逐字保留** `IPreferencesDialogProps` 里被三个页面读到的那些成员
- * (`store` / `snap` / `auth` / `fontScale` / `onFontScale` / `onPreferencesChanged`),
+ * 这份 prop 面**刻意逐字保留** `IPreferencesDialogProps` 里被各页面读到的那些成员
+ * (`store` / `auth` / `fontScale` / `onFontScale` / `onPreferencesChanged`),
  * 于是两个外壳各自从**自己的**数据源把同样的语义填进来即可。
+ * (`snap` 原先也在这一行里 —— 它随「仓库」页一起移除,见下面 `store` 那条注释。)
  */
 export interface IPreferencesPageBodyProps {
   /** 当前选中的页面。 */
   readonly tab: PreferencesTabId;
   /** 登录态(账号页)。`null` = 未登录。 */
   readonly auth: PreferencesAuth;
-  /** 「仓库」页签的数据源。 */
+  /**
+   * 本插件 store 的最小子面。
+   *
+   * ⚠️ 它原先是**两个**页面的数据源(「仓库」页 + 账号页的设备码流程);「仓库」页
+   * 按用户指令移除之后,今天只有账号页在读它。**没有**顺手删掉
+   * {@link IPreferencesStore} 的成员(「先做,不删」)。
+   *
+   * ⚠️ 2026-10:这里原有一个 `snap: IPreferencesSnapshot`(仓库清单 + 当前仓库),
+   * 唯一消费者就是被移除的「仓库」页。它**必须一起删**:留着就是一个
+   * `react/no-unused-prop-types` 的新增违规(`check-lint` 的棘轮只拦上升)——
+   * 那也是「页面真没了」的机器证据之一。类型本身
+   * ({@link IPreferencesSnapshot} / {@link IPreferencesRepoEntry})与 `store` 上
+   * 那些方法**都保留**。
+   */
   readonly store: IPreferencesStore;
-  /** 当前快照(仓库清单 + 当前仓库)。 */
-  readonly snap: IPreferencesSnapshot;
   /** 界面缩放(px 字号)。`0` = 不覆盖,用宿主默认。 */
   readonly fontScale: number;
   /** 写入界面缩放。 */
@@ -823,31 +854,12 @@ export function PreferencesPageBody(props: IPreferencesPageBodyProps): ReactNode
   });
 
   switch (props.tab) {
-    case 'repositories':
-      /*
-       * ⚠️ **`DialogContent` 这一层不是装饰,它就是「边距」本身。**
-       *
-       * 上游 `ui/dialog/content.tsx:22` 的 `DialogContent` 渲染 `.dialog-content`,
-       * 而 Desktop 的整页内边距来自 `ui/_dialog.scss:241-242` 的
-       * `dialog .dialog-content { padding: var(--spacing-double) }`(20px,我们的移植面产物里
-       * 是 `.gw-prefs #preferences .dialog-content`)。**上游每个页面都自带这一层**
-       * (accounts.tsx:36、appearance.tsx:307、git.tsx:139、accessibility.tsx:23 …)。
-       *
-       * 我们「仓库」/「通知」这两页是**手写的**,原先直接返回裸内容 ⇒ 正文贴着
-       * 页签栏那条 `border-left`(实测内容左沿 1px vs 其它四页 21px,
-       * `docs/probes/preferences-rhythm-probe.mjs` 的 A1/B 组)。补上这一层之后六页
-       * 共用同一条内容左边线。**不要**改成手写 `padding`:那是第二份真源。
-       */
-      return (
-        <DialogContent>
-          <RepositoriesSection
-            store={props.store}
-            snap={props.snap}
-            fontScale={props.fontScale}
-            onFontScale={props.onFontScale}
-          />
-        </DialogContent>
-      );
+    /*
+     * ⚠️ 2026-10:`case 'repositories'` **按用户指令整页移除**(理由与「仓库管理仍在
+     * `repo-bar.tsx` 的仓库下拉里完整可达」的证据见 `TABS` 上面那一节)。
+     * 原来它渲染的是 `RepositoriesSection`(手写)+ 上游 `DialogContent` 那一层内边距;
+     * 两者一起删掉了 —— 页面没了,内边距也就没有承载体。
+     */
     case 'accounts':
       return (
         <>
@@ -919,25 +931,51 @@ export function PreferencesPageBody(props: IPreferencesPageBodyProps): ReactNode
       return <GitPage toast={props.store.toast} emailCandidates={gitAccounts} />;
     case 'appearance':
       return (
-        <Appearance
-          selectedTheme={appearance.selectedTheme}
-          onSelectedThemeChanged={appearance.onSelectedThemeChanged}
-          selectedTabSize={appearance.selectedTabSize}
-          onSelectedTabSizeChanged={appearance.onSelectedTabSizeChanged}
-          // 见 `useAppearanceWiring` 里那条注释:控件被适配层删除(产品无 worktree),
-          // 所以值是恒 `false` + 具名 no-op —— **不是**「点了没反应的开关」,
-          // 而是一个**看不见**的控件(探针 `removed` 组会断言它 0×0)。
-          alwaysShowWorktreeList={appearance.alwaysShowWorktreeList}
-          onAlwaysShowWorktreeListChanged={appearance.onAlwaysShowWorktreeListChanged}
-          selectedDateFormat={appearance.selectedDateFormat}
-          onSelectedDateFormatChanged={appearance.onSelectedDateFormatChanged}
-          selectedTimeFormat={appearance.selectedTimeFormat}
-          onSelectedTimeFormatChanged={appearance.onSelectedTimeFormatChanged}
-          selectedNumberFormat={appearance.selectedNumberFormat}
-          onSelectedNumberFormatChanged={appearance.onSelectedNumberFormatChanged}
-          preferAbsoluteDates={appearance.preferAbsoluteDates}
-          onPreferAbsoluteDatesChanged={appearance.onPreferAbsoluteDatesChanged}
-        />
+        <>
+          <Appearance
+            selectedTheme={appearance.selectedTheme}
+            onSelectedThemeChanged={appearance.onSelectedThemeChanged}
+            selectedTabSize={appearance.selectedTabSize}
+            onSelectedTabSizeChanged={appearance.onSelectedTabSizeChanged}
+            // 见 `useAppearanceWiring` 里那条注释:控件被适配层删除(产品无 worktree),
+            // 所以值是恒 `false` + 具名 no-op —— **不是**「点了没反应的开关」,
+            // 而是一个**看不见**的控件(探针 `removed` 组会断言它 0×0)。
+            alwaysShowWorktreeList={appearance.alwaysShowWorktreeList}
+            onAlwaysShowWorktreeListChanged={appearance.onAlwaysShowWorktreeListChanged}
+            selectedDateFormat={appearance.selectedDateFormat}
+            onSelectedDateFormatChanged={appearance.onSelectedDateFormatChanged}
+            selectedTimeFormat={appearance.selectedTimeFormat}
+            onSelectedTimeFormatChanged={appearance.onSelectedTimeFormatChanged}
+            selectedNumberFormat={appearance.selectedNumberFormat}
+            onSelectedNumberFormatChanged={appearance.onSelectedNumberFormatChanged}
+            preferAbsoluteDates={appearance.preferAbsoluteDates}
+            onPreferAbsoluteDatesChanged={appearance.onPreferAbsoluteDatesChanged}
+          />
+          {/*
+            ⭐ **「界面缩放」—— 2026-10 从原「仓库」页**搬到这里**(用户指令:
+            「这个 tab 里的**字号设置应该移动到【外观】**这个 tab」)。
+
+            ## 为什么是这一页、为什么在这个位置
+            - **上游没有这个控件**,所以没有「上游的位置/文案」可以照抄。核对过:
+              `references/desktop/app/src/ui/preferences/**` 里 `fontSize` / `font-size` /
+              `zoom` 的命中数是 **0**;上游 `appearance.tsx` 的三节依次是
+              Theme → Formatting → Miscellaneous(`:308-310`)。
+            - 放在上游 `Appearance` **之后**,也就是紧接它最后一节 **Miscellaneous**
+              (`appearance.tsx:272-303`,那一节装的正是不属于主题/格式的显示类偏好:
+              Diff Tab Size / Always show worktree list)⇒ 语义上它属于那一节的续篇,
+              与「外观 = 显示类偏好」的归属一致。
+            - **文案保持中文**(「界面缩放」/「字号(px,0 = 跟随宿主)」):`docs/goal-port-desktop.md`
+              §11.9 的裁决是「结构/行为照抄上游,用户可见文案本地化成中文」。
+            - **外面这层 `DialogContent` 不是装饰**:我们的控件是手写的,不像上游页面
+              自带那一层,少了它就会贴着页签栏的竖线(原「仓库」页的实测读数 1px vs 21px,
+              `docs/probes/preferences-rhythm-probe.mjs`)。它与上游 `Appearance` 自己的
+              `DialogContent` 是**兄弟**,各带各的内边距 —— 与账号页有四个 `.dialog-content`
+              是同一形态。**不要**改成手写 `padding`(那是第二份真源)。
+          */}
+          <DialogContent>
+            <FontScaleSection value={props.fontScale} onChange={props.onFontScale} />
+          </DialogContent>
+        </>
       );
     case 'notifications':
       /*
@@ -973,117 +1011,43 @@ export function PreferencesPageBody(props: IPreferencesPageBodyProps): ReactNode
 }
 
 /**
- * 「仓库」页签 —— **我们独有的**一页。
+ * 「界面缩放」——**从原「仓库」页搬来**(2026-10 用户指令)。
  *
- * 上游把仓库清单放在**左栏**(`app.tsx` 的 `<RepositoriesList>`),所以我们没有
- * 上游页面本可以整体沿用。这一页因此是手写的,但**刻意保持最小**:它只把事情委派给
- * store 的既有方法(`selectRepo` / `removeRepo` / `addRepoViaDialog`),没有任何
- * 自己实现的 git 语义。
- * @param props - `store` / `snap` / 字号(见 `IPreferencesPageBodyProps`)。
+ * ## 为什么它在这里,而不是照抄上游某处
+ *
+ * 上游 Preferences **没有**这个控件(核对过:`references/desktop/app/src/ui/preferences/**`
+ * 里 `fontSize` / `font-size` / `zoom` 命中 0)。它是我们手写设置面固有的一个偏好,
+ * 真落点在 `prefs.ts` 的 `fontScaleStore`(host 半 `prefs/get`/`prefs/set` 持久化,
+ * `.gw-root` 的 `style.fontSize` 消费它)。⇒ 「位置」只能按语义定:它是**显示类**偏好,
+ * 归「外观」,渲染在上游 `Appearance` 的 **Miscellaneous** 那一节之后。
+ *
+ * ## 为什么不并进上游 `Appearance`
+ *
+ * `ui/preferences/appearance.tsx` 是**逐字节镜像**(`verify-mirror` 要求),
+ * 给它的 prop 面加一个 `fontScale` 会同时改镜像与它的 prop 类型 ——
+ * 本项目最贵的一条纪律就是「镜像一字不改,适配放我们这层」。
+ * ⇒ 以**兄弟节点**渲染:与账号页有四个 `.dialog-content` 是同一形态。
+ *
+ * ## 输入语义(与旧实现逐字相同)
+ *
+ * `Number(...) || 0`:空串 / 非数 ⇒ `0` = 跟随宿主(`workbench.tsx:325` 在 `0` 时不写行内字号)。
+ * 经 ref 读 `onChange`:`PreferencesPageBody` 收到的 `props` 每次渲染都是新对象,
+ * 直接依赖它等于每次换一个新回调(`react-hooks/exhaustive-deps` 也会要求列出整个 `props`)。
+ * 用 ref 取最新那个,回调身份就与它无关。
+ * @param props - `value` = 当前字号(px,`0` = 跟随宿主);`onChange` = 写回。
  */
-function RepositoriesSection(props: {
-  store: IPreferencesStore;
-  snap: IPreferencesSnapshot;
-  fontScale: number;
-  onFontScale: (value: number) => void;
+function FontScaleSection(props: {
+  value: number;
+  onChange: (value: number) => void;
 }): ReactNode {
-  const { store, snap } = props;
-
-  /**
-   * 三个**具名**回调 —— 不是风格问题,是本仓 `react/jsx-no-bind` 的硬要求
-   * (`allowFunctions` 默认 false:`onClick={() => …}` 一律报警)。
-   *
-   * 依赖表只列 `store`(它在 `index.ts` 里按 session 记忆化,身份恒定)⇒
-   * 三个回调的身份跨渲染稳定,列表项也不因为父组件重渲染而拿到新 prop。
-   */
-  /*
-   * ⚠️ 2026-10 修复:这两个回调**必须收事件**,不能收 `path`。
-   *
-   * 原来是 `onClick={onSelectRepo}` 配 `(path: string) => …` ⇒ React 把
-   * **SyntheticEvent** 当 `path` 传进来,`store.selectRepo(事件对象)` /
-   * `api.removeRepo(事件对象)` 都拿不到路径 ⇒ **两个按钮点了没反应**
-   * (移除那条还会把事件对象送进 API)。`tsc` 的两条 TS2322 就是它的症状。
-   *
-   * 路径从按钮自己的 `data-repo` 读(`currentTarget` = 挂 handler 的那个元素)。
-   * 收事件而不是在 JSX 里写 `() => onSelectRepo(entry.path)`,是因为本仓的
-   * `react/jsx-no-bind` 连行内箭头都拦 —— 保持具名回调,只把签名改对。
-   */
-  const onSelectRepo = useCallback((event: MouseEvent<HTMLButtonElement>) => {
-    const path = event.currentTarget.dataset.repo;
-    if (path !== undefined) {
-      void store.selectRepo(path);
-    }
-  }, [store]);
-  const onRemoveRepo = useCallback((event: MouseEvent<HTMLButtonElement>) => {
-    const path = event.currentTarget.dataset.repo;
-    if (path !== undefined) {
-      void store.removeRepo(path);
-    }
-  }, [store]);
-  const onAddRepo = useCallback(() => { void store.addRepoViaDialog(); }, [store]);
-
-  /**
-   * 「界面缩放」输入。`Number(...) || 0` 与旧实现逐字相同(空串/非数 ⇒ `0` = 跟随宿主)。
-   *
-   * 经 ref 读 `onFontScale`:`PreferencesPageBody` 收到的 `props` 每次渲染都是新对象,
-   * 直接依赖它等于每次换一个新回调(`react-hooks/exhaustive-deps` 也会要求列出整个
-   * `props`)。用 ref 取最新那个,回调身份就与它无关。
-   */
-  const latestFontScale = useRef(props.onFontScale);
-  latestFontScale.current = props.onFontScale;
+  const latestFontScale = useRef(props.onChange);
+  latestFontScale.current = props.onChange;
   const onFontScaleInput = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     latestFontScale.current(Number(event.currentTarget.value) || 0);
   }, []);
 
   return (
     <div className="gw-settings-section">
-      <h2>仓库</h2>
-      <p className="settings-description">
-        列在这里的仓库会出现在左上角的下拉里;「当前」是正在查看的那一个。
-      </p>
-      {snap.repos.length === 0 ? (
-        <p className="settings-description">还没有仓库。</p>
-      ) : (
-        <ul className="gw-repo-prefs">
-          {snap.repos.map((entry) => (
-            <li key={entry.path} className={entry.path === snap.current ? 'on' : undefined}>
-              <button className="gw-btn" data-repo={entry.path} onClick={onSelectRepo}
-                aria-current={entry.path === snap.current}>
-                {entry.path === snap.current ? '当前:' : '切换:'}
-                {entry.name ?? entry.path}
-              </button>
-              {/*
-                ⚠️ 2026-10:这个按钮**不再**用 `gw-btn danger`(原来是红描边 + 红字)。
-                两条理由,都是可核的:
-                 1. **上游没有这种按钮**。Desktop 的 `_button.scss` 里 `destructive` 与
-                    `error-color` 的命中数都是 **0**(`grep -c` 实测),删除仓库那条路的
-                    危险信号打在**对话框正文**上(`confirm-remove-repository.tsx:59` 的
-                    `type="warning"` ⇒ `_dialog.scss:194/227`),按钮本身是普通按钮;
-                 2. **这个动作对用户数据不是破坏性的**:`repo-registry.ts:272-278` 的
-                    `remove()` 只把条目从插件仓库清单里 filter 掉(顺带清 lastFetchedAt),
-                    工作区一个字节都不动。给它红描边,等于把「从列表里去掉一项」画成
-                    「会丢东西」——而这一页只有两个动作,于是两个 移除 成了整页最扎眼的东西。
-                共享的 `.gw-btn.danger`(ConfirmDialog 那一族在用,**带**确认文案,
-                那才是真的破坏性动作)一律不动,改的只是这一处的用法。
-              */}
-              <button className="gw-btn" data-repo={entry.path} onClick={onRemoveRepo}>
-                移除
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-      <div className="gw-formrow">
-        <button className="gw-btn primary" id="gw-prefs-add-repo" onClick={onAddRepo}>
-          添加仓库…
-        </button>
-      </div>
-
-      {/*
-        界面缩放 —— 这一条**不是**上游 Preferences 里的东西(Desktop 没有它),
-        而是我们手写设置面原有的一个开关,现在跟着入口一起搬到模态里。
-        放在「仓库」这一页(我们独有的那一页),是为了不去污染上游页面的 prop。
-      */}
       <h3>界面缩放</h3>
       <p className="settings-description">
         只影响本插件的字号;宿主自己的界面不受影响。
@@ -1096,7 +1060,7 @@ function RepositoriesSection(props: {
           type="number"
           min={0}
           max={24}
-          value={props.fontScale}
+          value={props.value}
           onChange={onFontScaleInput}
         />
       </div>

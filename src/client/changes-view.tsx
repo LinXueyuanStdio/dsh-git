@@ -12,8 +12,28 @@ import { ConfirmDialog, Empty } from './bits.tsx';
 import { DiffSettings } from './diff-settings.tsx';
 import { DesktopDiff } from './desktop-diff.tsx';
 import { getPreferredExternalEditor } from './prefs.ts';
+/*
+ * **Changes 列表的右键菜单**(逐文件菜单 + 表头菜单)。
+ *
+ * 上游那一份 item 列表住在 `ui/changes/filter-changes-list.tsx:535-570`(表头)与
+ * `:657-857`(逐文件),而它**一个产品 importer 都没有**(那个文件在
+ * `check-integration` 的 unreachable 名单里)⇒ 用户右键变更项**什么都不弹**。
+ * 判定逐条抄在上面的模块里;机制复用仓库里**已有的**那一个
+ * (`context-menu-host.tsx` 的 in-browser 菜单,由 `desktop-diff.tsx` 装上)—— 见该模块文件头。
+ */
+import {
+  resolvePrimaryExternalEditor,
+  showChangesFileMenu,
+  showChangesListMenu,
+} from './changes-file-menu.ts';
 import { SplitPane, toCommit, useSplitWidth, SIDEBAR_WIDTH_STORAGE_KEY } from './history-view.tsx';
-import { networkActionInProgress } from './sync-state.ts';
+import {
+  aheadBehindOf,
+  forcePushBranchStateOf,
+  networkActionInProgress,
+  remoteNameOf,
+  tipOf,
+} from './sync-state.ts';
 import { commitPlaceholderOf, includeStateOf, prepopulateCommitSummaryOf, summaryOrPlaceholderOf } from './store.ts';
 import type { GitStore, IncludeState, Snapshot } from './store.ts';
 import { supportsLineSelection } from './file-kind.ts';
@@ -23,6 +43,9 @@ import { conflictSummaryText } from '../core/status-porcelain.ts';
 import { isEmptyOrWhitespace } from '../core/desktop/lib/is-empty-or-whitespace.ts';
 import { createPathDisplayState } from '../core/desktop/lib/path-display.ts';
 import { Checkbox, CheckboxValue } from '../core/desktop/ui/lib/checkbox.tsx';
+import { ForcePushBranchState } from '../core/desktop/lib/rebase.ts';
+import { TipState } from '../core/desktop/models/tip.ts';
+import { formatNumber } from '../core/desktop/lib/format-number.ts';
 import { HiddenChangesWarning, isCommittingFileHiddenByFilter } from './hidden-changes-warning.tsx';
 import type { IFileListFilterState } from '../core/desktop/lib/app-state.ts';
 // 「发布仓库」缺什么的**唯一文案源** —— 顶栏 `toolbar.tsx` 的同一支按钮用逐字同一份,
@@ -91,14 +114,20 @@ export function ChangesView(props: {
   const [confirmDiscardLines, setConfirmDiscardLines] = useState<{ file: string; spec: LineSelectionSpec } | null>(null);
 
   /**
-   * 顶部那颗「全部暂存 / 取消暂存」与行尾两颗单文件按钮的**具名回调**。
+   * 行尾两颗单文件按钮(暂存 / 取消暂存 / 丢弃)的**具名回调**。
    *
    * **为什么不能写成 JSX 内联箭头**:`react/jsx-no-bind`(`scripts/lint-baseline.json`
    * 是**只拦上升**的棘轮)会把组件作用域里的内联箭头记成新增违规。
    * 这几个回调的依赖只有 `store`(引用稳定),所以身份稳定,不会让下游行白白重渲染。
+   *
+   * ⚠️ 2026-10:**顶部那两颗「全部暂存 / 取消暂存」已按用户指令移除**
+   * (上游 `ui/changes/**` 与 `ui/diff/**` 里 `Staged|staged|Stage |Unstage` 命中 **0**,
+   * 见 `docs/goal-port-desktop.md` §11.4 ⇒ 那两颗是我们发明的入口,不是抄漏)。
+   * 与之配套的 `onStageAll` / `onUnstageAll` 两个 `useCallback` 一起删掉了(它们只服务那两颗按钮);
+   * **`store.stageSelected` / `store.unstageSelected` 一个字没删**(「先做,不删」),
+   * 只是今天没有产品调用点了(探针仍会直接调 `store` 的那两条,见
+   * `docs/probes/changes-discard-lines-probe.mjs` 的 D 组)。
    */
-  const onStageAll = useCallback(() => { void store.stageSelected(); }, [store]);
-  const onUnstageAll = useCallback(() => { void store.unstageSelected(); }, [store]);
   /**
    * `FileRow` 那三颗行尾按钮的**行内**回调工厂。
    *
@@ -110,6 +139,82 @@ export function ChangesView(props: {
   const stageRow = useCallback((path: string) => { void store.stageFile(path); }, [store]);
   const unstageRow = useCallback((path: string) => { void store.unstageFile(path); }, [store]);
   const discardRow = useCallback((file: ChangedFile) => { setConfirmDiscard([file]); }, []);
+
+  /**
+   * 外部编辑器清单**早加载**。
+   *
+   * ⚠️ 为什么必须有这一条:`store.loadExternalApps()` 此前**只有空态卡**
+   * (`NoChanges`,本文件 `:1906`)调 —— 而那个组件只在 `files.length === 0` 时渲染。
+   * 于是「有变更」的时候 `snap.externalApps` 恒 `[]`,右键菜单里
+   * 「在 <编辑器> 中打开」就永远回落到上游的兜底文案 `Open in External Editor`
+   * (`ui/lib/context-menu.ts:11-13`)。上游是在应用启动时加载一次
+   * (`app-store` 的 `_initializeExternalEditors`),与「有没有变更」无关。
+   *
+   * 幂等:`store.ts:2217` 开头 `if (this.state.externalApps.length > 0) { return; }`
+   * ⇒ 与空态卡那一条同时存在也**只发一条** `system/apps` 请求。
+   */
+  useEffect(() => { void store.loadExternalApps(); }, [store]);
+
+  /**
+   * 右键菜单的**动作面** —— 与行尾三颗图标、表头勾选框是**同一批真动作**
+   * (没有为菜单新开第二条路):
+   *  · `discard` ⇒ 走**同一个**确认框状态(与行尾垃圾桶同一条路);
+   *  · `setFilesIncluded` ⇒ `store.setFilesIncluded`(与表头三态勾选框同一个,只改客户端纳入状态,不发 git 命令);
+   *  · `revealInFileManager` / `openInExternalEditor` ⇒ `store.*`(`system/reveal` / `system/open-in-app`);
+   *  · `copyText` ⇒ `navigator.clipboard`(`bits.tsx:799` 的 SHA 胶囊用的是同一个 API)。
+   *
+   * **刻意不传** `appendIgnoreFile` / `appendIgnorePattern` / `stashAll`:
+   * 宿主没有那两条路由(见 `changes-file-menu.ts` 的 `GITIGNORE_ROUTE_AVAILABLE` /
+   * `STASH_ROUTE_AVAILABLE`),缺动作 ⇒ 那几项**在列但诚实禁用**(不是假装能点)。
+   */
+  const menuActions = useMemo(() => ({
+    discard: (targets: readonly ChangedFile[]) => { setConfirmDiscard([...targets]); },
+    setFilesIncluded: (paths: readonly string[], included: boolean) => { store.setFilesIncluded(paths, included); },
+    revealInFileManager: (absolutePath: string) => { void store.revealInFileManager(absolutePath); },
+    openInExternalEditor: (absolutePath: string, appId?: string) => {
+      void store.openInExternalEditor(absolutePath, appId);
+    },
+    copyText: (text: string) => { void navigator.clipboard?.writeText(text); },
+  }), [store]);
+
+  /** 逐文件右键 ⇒ 上游 `onItemContextMenu`(`filter-changes-list.tsx:839-857`)。 */
+  const rowMenu = useCallback((event: React.MouseEvent, file: ChangedFile) => {
+    // 上游 `event.preventDefault()`(`:849`)+ 浏览器里还要挡住原生菜单
+    // (`context-menu-host.tsx` 的文件头第 2 条:`desktop-diff.tsx` 的容器是加**捕获阶段**
+    // 处理器的;本面在冒泡阶段 preventDefault 就够 —— 原生菜单在事件到达目标后、
+    // 没有 preventDefault 时才弹,命中行冒泡到这里就已被挡住)。
+    event.preventDefault();
+    const current = store.snapshot();
+    void showChangesFileMenu({
+      repositoryPath: current.current,
+      file,
+      selectedPaths: current.selectedFiles,
+      files: current.status?.files ?? [],
+      externalEditor: resolvePrimaryExternalEditor(current.externalApps, getPreferredExternalEditor()),
+      rebaseConflict: current.status?.operation === 'rebase',
+      committing: current.busy === 'commit',
+    }, menuActions);
+  }, [store, menuActions]);
+
+  /** 表头右键 ⇒ 上游 `onContextMenu`(`filter-changes-list.tsx:535-570`)。 */
+  const headerMenu = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    const current = store.snapshot();
+    const currentFiles = current.status?.files ?? [];
+    void showChangesListMenu({
+      files: currentFiles,
+      branch: current.status === null || current.status.detached === true || current.status.unborn === true
+        ? null
+        : current.status.branch,
+      hasConflictedFiles: currentFiles.some((f) => f.conflicted === true),
+      conflictState: (current.status?.operation ?? null) !== null,
+      committing: current.busy === 'commit',
+      rebaseConflict: current.status?.operation === 'rebase',
+      hasStash: false, // 没有 stash 路由 ⇒ 恒 false(标签因此恒不带省略号,与上游 `:563` 同形)
+    }, {
+      discardAll: (targets: readonly ChangedFile[]) => { setConfirmDiscard([...targets]); },
+    });
+  }, [store]);
   const onDiscardLinesSelected = useCallback(
     (file: string, spec: LineSelectionSpec) => { setConfirmDiscardLines({ file, spec }); },
     [],
@@ -301,8 +406,17 @@ export function ChangesView(props: {
             表头,照 Desktop 的变更列表(`ui/changes/filter-changes-list.tsx:1235-1311`):
             第一行是**组合控件**[筛选按钮][输入框];第二行是**纳入三态复选框** + 计数文案。
             计数文案的语义照 Desktop(`:1263-1266`):筛选后可见数 ≠ 总数时显示「V of N」。
+
+            两层右键菜单都挂在这一面(上游同一分工):
+             · `.gw-chead`(这里)⇒ 上游 `renderFilterRow` 的 `.header.filter-field-row`
+               (`filter-changes-list.tsx:1234-1243`)的 `onContextMenu`,两项:丢弃全部 / 贮藏全部;
+             · 每一行(`FileRow`)⇒ 上游 `onItemContextMenu`(`:839-857`),11 项。
+            `data-gw-ctx` 是**探针标记**(ASCII 唯一字面量):
+            `docs/probes/changes-file-menu-probe.mjs` 拿它做「接线在场」的**同帧阳性对照**
+            (缺席读数必须与它一起取),同时它是产物里「这段代码真的进了包」的可 grep 证据
+            —— 中文标签在 esbuild 的 `charset: 'ascii'` 下会被转义成 `\\uXXXX`,裸串 grep 会得到假阴性。
           */}
-          <div className="gw-chead">
+          <div className="gw-chead" onContextMenu={headerMenu} data-gw-ctx="list">
             <div className="gw-filter-box">
               <button className={`gw-filter-btn${activeOptions.length > 0 ? ' active' : ''}`}
                 title={activeOptions.length > 0 ? `筛选选项(${activeOptions.length} 项生效)` : '筛选选项'}
@@ -359,37 +473,26 @@ export function ChangesView(props: {
                   {status.conflictedCount} 个冲突
                 </span>
               )}
-
               {/*
-                ⭐ **「全部暂存 / 取消暂存」入口**(2026-10 接线;审计第 4 项)。
-                在这之前 `store.stageSelected` / `store.unstageSelected` 是**外部 0 + 内部 0**
-                调用点的真死方法(`store.ts:1073/1088`)⇒ Changes 列表**没有任何「暂存」入口**,
-                用户在界面上根本没法把改动写进索引(只有提交那一步会写)。
+                ⚠️ 2026-10:**这里原先有「全部暂存 / 取消暂存」两颗按钮,已按用户指令移除**
+                (用户原话:「Changes 页面里左边列表怎么多了【全部暂存】【取消暂存】这两个按钮?
+                原来的 `references/desktop` 是没有这两个按钮的」)。
 
-                落点与范围(两条都要说清,否则会以为它是第二份真源):
-                 · `stageSelected()` = 对 `targetedFiles()`(有选区就是选区,否则**全部变更文件**)
-                   打一条 `git add -- <paths>`;`unstageSelected()` = 有选区就是选区,
-                   否则**索引里真的有内容的那些文件**,打 `git reset -- <paths>`;
-                 · 它们**立刻写索引**,与上面那个三态勾选框(`includeState`,提交才写索引)
-                   是两条并存的语义 —— 两条都留(用户裁决「先做,不删」),差别见
-                   `store.stageSelected` 的 JSDoc 里那张表。
-                按钮的 disabled 依据是 git 事实(有没有未暂存/已暂存的文件),
-                不是勾选状态 —— 否则会出现「有文件可暂存但按钮灰着」的假禁用。
+                上游确实没有:审计 `docs/goal-port-desktop.md` §11.4 的机器证据是
+                ```
+                grep -rn "Staged\|staged\|Stage \|Unstage" \
+                  references/desktop/app/src/ui/changes references/desktop/app/src/ui/diff --include='*.tsx'
+                → 0 命中
+                ```
+                上游 Changes 列表行只有 **纳入勾选框 + 路径 + 状态 octicon**
+                (`ui/changes/changed-file.tsx:80-118`),列表头只有「N changed files」+ 三态全选框,
+                **没有任何 stage/unstage 动作** —— 索引只在 `createCommit` 那一刻被 materialize。
+
+                ⇒ 那两颗按钮是审计第 4 项接线时**我们发明的入口**,不是抄漏;
+                **移除的是按钮**,`store.stageSelected` / `store.unstageSelected` 一个字没删
+                (「先做,不删」)。行尾的单文件「暂存 / 取消暂存」图标**保留**
+                (用户只点名了顶部这两颗)。
               */}
-              <span className="gw-stagebar" style={{ display: 'inline-flex', gap: 4, marginLeft: 8 }}>
-                <button className="gw-btn ghost" style={{ padding: '0 6px', fontSize: 11 }}
-                  disabled={files.filter((f) => f.unstaged !== undefined).length === 0}
-                  title="把选中的文件(没有选中就是全部变更文件)写进索引:git add"
-                  onClick={onStageAll}>
-                  全部暂存
-                </button>
-                <button className="gw-btn ghost" style={{ padding: '0 6px', fontSize: 11 }}
-                  disabled={files.filter((f) => f.staged !== undefined).length === 0}
-                  title="把选中的文件(没有选中就是所有已暂存文件)从索引里撤出:git reset"
-                  onClick={onUnstageAll}>
-                  取消暂存
-                </button>
-              </span>
             </div>
           </div>
 
@@ -410,6 +513,7 @@ export function ChangesView(props: {
                 onDiscard={discardRow}
                 onStage={stageRow}
                 onUnstage={unstageRow}
+                onContextMenu={rowMenu}
               />
             ))}
           </div>
@@ -471,7 +575,19 @@ export function ChangesView(props: {
       {confirmDiscard !== null && (
         <ConfirmDialog
           title={confirmDiscard.some((f) => f.untracked === true) ? '删除未跟踪文件?' : '丢弃这些改动?'}
-          body={`${confirmDiscard.map((f) => f.path).join('\n')}\n\n丢弃后无法从 dsh-git 恢复(已提交的内容不受影响)。`}
+          body={
+            /*
+             * 「全部」那一档说清是全部:表头右键的 `Discard All Changes…`
+             * (上游 `filter-changes-list.tsx:556-561`)与行尾垃圾桶共用这一个确认框状态,
+             * 而上游那个弹窗有一个 `discardingAllChanges` 变体
+             * (`ui/discard-changes/confirm-discard-changes-dialog.tsx`)。
+             * 我们按「确认集合是否覆盖了整个变更集」分流 —— 这在两条入口上都是**真话**
+             * (行尾垃圾桶只带一个文件,所以只有回落到逐条列举那一边)。
+             */
+            confirmDiscard.length === files.length && files.length > 1
+              ? `这会丢弃全部 ${files.length} 个文件的改动。\n\n丢弃后无法从 dsh-git 恢复(已提交的内容不受影响)。`
+              : `${confirmDiscard.map((f) => f.path).join('\n')}\n\n丢弃后无法从 dsh-git 恢复(已提交的内容不受影响)。`
+          }
           confirmText="丢弃"
           danger
           onDone={(okay) => {
@@ -574,6 +690,20 @@ function FileRow(props: {
   onStage: (path: string) => void;
   /** **单文件取消暂存** —— `store.unstageFile`(`git reset -- <path>`)。 */
   onUnstage: (path: string) => void;
+  /**
+   * **行右键** —— 上游 `ui/changes/filter-changes-list.tsx:839-857` 的
+   * `onItemContextMenu`(`list.tsx:1218` → `list-row.tsx:229-230` 的
+   * `onContextMenu(rowIndex, e)` 那一层)。
+   *
+   * 与 `onDiscard` / `onStage` / `onUnstage` 同样是「组件把 `file` 自己补上」的签名:
+   * 调用点可以不写内联箭头(`onContextMenu={rowMenu}`),行内不出现 `react/jsx-no-bind`
+   * 会记账的箭头函数。
+   *
+   * 行元素上还有一个**探针标记** `data-gw-ctx="file"`(表头那个是 `"list"`,理由写在
+   * `.gw-chead` 上方):探针用它 + 菜单层在不在,在**同一帧**里一起读 ——
+   * 「菜单缺席」的读数必须有这一半在场陪绑,否则分不开「没接线」与「整张表没渲染」。
+   */
+  onContextMenu: (event: React.MouseEvent, file: ChangedFile) => void;
 }): ReactNode {
   const { file, include } = props;
   /**
@@ -582,7 +712,7 @@ function FileRow(props: {
    * (JSX 上挂具名引用),不能写 `onClick={(event) => …}`。
    * 三个回调都只是「停冒泡 + 转发给 props 上的那个动词」,没有别的逻辑。
    */
-  const { onDiscard, onStage, onUnstage } = props;
+  const { onDiscard, onStage, onUnstage, onContextMenu } = props;
   const discardSelf = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
     onDiscard(file);
@@ -595,6 +725,14 @@ function FileRow(props: {
     event.stopPropagation();
     onUnstage(file.path);
   }, [onUnstage, file.path]);
+  /**
+   * 行右键。**不 stopPropagation**:表头那一层的 `onContextMenu` 挂在 `.gw-chead` 上,
+   * 而行不在它里面(行住在 `.gw-files`),所以冒泡不会把两级菜单同时打开
+   * (上游的层级也一样:行菜单挂在 `list-row` 上、表头菜单挂在 `.filter-field-row` 上)。
+   */
+  const contextMenuSelf = useCallback((event: React.MouseEvent) => {
+    onContextMenu(event, file);
+  }, [onContextMenu, file]);
   // 状态图标取**工作区**那一侧(没有就用索引侧),与 Desktop 的文件行同一口径。
   const letter = file.conflicted === true ? 'U' : (file.unstaged ?? file.staged) ?? 'M';
   const meta = STATUS_META[letter] ?? { icon: 'diff-modified', kind: 'modified', label: '已修改' };
@@ -609,6 +747,7 @@ function FileRow(props: {
       aria-selected={props.selected} tabIndex={props.focused ? 0 : -1}
       aria-label={`${file.path} ${meta.label} ${includeLabel}${file.conflicted === true ? ' (有冲突)' : ''}`}
       data-path={file.path} data-included={include}
+      onContextMenu={contextMenuSelf} data-gw-ctx="file"
       onClick={props.onSelect} title={shown}>
       {/*
         勾选控件**是上游的 `<Checkbox>`**(`ui/lib/checkbox.tsx`,与上游一致;`changed-file.tsx:78-90`
@@ -1832,6 +1971,24 @@ function CommitBox(props: {
 }
 
 /**
+ * 空态建议卡的**稳定标识**(探针按它断言在场/缺席,渲染成 `data-gw-suggested`)。
+ *
+ * 取值与上游 `ui/changes/no-changes.tsx` 的分支一一对应:
+ * `publish-repo`(`:453`)`publish-branch`(`:491`)`pull`(`:540`)`push`(`:592`)
+ * 四个主卡 + `open-editor`(`:305`)`reveal`(`:266`)`view-github`(`:280`)三个次卡。
+ * 上游没有这个键 —— 它的「哪张卡」是由 `renderActions()` 的调用链决定的;
+ * 我们把它显式化,只为了让**判据**能点名一张卡。
+ */
+type SuggestedKey =
+  | 'publish-repo'
+  | 'publish-branch'
+  | 'pull'
+  | 'push'
+  | 'open-editor'
+  | 'reveal'
+  | 'view-github';
+
+/**
  * 「没有本地变更」空态,照 GitHub Desktop 的 `ui/changes/no-changes.tsx`。
  *
  * Desktop 的结构(`no-changes.tsx:763-785`):
@@ -1841,11 +1998,38 @@ function CommitBox(props: {
  * **标题句** + 描述 + 一个按钮,按钮文字是菜单项标签。
  *
  * 建议动作(Desktop 的 `renderActions`,`:735-747`):
- *  - 主组:有 stash 就看 stash,否则按远端状态给「发布仓库 / 发布分支」;
+ *  - 主组:有 stash 就看 stash,否则 `renderRemoteAction()` 按远端状态给
+ *    **发布仓库 / 发布分支 / 拉取 N 个提交 / 推送本地提交** 四张卡之一(也可能一张都不给);
  *  - 次组:`Open in <编辑器>` / `Show in Finder` / `View on GitHub`。
  *
- * 我们的差异:编辑器列表由 host 探测本机 `.app` 得到(Desktop 读
- * `applications(path)`);没有 stash UI,所以主组只保留发布相关。
+ * ## 为什么这是一个**手写**组件,而不是渲染镜像的那一个
+ *
+ * 镜像 `src/core/desktop/ui/changes/no-changes.tsx`(**785 行,`cmp` 无输出**)在树里,
+ * 但今天**零 importer**。它**不能**被直接渲染,两半都缺:
+ *
+ * 1. **它要的 prop 里有两样我们没有**:`appMenu: IMenu`(Electron 应用菜单)与
+ *    `repositoryState: IRepositoryState`(完整 `IBranchesState`/`IChangesState`)。
+ *    前者更致命:`renderMenuBackedAction()`(`:240-264`)在 `getMenuItemInfo(id)`
+ *    为 `undefined` 时**直接 `return null`** ⇒ 没有 `appMenu` 时**四张卡一张都不出现**。
+ * 2. **它的按钮全部是「菜单代理」**:`MenuBackedSuggestedAction`(`:94-102`)点下去执行
+ *    `executeMenuItemById(menuItemId)`,而我们树里那个导出是
+ *    `ui/main-process-proxy.ts:66` 的 `sendProxy('execute-menu-item-by-id', 1)`
+ *    —— 浏览器半没有主进程,它是 **no-op**。照抄渲染 = **四张看得见、点不动的卡**。
+ *
+ * ⇒ 我们保留手写实现(与 `toolbar.tsx` / `history-view.tsx` 同一条路线),
+ * 但**判定级联逐支照上游**:见下面 `primary` 那一段的逐行注释。
+ *
+ * ## 我们与上游的**诚实差异**(逐条;不在 UI 里假装)
+ *
+ * | 项 | 上游 | 我们 |
+ * |---|---|---|
+ * | 卡的按钮怎么生效 | 执行应用菜单项(`executeMenuItemById`) | 直接调 `store.*` 的真动作(`runSyncAction` / `openInExternalEditor` / `revealInFileManager` / `window.open`) |
+ * | 每张卡的「菜单/快捷键」提示行 | `renderDiscoverabilityElements()`(`:220-229`)从菜单项取「File menu or ⇧⌘P」 | **没有应用菜单、也没有快捷键**,所以只有主组那三张卡给出**真实的**替代入口(顶栏同步段);次组三张卡**不给提示行** —— 编一条不存在的菜单路径就是撒谎 |
+ * | 「Create a Pull Request」卡 | `:386-393`(要 `currentPullRequest` + `defaultBranch`) | **诚实缺席**(快照里没有这两样数据) |
+ * | 「View your stashed changes」卡 | `:398-448` | **诚实缺席**(没有 stash UI,与顶栏同一条已登记取舍) |
+ * | 推送条件的 `tagsToPush` 一半 | `:379-384` | **缺席**(宿主没有「未推送的标签」路由;不用 `tagCount` 冒充) |
+ * | 编辑器清单 | `applications(path)` 读本机 `.app` | 宿主 `system/apps` 探测(`routes.ts:400`);**改选它的写侧今天 0 调用点**(`prefs.ts:162`) |
+ * | 插图 `paper-stack.svg` | `:54` 的 `encodePathAsUrl` | 不渲染(我们没有该静态资源的浏览器侧分发;缺的是资产,不是逻辑) |
  */
 function NoChanges(props: { store: GitStore; snap: Snapshot }): ReactNode {
   const { store, snap } = props;
@@ -1864,44 +2048,201 @@ function NoChanges(props: { store: GitStore; snap: Snapshot }): ReactNode {
    * 没设过时回落到探测到的第一个(与上游 `integrations.tsx:78-85` 的「选中第一个」一致)。
    */
   const preferredEditorId = getPreferredExternalEditor();
-  const primaryEditor = editors.find((app) => app.id === preferredEditorId) ?? editors[0];
-  const remote = snap.repos.find((r) => r.path === repoPath)?.remote ?? null;
+  /*
+   * 主编辑器与**行右键菜单**读同一份投影(`resolvePrimaryExternalEditor`)——
+   * 两处各写一遍这三行必然漂移(改了空态卡、忘了菜单)。
+   */
+  const primaryEditor = resolvePrimaryExternalEditor(snap.externalApps, preferredEditorId);
   const branch = snap.status?.branch ?? '';
-  const upstream = snap.sync?.upstream ?? null;
-  // 主组:无远端 → 发布仓库;有远端但无 upstream → 发布分支
-  const publishRepo = remote === null;
-  const publishBranch = !publishRepo && upstream === null;
+  /** GitHub 的 `owner/repo`(`RepoEntry.remote`,`core/types.ts:186`);无 GitHub 远端为 null。 */
+  const gitHubRepo = snap.repos.find((r) => r.path === repoPath)?.remote ?? null;
 
-  const action = (key: string, title: string, button: string, onClick: () => void, description?: string): ReactNode => (
-    <div className="gw-suggested" key={key}>
+  /*
+   * ==========================================================================
+   * 主组(primary)的**判定级联** —— 逐支照上游 `ui/changes/no-changes.tsx:347-396`
+   * ==========================================================================
+   *
+   * 上游那一支读的是 `this.props.repositoryState`
+   * (`{ remote, aheadBehind, branchesState, tagsToPush }`,`:348-350`),
+   * 由 `IRepositoryState` 携带(`lib/app-state.ts`)。我们的快照里**没有** `IRepositoryState`
+   * (`Snapshot` 是扁平投影,见 `store.ts` 的 `interface Snapshot`),所以**不在这里重新推导**
+   * 「怎么从 git 状态算出 ahead/behind」—— 那件事已经有一处真源:`sync-state.ts` 的
+   * 四个投影函数,它们是上游 `ui/app.tsx:3620-3665` 的镜像,顶栏同步段
+   * (`repo-bar.tsx` 的 `syncPresentation`)用的也是同一批输入。
+   *
+   * 每一支的**上游行号**逐条注在下面;这条 `if / else if` 链的**次序就是上游的次序**
+   * (次序本身是判据:behind 优先于 ahead,见 N04)。
+   */
+  const tip = tipOf(snap);
+  const remotes = snap.sync?.remotes ?? [];
+  const upstream = snap.sync?.upstream ?? null;
+  const aheadBehind = aheadBehindOf(snap);
+  const ahead = aheadBehind?.ahead ?? 0;
+  const behind = aheadBehind?.behind ?? 0;
+  const forcePushState = forcePushBranchStateOf(snap);
+  const remoteName = remoteNameOf(snap);
+  /**
+   * **未推送的标签身份清单**(`store.ts` 的 `Snapshot.tagsToPush`;上游 `IRepositoryState.tagsToPush`,与
+   * `no-changes.tsx:348` 解构出来的那个同义)。它只进推送卡的条件与文案 ——
+   * 「有没有标签可推」不是这张卡的**唯一**理由(有本地提交也一样给卡)。
+   */
+  const tagsToPush = snap.tagsToPush;
+
+  /** 主组要渲染哪一支(上游那一串 `if` 的结果)。`null` = 上游也不渲染任何主卡。 */
+  let primary: SuggestedKey | null = null;
+  if (tip.kind === TipState.Valid) {
+    // 上游 `:352-354`:`if (tip.kind !== TipState.Valid) return null`
+    if (remotes.length === 0) {
+      primary = 'publish-repo'; // 上游 `:356-358`
+    } else if (upstream === null) {
+      primary = 'publish-branch'; // 上游 `:361-363`
+    } else if (forcePushState === ForcePushBranchState.Recommended) {
+      /*
+       * 上游 `:365-373`:刚 rebase / amend 过(分叉且是我们自己重写出来的)时
+       * **刻意不渲染主卡** —— 原注释写明了理由(此时按钮的默认行为是拉取,会把人带进
+       * 更混乱的历史)。这是一条**故意的缺席**,N09 用真实 amend 路径写出的
+       * `forcePushBranches` 验它。
+       */
+      primary = null;
+    } else if (behind > 0) {
+      primary = 'pull'; // 上游 `:375-377`
+    } else if (ahead > 0 || tagsToPush.length > 0) {
+      /*
+       * 上游 `:379-384`:`aheadBehind.ahead > 0 || (tagsToPush !== null && tagsToPush.length > 0)`。
+       *
+       * **两半都在**:`snap.tagsToPush`(快照字段 `string[]`,由 `refreshTagsToPush()`
+       * 走宿主 `tag-unpushed` 路由填)与上游 `IRepositoryState.tagsToPush` 同义 ——
+       * 都是「**身份清单**,不是个数」。
+       * ⚠️ **刷新时机今天不由我们决定**:`store.ts` 的 `setTab()` 只在切到 **History**
+       * 页签时问一次宿主(那是 `Delete tag <name>` 那条线的落点),`refreshAll()` **不**含它。
+       * ⇒ 用户一次都没打开过 History 时,这个数组是 `[]`,推送卡退回「只看 `ahead`」那一半
+       * (只会**少**一档,不会**错**)。这是「数据源的刷新时机」问题,记在
+       * `docs/no-changes-suggestions-inventory.md` §4 与探针文件头。
+       * ⚠️ 别用 `snap.sync.tagCount`:那是**本地标签总数**,与「未推送」无关
+       * (`tag-unpushed` 的 JSDoc 也写了这条边界)。
+       * ⚠️ 旧宿主没有那条路由时,这个数组保持 `[]`(= 优雅降级成改前那一半),
+       * **不会**把它读成「没有标签可推」之外的任何东西。
+       */
+      primary = 'push';
+    }
+    /*
+     * 上游 `:386-393` 的最后一支是 `Create a Pull Request`(条件:`isGitHub &&
+     * currentPullRequest === null && !isDefaultBranch`)。我们快照里**没有**
+     * `currentPullRequest`,也**没有** `defaultBranch`(PR 数据源是缺的
+     * `pull-request-store.ts` / `branchesState.defaultBranch`)⇒ 这一支**诚实缺席**:
+     * 不拿「非默认分支」猜一个 PR 卡出来(猜错会让用户以为 PR 已存在)。
+     */
+  }
+
+  const action = (
+    key: SuggestedKey,
+    title: string,
+    button: string,
+    onClick: () => void,
+    description?: string,
+    hint?: string,
+  ): ReactNode => (
+    /*
+     * `data-gw-suggested` 是**探针取卡片的稳定标识**(与 `hidden-changes-warning.tsx`
+     * 的 `data-gw-*`、本文件 `:690-700` 的 `data-gw-include-probe` 同一做法):
+     * 建议卡是「只由谓词决定出现与否」的 UI —— 谓词一旦成常量,界面**不报错**,
+     * 只是永远不出现。探针必须能**按名字**断言在场/缺席,而不是数 `.gw-suggested` 的个数。
+     */
+    <div className="gw-suggested" key={key} data-gw-suggested={key}>
       <div className="text">
         <h2>{title}</h2>
         {description !== undefined && <p className="desc">{description}</p>}
+        {hint !== undefined && <p className="desc" data-gw-suggested-hint={key}>{hint}</p>}
       </div>
       <button className="gw-btn" onClick={onClick}>{button}</button>
     </div>
   );
 
+  /** 主卡:上游 `renderRemoteAction()` 的五个可达分支 + 三个「无主卡」分支。 */
+  const primaryCard = (): ReactNode => {
+    switch (primary) {
+      case 'publish-repo':
+        return action('publish-repo',
+          '把这个仓库发布到 GitHub',
+          '发布仓库',
+          () => store.toast(PUBLISH_REPOSITORY_UNAVAILABLE),
+          '还没有配置任何远端。',
+          '顶栏的同步段也一直可以发布。');
+      case 'publish-branch':
+        return action('publish-branch',
+          `把 ${branch} 分支发布到 ${remoteName ?? '远端'}`,
+          `发布 ${remoteName ?? '分支'}`,
+          () => { void store.runSyncAction('push'); },
+          '这个分支还没有跟踪关系,推送后会自动建立。',
+          '顶栏的同步按钮也一直可以发布。');
+      case 'pull':
+        return action('pull',
+          `拉取 ${remoteName ?? '远端'} 上的 ${formatNumber(behind)} 个提交`,
+          `拉取 ${remoteName ?? '远端'}`,
+          () => { void store.runSyncAction('pull'); },
+          `当前分支(${branch})在 ${remoteName ?? '远端'} 上有 ${formatNumber(behind)} 个提交是本地没有的。`,
+          '有远端改动时,顶栏的同步按钮一直可用。');
+      case 'push': {
+        /*
+         * 标题/描述按上游 `renderPushBranchAction`(`no-changes.tsx:608-644`)**合并**两样:
+         * 有提交就写「本地提交」、有标签就写「标签」,两样都有时用「和」连起来
+         * (上游 `itemsToPushTypes.join(' and ')` / `itemsToPushDescriptions.join(' and ')`)。
+         * 标题里的**类型**与描述里的**条数**分开算 —— 上游标题恒为复数名词
+         * (`Push commits to the origin remote`),条数只在描述里出现。
+         */
+        const kinds: string[] = [];
+        const counts: string[] = [];
+        if (ahead > 0) {
+          kinds.push('本地提交');
+          counts.push(`${formatNumber(ahead)} 个本地提交`);
+        }
+        if (tagsToPush.length > 0) {
+          kinds.push('标签');
+          counts.push(`${formatNumber(tagsToPush.length)} 个标签`);
+        }
+        const remote = remoteName ?? '远端';
+        return action('push',
+          `把${kinds.join('和')}推送到 ${remote} 远端`,
+          `推送 ${remote}`,
+          () => { void store.runSyncAction('push'); },
+          `你有 ${counts.join('和')}等待推送到 ${remote}。`,
+          '有本地提交待推送时,顶栏的同步按钮一直可用。');
+      }
+      default:
+        return null;
+    }
+  };
+
   return (
     <div className="gw-interstitial">
+      {/*
+        判定输入 / 判定结果 / DOM 三者必须一致的**机器可查读数**(探针用;`hidden` 不占布局)。
+        为什么要有它:这一组卡片是本项目最怕的那类缺陷的现场 ——「只由谓词决定出现与否」,
+        谓词成了常量时界面不会报错,只会永远不出现。把四条真输入与**最终那支**一起暴露出来,
+        一条 DevTools 表达式就能同时读到「输入 / 判定 / DOM 是否真的在」。
+      */}
+      <div hidden={true} data-gw-no-changes-probe={JSON.stringify({
+        tip: tip.kind,
+        remotes,
+        upstream,
+        ahead,
+        behind,
+        forcePush: ForcePushBranchState[forcePushState],
+        remoteName,
+        gitHubRepo,
+        /* 未推送的标签**身份清单**(不是个数):推送卡的另一半条件就是它。 */
+        tagsToPush,
+        primary,
+      })} />
       <div className="content">
         <div className="interstitial-header">
           <h1>没有本地变更</h1>
           <p>这个仓库没有未提交的改动。下面是几个可以接着做的事。</p>
         </div>
 
-        {(publishRepo || publishBranch) && (
+        {primary !== null && (
           <div className="gw-suggested-group primary">
-            {publishRepo && action('publish-repo',
-              '把这个仓库发布到 GitHub',
-              '发布仓库',
-              () => store.toast(PUBLISH_REPOSITORY_UNAVAILABLE),
-              '还没有配置任何远端。')}
-            {publishBranch && action('publish-branch',
-              `把 ${branch} 分支发布到远端`,
-              '发布分支',
-              () => { void store.runSyncAction('push'); },
-              '这个分支还没有跟踪关系,推送后会自动建立。')}
+            {primaryCard()}
           </div>
         )}
 
@@ -1915,10 +2256,10 @@ function NoChanges(props: { store: GitStore; snap: Snapshot }): ReactNode {
             `在 ${fileManager} 中查看仓库文件`,
             isMac ? '在 Finder 中显示' : '在文件管理器中显示',
             () => { void store.revealInFileManager(repoPath); })}
-          {remote !== null && action('view-github',
+          {gitHubRepo !== null && action('view-github',
             '在浏览器中打开这个仓库的 GitHub 页面',
             '在 GitHub 上查看',
-            () => { window.open(`https://github.com/${remote}`, '_blank', 'noopener'); })}
+            () => { window.open(`https://github.com/${gitHubRepo}`, '_blank', 'noopener'); })}
         </div>
       </div>
     </div>

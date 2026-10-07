@@ -264,6 +264,40 @@ export function parseTags(out: string): string[] {
   return out.split('\n').map((s) => s.trim()).filter((s) => s !== '');
 }
 
+/**
+ * `git push --dry-run --porcelain` 的输出 → 「远端还没有的那些标签」。
+ *
+ * **逐字搬运上游** `references/desktop/app/src/lib/git/tag.ts:118-137`
+ * (`fetchTagsToPush` 的解析段),只把 `let currentLine = 1; while (…)` 那条下标循环
+ * 换成 `for`,其余(从第 2 行开始、遇 `Done` 停、按 `\t` 切三段、只认
+ * `parts[0] === '*' && parts[2] === '[new tag]'`、取 `parts[1].split(':')[0]`
+ * 并剥 `refs/tags/` 前缀)**一字不改**。
+ *
+ * 为什么从**第 2 行**开始:porcelain 的第 1 行永远是 `To <url-or-path>`
+ * (实测输出形状 —— 见 `unpushedTagsArgv` 的注释);从第 1 行开始扫时
+ * `parts[2]` 恒 undefined ⇒ 幸运地不误报,但那是**巧合**而不是判据,
+ * 所以照上游保留这个偏移。
+ *
+ * 已推送的标签在同一份输出里是 `=\trefs/tags/v1:…\t[up to date]`(实测),
+ * 第一段是 `=` 而不是 `*` ⇒ 天然被过滤(这就是「已推送的标签不许出现在结果里」
+ * 那条阴性对照在**解析层**上的保证)。
+ * @param out - `git push --dry-run --porcelain` 的 stdout。
+ */
+export function parseUnpushedTags(out: string): string[] {
+  const lines = out.split('\n');
+  const unpushedTags: string[] = [];
+  for (let currentLine = 1; currentLine < lines.length && lines[currentLine] !== 'Done'; currentLine++) {
+    const parts = lines[currentLine].split('\t');
+    if (parts[0] === '*' && parts[2] === '[new tag]') {
+      const [tagName] = parts[1].split(':');
+      if (tagName !== undefined) {
+        unpushedTags.push(tagName.replace(/^refs\/tags\//, ''));
+      }
+    }
+  }
+  return unpushedTags;
+}
+
 /** 结构化 status 结果 + 磁盘标记 → 供界面直接消费的快照。 */
 export function buildRepoStatus(input: {
   root: string;
