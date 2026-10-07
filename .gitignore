@@ -224,3 +224,7 @@ node_modules/
 /eslint-rules/
 /screenshots/
 
+# 部署测试(scripts/e2e-deploy.mjs)的截图产物:CI 里当 artifact 上传,
+# 本机跑完就是一次性的调试现场,没有任何理由进版本库。
+/artifacts/
+

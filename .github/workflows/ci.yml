@@ -65,3 +65,70 @@ jobs:
       #      且**不含 sourcemap**(map 内嵌全部源码,只该留在本机)。
       - name: 插件可用性(包完整 / 宿主可加载 / 运行时依赖已声明 / 不含源码)
         run: node scripts/verify-plugin.mjs
+
+  # ── 部署测试:构建 → 打包 → 装进真 profile → 启动 → 截图 → 走路由 → push ─────
+  #
+  # 这个 job 回答 `plugin` job **答不了**的那个问题:用户在真 dsh 里装上之后,
+  # 界面出得来吗?插件的浏览器半真的执行了吗?改仓库 → 提交 → 推送这条链子通吗?
+  # 每一步**为什么**这么验,写在 `scripts/e2e-deploy.mjs` 的头注释里。
+  e2e:
+    # 只在**拿得到写权限**的事件上跑:fork 来的 PR 只有 read token,push 那一步
+    # 必然失败 —— 那不是「插件坏了」,不该把 PR 判红。PR 的判据交给 main 的 push。
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # 部署测试要**真的往 `test` 分支推一次**(用户裁决的落点),这是本仓库里
+    # 唯一需要写权限的地方。
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      # `dsh plugin` 是 **pnpm 的包装器** —— 它把参数原样交给 PATH 上的 pnpm
+      # (找不到时 dsh 自己会提示 exit 127)。runner 上没有 pnpm,所以装一个。
+      # 锁 11.x:pnpm 11 把「忽略 build script」升级成致命错误,而脚本里那条
+      # `approve-builds --all` 路径就是为它准备的 —— 这也与开发机一致
+      # (DSH Desktop 自带的 pnpm 是 11.8.0)。
+      - name: 全局安装 pnpm(dsh plugin 的底层)
+        run: npm i -g pnpm@11
+
+      # 宿主从公开 npm 装。用 `@next` 而不是 `@latest`:dsh CLI 自己两个 tag 都是
+      # 0.2.0-rc.2,但它的 bundle(`dsh-base` / `dsh-web-app`)的 `latest` 是**脏的**,
+      # 停在 0.0.1-rc.1 —— 脚本会按 `dsh --version` 把 profile 里的 bundle 锁到同一个
+      # 版本,所以这里装到哪个版本,profile 就跟到哪个版本(version skew 从根上掐掉)。
+      - name: 全局安装 dsh(宿主)
+        run: npm i -g @deepseek-ai/dsh@next
+
+      # playwright **全局**装,不进 devDependencies:它只在部署测试里用,不该让每个
+      # `npm i` 的人都拖一份。浏览器**不下载** —— 用 runner 自带的 google-chrome
+      # (脚本里 `chromium.launch({ channel: 'chrome' })`)。
+      - name: 全局安装 playwright
+        run: npm i -g @playwright/test@1.59.1
+
+      - name: 部署测试
+        env:
+          # 用 runner 的临时目录当 DSH_HOME:判据必须是「一台**干净机器**上装出来
+          # 能不能用」,而不是蹭开发机上已经存在的 profile 与注册表状态。
+          DSH_HOME: ${{ runner.temp }}/dsh-home
+          # `GITHUB_REPOSITORY` 由 Actions 自动注入,但 `GITHUB_TOKEN` **不会**
+          # 自动进环境 —— 脚本靠它拼出带凭据的 clone URL。
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/e2e-deploy.mjs
+
+      # 截图是这次运行唯一「给人看」的证据(界面出得来、插件在跑),
+      # 失败时更要拿到现场,所以 `always()`。
+      - name: 上传截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: artifacts/e2e/
+          if-no-files-found: warn
