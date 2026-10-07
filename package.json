@@ -68,8 +68,8 @@
     "typecheck": "node scripts/check-types.mjs"
   },
   "peerDependencies": {
-    "@deepseek-ai/schemastery": "~3.18.4",
     "@deepseek-ai/dsh-client-ui-primitives": ">=0.2.0-rc.2 || >=0.3.0-rc.1 || >=0.4.0-rc.1 || >=0.5.0-rc.1",
+    "@deepseek-ai/schemastery": "~3.18.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

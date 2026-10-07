@@ -16,7 +16,7 @@
 import './polyfills.ts';
 
 import { createElement, Fragment, type ReactElement } from 'react';
-import type { ClientCtx } from './types.ts';
+import type { ClientCtx, SidebarRightTabsLike } from './types.ts';
 import { ensureStyles } from './styles.ts';
 import { ensureBaseStyles } from './styles-base.ts';
 import { ensureDesktopDiffStyles } from './desktop-diff-styles.ts';
@@ -57,7 +57,20 @@ export const TAB_ID = 'dsh-git';
  */
 const TAB_TITLE = 'git';
 
-export const inject = ['slots', 'sidebarRightTabs'];
+/*
+ * `sidebarRightTabs` **故意不在这里**。
+ *
+ * cordis 的静态 `inject` 只有「必需」一种语义(见 `@deepseek-ai/cordis` 的
+ * `src/registry.ts`:数组形式 = 必需,对象形式的值是拦截配置)—— 声明了就**必须等到位**。
+ * 而「右侧栏」并不是每个环境都有:普通 `dsh web` 的 profile 里,提供方
+ * `@deepseek-ai/dsh-client-ui-sidebar-right` 只被 `dsh-web-app/cordis.patch.yml` 按名字引用、
+ * 却不在公开 npm 的可用版本上(实测 0.1.5-alpha.1 vs 宿主 0.2.0-rc.2),服务因此永远不来。
+ * 后果不是「我们的 tab 不出现」,而是**整个插件 pending、整个 Web UI 报
+ * "Failed to load plugins / 1 entry did not activate"** —— 2026-10 实测踩到。
+ *
+ * 所以它按本仓 `types.ts:43` 的约定当**可选服务**:走 `ctx.get()`,拿不到就跳过注册。
+ */
+export const inject = ['slots'];
 
 /** 每个会话共享一个 store(跨视图状态)。 */
 const stores = new Map<string, GitStore>();
@@ -153,9 +166,19 @@ export function apply(ctx: ClientCtx): void {
   }
 
   ctx.effect(() => {
-    const tabs = ctx.sidebarRightTabs;
+    /*
+     * 可选服务:属性访问(`ctx.sidebarRightTabs`)对未声明的服务会被 cordis 拒绝,
+     * 所以走 `ctx.get()`,并且连 `get` 抛错也要兜住 —— 拿不到就只是「这个环境没有右侧栏」,
+     * 不该让插件加载失败。
+     */
+    let tabs: SidebarRightTabsLike | undefined;
+    try {
+      tabs = ctx.get?.('sidebarRightTabs') as SidebarRightTabsLike | undefined;
+    } catch {
+      tabs = undefined;
+    }
     if (tabs === undefined || typeof tabs.register !== 'function') {
-      console.warn('[dsh-git] sidebarRightTabs 不可用,右侧栏 tab 未注册');
+      console.warn('[dsh-git] 这个环境没有 sidebarRightTabs(右侧栏未组合),跳过 tab 注册;插件其余能力照常');
       return;
     }
     const slots = ctx.slots;
