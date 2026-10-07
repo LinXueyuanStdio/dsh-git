@@ -478,11 +478,22 @@ step('无头启动并等它就绪');
  * `--port 0` 让操作系统挑一个空闲端口(CI 上不会撞端口),`--no-open` 不弹浏览器。
  * 输出的形状是 `dsh web: http://127.0.0.1:<port>/?token=<token>` —— **token 必须带上**,
  * 否则页面拿不到会话。
+ *
+ * ⭐ `DSH_PERMISSION_MODE=danger-full-access`:profile 里那条
+ * `sandbox-policy` 的 `mode` 就是读这个环境变量(默认 `workspace-write`,
+ * `workspaceRoot` 取 `process.cwd()`),而**插件的 git 全部走宿主受管子进程**
+ * (`ctx.subprocess`),所以宿主沙箱策略会直接决定 git 能不能跑。2026-10 在 CI 上
+ * 实测:同一个仓库,本机 `git rev-parse` 说它是仓库,插件的受管路径却说
+ * 「不是 git 仓库」—— Linux 的沙箱比 macOS 严,本地因此一直是绿的。
+ * 这条测试判的是**插件**,不是沙箱策略(沙箱是宿主的事,有它自己的测试),
+ * 所以这里把策略显式放开,让判据跨平台一致。
  * @returns 服务端进程与 URL。
  */
 async function boot() {
   const child = spawn('dsh', ['--profile', PROFILE, '--no-open', '--port', '0'], {
-    cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: REPO,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, DSH_PERMISSION_MODE: 'danger-full-access' },
   });
   let out = '';
   const url = await new Promise((resolveUrl, reject) => {
@@ -763,15 +774,28 @@ step('走插件自己的路由:登记 → 改文件 → stage → commit');
 /*
  * ⭐ **先登记「宿主工作区里的仓库」**(= 本 checkout),再登记临时克隆。
  *
- * 它同时是**沙箱探针**:插件的 git 走宿主受管子进程,受宿主沙箱管辖。如果连
- * 工作区里的仓库都登记不上,那就不是「临时目录选错了」,而是这条受管路径在这个
- * 环境里根本不通 —— 那种失败必须指名道姓地说出来,否则下一个人只会看到
- * 「这个目录不是 git 仓库」这种把真因藏起来的报错。
+ * 它同时是**受管路径探针**:插件的 git 走宿主受管子进程,受宿主沙箱策略管辖。
+ * 如果连工作区里的仓库都登记不上,那就不是「临时目录选错了」,而是这条受管路径
+ * 在这个环境里根本不通 —— 那种失败必须指名道姓地说出来,并且**附上对比证据**
+ * (同一个路径,直接用本机 git 看),否则下一个人只会看到「这个目录不是 git 仓库」
+ * 这种把真因藏起来的报错。
  */
-const workspaceAdded = await call('repos/add', { path: REPO });
+const workspaceAdded = await call('repos/add', { path: REPO }).catch((error) => {
+  let direct;
+  try {
+    direct = run('git', ['-C', REPO, 'rev-parse', '--show-toplevel']).trim();
+  } catch (directError) {
+    direct = `本机 git 也失败:${String(directError).split('\n')[0]}`;
+  }
+  throw new Error(`连宿主工作区里的仓库都登记不上:${error instanceof Error ? error.message : String(error)}\n`
+    + `  · 被拒路径:${REPO}\n`
+    + `  · 同一路径用本机 git 看:${direct}\n`
+    + '  ⇒ 路径本身是仓库,问题出在插件的**受管子进程**(`ctx.subprocess`)这条路径上'
+    + '(宿主沙箱策略 / 受管 spawn)。E2E 已用 DSH_PERMISSION_MODE=danger-full-access 启动,'
+    + '若仍到这里,说明不是沙箱策略能解释的。');
+});
 if (workspaceAdded.added !== true) {
-  throw new Error(`连宿主工作区里的仓库都登记不上(${REPO}):`
-    + '插件的 git 走宿主受管子进程(ctx.subprocess),这条路径在这个环境里不通');
+  throw new Error(`宿主工作区仓库登记返回了 added=false:${JSON.stringify(workspaceAdded).slice(0, 200)}`);
 }
 ok(`宿主工作区仓库已登记(${REPO.split('/').pop()})`);
 
