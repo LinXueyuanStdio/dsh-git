@@ -2,6 +2,7 @@
 
 **简体中文** | [English](./README.en.md)
 
+[![CI](https://github.com/LinXueyuanStdio/dsh-git/actions/workflows/ci.yml/badge.svg)](https://github.com/LinXueyuanStdio/dsh-git/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@linxueyuan%2Fdsh-git?label=npm&color=4d6bfe)](https://www.npmjs.com/package/@linxueyuan/dsh-git)
 [![License: MIT](https://img.shields.io/badge/license-MIT-4d6bfe.svg)](./LICENSE)
 

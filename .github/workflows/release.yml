@@ -1,12 +1,23 @@
 name: Release
 
-# 打 `v*` tag 才发;版本号与 tag 必须一致(下一步会硬校验)。
+# **手动触发**:Actions 页面选本 workflow → Run workflow。
+# 要发某个 tag 的版本,在 "Use workflow from" 里选那个 `vX.Y.Z` tag(或填下面的 tag 输入框)。
+#
+# 为什么不再监听 tag push —— 打 tag 是「标记」,发布是「动作」,绑在一起有两个坑:
+#   1. 想给**已经发布过**的版本补一个 tag(或补建 GitHub Release)时,会意外触发一次
+#      必然失败的发布(版本号已存在);
+#   2. 发布失败后无法重试 —— 同一个 tag 再 push 不会再次触发 workflow。
+# 需要「自动发布」时把上面换成 `on: push: tags: ['v*']` 即可,其余步骤不用动。
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag(vX.Y.Z);留空则用当前 ref 名(在 tag 上手动运行时就是那个 tag)'
+        required: false
+        type: string
 
 permissions:
-  # 建 GitHub Release 要写 contents;npm 的 --provenance 要 id-token(参考稿里本来就声明了)。
+  # 建 GitHub Release 要写 contents;npm 的 --provenance 要 id-token。
   contents: write
   id-token: write
 
@@ -15,7 +26,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # fetch-depth: 0 —— GitHub Release 的自动 release notes 要与上一个 tag 比对。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -38,17 +52,29 @@ jobs:
           node scripts/verify-plugin.mjs
 
       # tag 与 package.json 不一致是最容易犯的发布错:它会安静地发错版本号。
+      # 手动触发时两个来源都接受:输入框里的 tag,或当前 ref(tag 上手动运行)。
       - name: 校验 tag 与 package.json 版本一致
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ]; then tag="${GITHUB_REF_NAME}"; fi
+          case "$tag" in
+            v*) ;;
+            *) echo "::error::'$tag' 不是 v* 形式的 tag —— 请选一个 vX.Y.Z tag,或在 tag 输入框里填它"; exit 1 ;;
+          esac
+          want="${tag#v}"
           pkg="$(node -p "require('./package.json').version")"
-          if [ "$tag" != "$pkg" ]; then
-            echo "::error::tag v${tag} 与 package.json 的 ${pkg} 不一致 —— 先对齐版本号再打 tag"
+          if [ "$want" != "$pkg" ]; then
+            echo "::error::tag v${want} 与 package.json 的 ${pkg} 不一致 —— 先对齐版本号再发布"
             exit 1
           fi
+          echo "tag v${want} 与 package.json 一致,继续。"
 
-      # `--provenance` 需要上面的 id-token: write 与**公开**仓库;若环境不允许,去掉这个参数即可。
+      # `--provenance` 需要上面的 id-token: write 与**公开**仓库(本仓库已公开)。
+      # ⚠️ 如果 npm 把这次发布转成**暂存发布**(账号侧要求 proof-of-presence 时会发生),
+      # 这一步会成功但版本不会立刻对外可见 —— 需要你本机用 npm 12 批准:
+      #     npm stage list @linxueyuan/dsh-git
+      #     npm stage approve <stage-id>      # 会提示 2FA
       - name: 发布到 npm
         run: npm publish --access public --provenance
         env:
@@ -57,4 +83,5 @@ jobs:
       - name: 建 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           generate_release_notes: true
