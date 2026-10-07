@@ -1,5 +1,7 @@
 # @linxueyuan/dsh-git
 
+**简体中文** | [English](./README.en.md)
+
 [![npm](https://img.shields.io/npm/v/@linxueyuan%2Fdsh-git?label=npm&color=4d6bfe)](https://www.npmjs.com/package/@linxueyuan/dsh-git)
 [![License: MIT](https://img.shields.io/badge/license-MIT-4d6bfe.svg)](./LICENSE)
 
@@ -119,4 +121,4 @@ npm run check:static  # 一条命令跑齐所有静态闸门（check-all 自动�
 
 ## License
 
-[MIT](./LICENSE)
+[MIT](./LICENSE) · 第三方声明：[THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md)

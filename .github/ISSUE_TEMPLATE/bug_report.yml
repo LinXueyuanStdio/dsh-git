@@ -1,0 +1,127 @@
+name: 缺陷报告
+description: 面板行为不对、报错、或者某个页签/操作没反应
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先谢过。填之前请确认两件事：
+
+        1. 已经搜过 [已有 issue](https://github.com/LinXueyuanStdio/dsh-git/issues?q=is%3Aissue)，没有重复；
+        2. 贴日志前**把令牌、仓库路径、远端地址打码** —— 这个插件的日志里通常不会出现令牌，
+           但 git 命令的输出可能带路径。
+
+        安全漏洞请不要开公开 issue，见[私密报告入口](https://github.com/LinXueyuanStdio/dsh-git/security/advisories/new)。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 现象
+      description: 发生了什么？尽量写清是哪个页签、哪一步操作。
+      placeholder: 例：在 Changes 里点「提交」后，文件列表没有清空，也没有出现新提交。
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从打开面板开始，一步步写。能稳定复现最好，偶发也请说明频率。
+      placeholder: |
+        1. 打开右侧栏的 git 页签
+        2. 选中仓库 xxx
+        3. 勾选 README.md
+        4. 点「提交」
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望 vs 实际
+      value: |
+        - 期望：
+        - 实际：
+    validations:
+      required: true
+
+  - type: input
+    id: dsh-version
+    attributes:
+      label: DSH 版本
+      description: 终端里跑 `dsh --version`，把输出贴进来。
+      placeholder: 0.1.1-rc.2
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: dsh-git 版本
+      description: "`npm ls @linxueyuan/dsh-git` 的输出，或设置卡片上显示的版本。"
+      placeholder: 1.0.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: 安装方式
+      options:
+        - 从 npm 安装（@linxueyuan/dsh-git）
+        - 从本地目录安装（开发态）
+        - 其他 / 不确定
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: 操作系统与架构
+      placeholder: macOS 15.1 (arm64) / Windows 11 / Ubuntu 24.04
+    validations:
+      required: true
+
+  - type: dropdown
+    id: auth
+    attributes:
+      label: GitHub 登录方式
+      description: 远端页签（Code / Issues / PR / Actions）的问题需要这一项。
+      options:
+        - 细粒度 Personal Access Token
+        - 经典 Personal Access Token
+        - 设备码登录（配了 clientId）
+        - 未登录 / 只用本地仓库
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: host 半日志
+      description: |
+        与插件相关的日志片段（面板注册、`/dsh-git/*` 路由、git 命令的输出）。
+        **贴之前请打码**：令牌、私有仓库路径、远端地址、用户名。
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图
+      description: 拖进来即可。面板截图对定位很有帮助。
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 我已搜索过已有 issue，没有重复
+          required: true
+        - label: 我贴出的日志/截图里没有令牌、私有路径等敏感信息
+          required: true

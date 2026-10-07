@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全问题（请走私密通道）
+    url: https://github.com/LinXueyuanStdio/dsh-git/security/advisories/new
+    about: 不要用公开 issue 报告安全漏洞。用 GitHub 的私密漏洞报告，或见 README 里的联系方式。
+  - name: 问题出在 DSH 宿主本身？
+    url: https://github.com/deepseek-ai/deepseek-harness/issues
+    about: 如果现象与 dsh-git 无关（例如官方页签、设置页、模型列表本身的问题），请提到上游仓库。
+  - name: 贡献指南
+    url: https://github.com/LinXueyuanStdio/dsh-git/blob/main/CONTRIBUTING.md
+    about: 提交 PR 前请先看「两条容易踩的约定」与闸门退出码契约。

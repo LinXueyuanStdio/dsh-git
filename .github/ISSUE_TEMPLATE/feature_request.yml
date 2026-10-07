@@ -1,0 +1,62 @@
+name: 功能建议
+description: 想要某个能力、或者觉得某处该怎么改
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        这个插件刻意保持「按官方右侧栏的规矩来」这一条底线，所以有些建议可能不适合放进面板
+        （例如需要把令牌暴露给浏览器、或者绕过 loopback 限制的做法）。除了这类底线，
+        其余都欢迎讨论。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你想解决什么问题
+      description: 先说场景和痛点，再说你想要的功能 —— 这样更容易找到更合适的做法。
+      placeholder: 例：我经常要在两个分支之间对比同一个文件，现在得来回切分支。
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你希望它怎么工作
+      description: 界面长什么样 / 点哪里 / 结果是什么。有草图或类似工具的截图更好。
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: 现在你怎么绕过
+      description: 现有做法是什么？这能说明这个能力值多少。
+    validations:
+      required: false
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: 大致属于哪个面
+      options:
+        - Changes（暂存 / diff / 提交）
+        - History（提交历史）
+        - Code（文件树 / 本地工作区）
+        - Issues
+        - Pull requests
+        - Actions
+        - 同步与分支（fetch / pull / push / 分支操作）
+        - 设置 / 安装 / 令牌登录
+        - 其他 / 说不好
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: 参与
+      options:
+        - label: 如果方向定了，我愿意提 PR（可以先看 CONTRIBUTING.md）
+          required: false

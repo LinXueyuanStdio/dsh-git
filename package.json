@@ -40,7 +40,8 @@
     "lib/client.js",
     "cordis.patch.yml",
     "icon.svg",
-    "THIRD-PARTY-NOTICES.md"
+    "THIRD-PARTY-NOTICES.md",
+    "CHANGELOG.md"
   ],
   "license": "MIT",
   "repository": {
