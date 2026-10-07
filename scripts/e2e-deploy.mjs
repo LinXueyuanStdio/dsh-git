@@ -387,22 +387,43 @@ profileManifest.dependencies = {
   '@deepseek-ai/dsh-base': DSH_VERSION,
   '@deepseek-ai/dsh-web-app': DSH_VERSION,
   /*
-   * ⭐ **`@deepseek-ai/cordis` 必须显式装**(2026-10 在 CI 上查明,是本 E2E 抓到的最实的一条)。
+   * ⭐ **`@deepseek-ai/cordis` 显式装**(2026-10 在 CI 上查明,是本 E2E 抓到的最实的一条)。
    *
-   * dsh 起子进程走的是平台包 `@deepseek-ai/dsh-subprocess`,而它是**一个独立的 Node
-   * 进程**,会在 profile 的模块链上 `import '@deepseek-ai/cordis'`。全新的 `$DSH_HOME`
-   * 里没有任何地方提供它 —— profile 模板的 `autoInstallPeers: false` 不会自动装 peer,
-   * 而开发机上 `$DSH_HOME/profiles/node_modules` 这个**共享根恰好被 Desktop 装过一份**,
-   * 于是本地一直看不出问题。
+   * 见下面打开 `autoInstallPeers` 那段:这是**第一个**暴露出来的缺失 peer ——
+   * 平台子进程包 `@deepseek-ai/dsh-subprocess` 是一个独立的 Node 进程,在 profile 的
+   * 模块链上 import 它;全新的 `$DSH_HOME` 里没有,那个进程直接
+   * `ERR_MODULE_NOT_FOUND` 崩掉,于是**每一次 git 调用都以「这个目录不是 git 仓库」
+   * 收场**(退出码非 0,stderr 又被 `repoRoot` 丢掉,连崩溃痕迹都看不到)。
    *
-   * 后果不是「某个小功能不好用」,而是:那个进程直接 `ERR_MODULE_NOT_FOUND` 崩掉 ⇒
-   * **每一次 git 调用都以「这个目录不是 git 仓库」收场**(退出码非 0,而 stderr 被
-   * `GitService.repoRoot` 丢掉,连崩溃痕迹都看不到)。装它,profile 才是完整的。
+   * `autoInstallPeers` 已经能覆盖它,这里再显式钉一次是为了留下证据 + 钉住版本
+   * (公开 npm 的 latest 就是 4.0.4,与开发机共享根里那份同版本)。
    */
   '@deepseek-ai/cordis': '^4.0.4',
 };
 writeFileSync(profileManifestPath, `${JSON.stringify(profileManifest, null, 2)}\n`);
 ok(`dependencies 锁到 ${DSH_VERSION}`);
+
+/*
+ * ⭐ **打开 `autoInstallPeers`**(本 E2E 抓到的第二条实锤,也是上面那条 cordis 的**通则**)。
+ *
+ * dsh 的 profile 模板自带 `autoInstallPeers: false`。在开发机上这没问题 ——
+ * `$DSH_HOME/profiles/node_modules` 这个**共享根**被 Desktop 装过一份完整的依赖树,
+ * 于是 peer 天然都在。但在**全新 `$DSH_HOME`** 里,peer 一个都没有,而
+ * `@deepseek-ai/dsh-subprocess`(平台包,是一个**独立 Node 进程**)在运行期要解析
+ * `@deepseek-ai/cordis`、`@deepseek-ai/dsh-http-proxy` … —— 缺一个就
+ * `ERR_MODULE_NOT_FOUND` 崩掉,而崩掉的后果是**每一次 git 调用都被报成
+ * 「这个目录不是 git 仓库」**(退出码非 0,stderr 被 `repoRoot` 丢掉)。
+ *
+ * 不逐个补 peer:那是一条会随版本变长的链(实测补完 cordis 立刻冒出 dsh-http-proxy),
+ * 手写清单必然漂。打开这个开关,让 pnpm 自己把图里缺的 peer 装齐 —— 一次覆盖全部。
+ */
+const workspaceYamlPath = join(PROFILE_DIR, 'pnpm-workspace.yaml');
+const workspaceYaml = readFileSync(workspaceYamlPath, 'utf8');
+if (!workspaceYaml.includes('autoInstallPeers: false')) {
+  throw new Error(`profile 模板的 pnpm-workspace.yaml 变了(没找到 autoInstallPeers: false):\n${workspaceYaml}`);
+}
+writeFileSync(workspaceYamlPath, workspaceYaml.replace('autoInstallPeers: false', 'autoInstallPeers: true'));
+ok('pnpm-workspace.yaml 打开 autoInstallPeers(补齐 peer,否则平台子进程包会崩)');
 
 // ---------------------------------------------------------------------------
 // 4. 安装插件 —— 用打包出来的 tarball,不是 link
