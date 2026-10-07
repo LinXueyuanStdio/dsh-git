@@ -17,6 +17,9 @@ import {
 } from './desktop/models/diff/raw-diff.ts';
 // `DiffType` 与 `ITextDiff` 在 models/diff/diff-data.ts(由 models/diff/index.ts 汇总导出)。
 import { DiffType, type ITextDiff } from './desktop/models/diff/diff-data.ts';
+// `IRawDiff` 是**镜像解析器**(`DiffParser`)的输出类型;与 `ParsedDiff` 的区别见
+// 下面 `buildPartialPatchFromRaw` 的注释。
+import type { IRawDiff } from './desktop/models/diff/raw-diff.ts';
 // DiffLine 在 diff-line.ts(由 models/diff/index.ts 汇总导出)
 import { DiffLine, DiffLineType } from './desktop/models/diff/diff-line.ts';
 import { DiffSelection, DiffSelectionType } from './desktop/models/diff/diff-selection.ts';
@@ -162,6 +165,58 @@ export function buildPartialPatch(
 /** 选区是否「什么都没选」——调用方据此决定是否需要 staging。 */
 export function isSelectionEmpty(spec: LineSelectionSpec): boolean {
   return toDiffSelection(spec).getSelectionType() === DiffSelectionType.None;
+}
+
+/**
+ * 为一个文件生成「只暂存(或只丢弃)选中行」的补丁 —— **入参是镜像解析器的输出**。
+ *
+ * ## 为什么需要这一个入口(`buildPartialPatch` 为什么不够)
+ *
+ * 两个解析器产出**同名不同源**的类型:
+ *
+ * | 解析器 | 输出 | hunk 的字段 |
+ * |---|---|---|
+ * | `core/diff-parse.ts`(`ParsedDiff`) | 纯对象,便于 JSON 传输 | 无 `expansionType` |
+ * | 镜像 `DiffParser`(`IRawDiff`) | `DiffHunk` / `DiffLine` **类实例** | 有 `expansionType` |
+ *
+ * `buildPartialPatch` 的形参是前者,而**客户端**手上拿的永远是后者
+ * (`desktop-diff.tsx` 与 `store.ts` 都用镜像解析器 —— 必须是同一个,否则
+ * `DiffSelection` 的行号空间会与屏幕上那份 patch 错位)。所以浏览器半需要这一个入口。
+ *
+ * 两边的 `hunk.unifiedDiffStart` **同源**(都是镜像 `DiffParser` 写的),
+ * 所以这一层只是类型桥接,不改变任何行号。
+ * @param path - 仓库内相对路径。
+ * @param kind - 文件状态(决定补丁头的 `new file mode` / `deleted file mode`)。
+ * @param raw - 镜像 `DiffParser` 的解析结果。
+ * @param spec - 行选区(`desktop-diff.tsx` 的 `selectionToSpec()` 输出)。
+ * @returns 可直接交给 `git apply --cached --unidiff-zero`(暂存)或
+ *   `git apply --reverse --unidiff-zero`(丢弃)的**正向**补丁文本。
+ * @throws 当选区什么都没选中时(上游 `formatPatch` 也是抛错)。
+ */
+export function buildPartialPatchFromRaw(
+  path: string,
+  kind: FileStatusKind,
+  raw: IRawDiff,
+  spec: LineSelectionSpec,
+): string {
+  const file = new WorkingDirectoryFileChange(
+    path,
+    { kind: KIND_MAP[kind] } as never,
+    toDiffSelection(spec),
+  );
+  /*
+   * 与 `toDesktopDiff` 做同一件事,但**不经过 `ParsedDiff`**:`raw` 里已经是
+   * 类实例,只差 `kind` 判别式与 `text` 两个字段(上游 `lib/git/diff.ts:539-546`
+   * 的构造方式,`text` 取 raw 的 `contents`,不是 `header`)。
+   */
+  const diff: ITextDiff = {
+    kind: DiffType.Text,
+    text: raw.contents,
+    hunks: raw.hunks,
+    maxLineNumber: raw.maxLineNumber,
+    hasHiddenBidiChars: raw.hasHiddenBidiChars,
+  };
+  return formatPatch(file, diff);
 }
 
 /** 导出枚举,方便调用方判断选区类型。 */

@@ -378,15 +378,36 @@ export function checkoutRemoteArgv(localName: string, remoteRef: string): readon
   return ['checkout', '-b', localName, remoteRef, '--'];
 }
 
-export function fetchArgv(remote: string): readonly string[] {
-  return ['fetch', '--prune', '--no-recurse-submodules', '--', remote];
+/**
+ * `git fetch`。
+ *
+ * `opts.progress` 加 `--progress` —— 上游 `lib/git/push.ts:78` 同形(在那三支里
+ * 都是「有进度回调才加」)。**为什么必须显式加**:git 只在 stderr 是 tty 时才自己
+ * 报进度,而我们的 stderr 是管道 ⇒ 不加这个开关,`--progress` 一族的 stderr 行
+ * **一条都不会有**(进度条就永远是空的)。
+ */
+export function fetchArgv(remote: string, opts: { progress?: boolean } = {}): readonly string[] {
+  return [
+    'fetch',
+    ...(opts.progress === true ? ['--progress'] : []),
+    '--prune',
+    '--no-recurse-submodules',
+    '--',
+    remote,
+  ];
 }
 
-export function fetchAllArgv(): readonly string[] {
-  return ['fetch', '--prune', '--no-recurse-submodules', '--all'];
+export function fetchAllArgv(opts: { progress?: boolean } = {}): readonly string[] {
+  return [
+    'fetch',
+    ...(opts.progress === true ? ['--progress'] : []),
+    '--prune',
+    '--no-recurse-submodules',
+    '--all',
+  ];
 }
 
-export function pullArgv(opts: { remote: string; rebase: boolean; ffOnly: boolean }): readonly string[] {
+export function pullArgv(opts: { remote: string; rebase: boolean; ffOnly: boolean; progress?: boolean }): readonly string[] {
   const argv = ['pull'];
   if (opts.rebase) {
     argv.push('--rebase');
@@ -398,6 +419,13 @@ export function pullArgv(opts: { remote: string; rebase: boolean; ffOnly: boolea
   return argv;
 }
 
+/**
+ * `git push`。
+ *
+ * `opts.progress` 加 `--progress`：位置与上游 `lib/git/push.ts:77-79` **逐字同**——
+ * 三处 `--set-upstream` / `--force-with-lease` / `--no-verify` 之后、`--` 之前。
+ * 理由同 {@link fetchArgv}：不显式加，管道 stderr 上一条进度行都没有。
+ */
 export function pushArgv(opts: {
   remote: string;
   branch: string;
@@ -405,6 +433,7 @@ export function pushArgv(opts: {
   setUpstream?: boolean;
   forceWithLease?: boolean;
   noVerify?: boolean;
+  progress?: boolean;
   tags?: readonly string[];
 }): readonly string[] {
   const argv = ['push'];
@@ -416,6 +445,9 @@ export function pushArgv(opts: {
   }
   if (opts.noVerify) {
     argv.push('--no-verify');
+  }
+  if (opts.progress === true) {
+    argv.push('--progress');
   }
   argv.push('--', opts.remote);
   if (opts.setUpstream) {

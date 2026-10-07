@@ -192,11 +192,23 @@ export interface RepoEntry {
   branch?: string;
 }
 
-/** 同步状态(工具栏 ↑↓ 与按钮状态机)。 */
+/**
+ * 同步状态(工具栏 ↑↓ 与按钮状态机)。
+ *
+ * ⚠️ `readonly` 是**闸门要求**,不是可选风格:`react-readonly-props-and-state`
+ * (`.eslintrc.yml` 里逐字挂载的上游自定义规则)要求所有 `*State` 接口的成员只读。
+ * 语义上这条也对:`snapshot().sync` 是不可变快照,想改状态只能走 `store` 的 setter
+ * 重新 `emit` —— 这正是那条规则要防的「就地改 props/state」。
+ * 生产者 `src/host/git-service.ts:syncState()` 返回的是**对象字面量**,而对象字面量
+ * 赋给只读属性是合法的 ⇒ 这三条 `readonly` 不产生类型错误、也没有运行时影响。
+ *
+ * (2026-10:这三条原先漏了 `readonly`,是本次 check-lint 上报的 9 号新增违规。
+ *  同接口其余成员本来就带,所以这里是**补齐**,不是新增约定。)
+ */
 export interface SyncState {
-  ahead: number;
-  behind: number;
-  upstream: string | null;
+  readonly ahead: number;
+  readonly behind: number;
+  readonly upstream: string | null;
   /** 远端列表;空 = 需要「发布仓库」。 */
   remotes: string[];
   /** 是否可强推(--force-with-lease 的推荐态由 ahead/behind 推导)。 */
@@ -244,3 +256,48 @@ export interface ProgressStep {
   percent?: number;
   detail?: string;
 }
+
+/** 同步面的三种网络动作(上游 `models/progress.ts:117-124` 里对应的三个 `kind`)。 */
+export type SyncProgressKind = 'push' | 'fetch' | 'pull';
+
+/**
+ * **网络动作在飞时的那一条 git 进度**(`sync-progress` 路由的载荷)。
+ *
+ * 为什么是**共享**类型(host 半与浏览器半同一份):写它的是宿主
+ * (`GitService.syncProgressByRoot`,上游 `app-store.ts:5168` 的
+ * `updatePushPullFetchProgress` 的宿主等价物),读它的是客户端
+ * (`store.ts` 的 `startSyncProgressPolling`)。写在这里而不是各自写一份 ——
+ * 两边写一份就会在两个 bundle 里各漂各的,而这条契约没有编译期保护
+ * (跨的不是模块边界,是 HTTP)。
+ *
+ * ⚠️ 它**不是**上游的 `Progress`(`src/core/desktop/models/progress.ts`):
+ * 上游那个对象里的 `title`(`Pushing to ${remoteName}`)在我们这一侧由客户端拼,
+ * 而且是中文。所以这里只搬运**只有宿主知道**的两样:git 原始那一行、以及按步骤
+ * 权重算出的百分比。乘法(给刷新阶段留 0.9)在客户端,与上游 `app-store.ts:5324-5328`
+ * 的位置一致。
+ *
+ * ⚠️ 写成 `type` 而不是 `interface`:本文件的 `naming-convention` 规则要求接口名匹配
+ * `/^I[A-Z]/`(镜像风格,见 `scripts/lint-baseline.json` 里那 14 条存量),而**新**接口
+ * 会多一条违规。类型别名不受那条规则约束,且这里本来就是一个「形状」——
+ * 没有被 extends/implements 的语义需求。
+ */
+export type SyncProgressPayload = {
+  /** 哪一支动作写下的;客户端据此拒绝跨动作合并(过一次进度盖到下一次动作上)。 */
+  readonly kind: SyncProgressKind;
+  /**
+   * 用户看到的那行文本 —— **git 原始那一行**(含 `remote:` 前缀与百分比)。
+   *
+   * 上游 `lib/git/push.ts:86-87`:
+   * `progress.kind === 'progress' ? progress.details.text : progress.text`,两种都是原文。
+   */
+  readonly description: string;
+  /**
+   * 该动作的总体百分比 `0..1`(上游 `IGitProgress.percent`,`lib/progress/git.ts:239`)。
+   *
+   * ⚠️ 不是最终进度值:客户端还要乘本动作的权重(`store.ts` 里已经在算的那套
+   * `scale`),才能与刷新阶段的 0.9 对齐。
+   */
+  readonly value: number;
+  /** 上游 `IGitProgressInfo.done`(那一行带 `, done`)。 */
+  readonly done: boolean;
+};
