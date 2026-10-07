@@ -35,7 +35,11 @@ import {
   parseLog, parseNameStatus, parseNumstat, parseRemotes, parseStatus, parseTags,
 } from '../core/parse.ts';
 import type { GitRunner, GitRunResult } from './git-runner.ts';
-import { OUTPUT_CAP_BYTES } from './git-runner.ts';
+import { DEFAULT_TIMEOUT_MS, OUTPUT_CAP_BYTES } from './git-runner.ts';
+import {
+  createSyncProgressLineSink, createSyncProgressParser,
+  type SyncProgressKind, type SyncProgressSnapshot,
+} from './sync-progress.ts';
 import { buildPartialPatch, isSelectionEmpty, type FileStatusKind, type LineSelectionSpec } from '../core/partial-stage.ts';
 import { parseRawDiff } from '../core/diff-parse.ts';
 import { testForInvalidChars } from '../core/desktop/lib/sanitize-ref-name.ts';
@@ -95,8 +99,103 @@ export function classifyGitFailure(stderr: string, context: string): GitServiceE
   if (/(rebase|merge|cherry-pick|revert).*(in progress)|already in progress/.test(s)) {
     return new GitServiceError('operation-in-progress', `${context}失败:仓库里有进行中的操作,请先完成或中止。`, detail);
   }
+  /*
+   * libcurl 的 HTTP/2 帧层错误。
+   *
+   * 为什么要单独认它(而不是让它掉进兜底):它是一条**有标准解法**的网络层失败
+   * (git 走 HTTP/2 时被代理/中间设备打断),而兜底只会把 libcurl 的英文原句当原因播出去
+   * —— 用户拿到事实但拿不到下一步。这里两样都给:原句在 `detail` 里(逐字),`message`
+   * 给出可操作的那一句。
+   *
+   * ⚠️ **可操作性提示的判据是 stderr 本身**(`/http2/i` + 「framing layer」),
+   * 判据不成立时一句都不提 —— 用户的要求是「别编:只在确定判据成立时才提示」。
+   * ⚠️ 边界:`docs/probes/push-failure-detail-probe.mjs` 的 A11 档**本地造不出来**
+   * (试过:本地 TCP 服务回 `101 Switching Protocols` + 垃圾字节 ⇒ git 只是**挂住**
+   * 直到超时、stderr 为空)。所以这条规则只有「把 libcurl 那句原文喂进分类器」这一级判据,
+   * 真句子只有带 HTTP/2 的真远端/代理能产出。
+   */
+  if (/http2 framing layer|error in the http2|http\/2/.test(s)) {
+    const first = detail.split('\n').find((line) => line.trim() !== '') ?? '';
+    return new GitServiceError(
+      'git-failed',
+      `${context}失败:HTTP/2 连接中途断了(${first === '' ? 'libcurl 报 HTTP/2 帧层错误' : first})。`
+      + '这条是 libcurl 的帧层报错,常见解法是把 git 走 HTTP/1.1:'
+      + 'git config --global http.version HTTP/1.1,然后重试。',
+      detail,
+    );
+  }
   const first = detail.split('\n').find((line) => line.trim() !== '') ?? '未知错误';
   return new GitServiceError('internal', `${context}失败:${first}`, detail);
+}
+
+/**
+ * 命令行的可读形态(带 `git ` 前缀,含空白的参数加引号)。
+ *
+ * 上限 400 字符是**明确标注**的截断:这条只用于「被终止的命令」这一行,而 argv 在
+ * 本服务里都很短(`push -- origin main`);真出现过长的 argv 时宁可标出来,也不假装完整。
+ */
+function commandLineOf(argv: readonly string[]): string {
+  const line = `git ${argv.map((one) => (/\s/.test(one) ? JSON.stringify(one) : one)).join(' ')}`;
+  return line.length <= 400 ? line : `${line.slice(0, 400)}…(命令过长,已截断)`;
+}
+
+/**
+ * 失败信封里的 `detail`(给「超时 / 被终止」这两档用)。
+ *
+ * 用户要求「如果宿主载荷里另有**失败命令 / 退出码**之类字段,一并显示;没有就别编」
+ * —— 这一份就是宿主**真的**知道的那几样:被终止的命令、超时上限(仅超时时)、
+ * 以及 git 在死之前写出来的 stderr(**逐字**,不做任何加工)。退出码在这里**故意不写**:
+ * 它的值本来就是 `null`(见 `GitRunResult.timedOut` 的三条成因),写个「退出码: null」
+ * 只会让读者以为拿到了信息。
+ */
+function commandDetail(
+  argv: readonly string[],
+  extra: { timeoutMs?: number; stderr: string },
+): string {
+  const trimmed = extra.stderr.trim();
+  return [
+    `被终止的命令: ${commandLineOf(argv)}`,
+    ...(extra.timeoutMs === undefined
+      ? []
+      : [`超时上限: ${extra.timeoutMs}ms(${Math.round(extra.timeoutMs / 1000)} 秒)`]),
+    '宿主已终止该进程: 是',
+    'git 在被终止前写出的输出(stderr,逐字):',
+    trimmed === '' ? '(一个字节都没有)' : trimmed,
+  ].join('\n');
+}
+
+/**
+ * **超时**这一档的失败 —— 已知条件,不许折成「未知错误」。
+ *
+ * 2026-10 用户报「推送失败居中弹窗里,出现未知错误」:真因是宿主按 `timeoutMs` 把
+ * `git push` 杀掉(`exitCode=null` + stderr 为空),而当时那条路只能落
+ * `classifyGitFailure` 的占位符兜底。超时**是知道的**:时间和命令都在手上,所以
+ * ①给专属 `code: 'timeout'`;②`message` 明说「超时(N 秒),已终止」并给出常见成因;
+ * ③`detail` 带上被终止的命令、超时值与已经收到的 stderr。
+ *
+ * 上游对照(为什么文案是我们自己写的):GitHub Desktop **没有** git 命令超时这个概念
+ * —— `grep -rn 'killed|timed out|SIGTERM' app/src/lib/stores/git-store.ts
+ * app/src/lib/git/core.ts` 命中 **0**,`performFailableOperation` 也不设超时
+ * (整个 Desktop 里唯一一个 `timeoutMs` 是 LLM 请求的,`app-store.ts` 的
+ * `provider.requestTimeoutSeconds`),而且本 checkout 里没有 dugite。
+ * 上游唯一相关的那条**原则**在 `lib/git/core.ts:161-172`:没有 stderr/stdout 时它播
+ * **机器事实**(`Unknown error (exit code ${result.exitCode})`),而不是宣称「未知」。
+ * 本文案照那条原则办(给出我们知道的事实),落点仍是上游那个通用 `AppError` 表面
+ * (`ui/app-error.tsx:168` 的 `return <p>{e.message}</p>`)—— 这条**不对应**任何新的上游表面。
+ */
+export function timeoutFailure(
+  argv: readonly string[],
+  context: string,
+  timeoutMs: number,
+  stderr: string,
+): GitServiceError {
+  const seconds = Math.round(timeoutMs / 1000);
+  return new GitServiceError(
+    'timeout',
+    `${context}超时(${seconds} 秒),宿主已终止这次 git 调用。`
+    + '常见成因是网络把连接挂住(git 一直没有返回),也可能是凭据提示在等待输入。',
+    commandDetail(argv, { timeoutMs, stderr }),
+  );
 }
 
 /**
@@ -180,6 +279,23 @@ export class GitService {
    */
   private readonly contentTypeCache = new Map<string, string>();
 
+  /**
+   * **在飞的网络动作进度**(仓库根 → 最后一条解析出来的 git 进度)。
+   *
+   * 上游的等价物是 `IRepositoryState.pushPullFetchProgress`
+   * (`lib/app-state.ts:632`,由 `app-store.ts:5168` 的 `updatePushPullFetchProgress`
+   * 写)—— 那是**主进程内存里的一份状态**,由渲染层订阅。我们是 HTTP 两半,
+   * 所以这份状态留在宿主,由 `sync-progress` 路由读出去,客户端在动作在飞期间轮询它。
+   *
+   * 键是 {@link gate} 解析出的**仓库根**:客户端两次请求(`push` 与 `sync-progress`)
+   * 带的是同一个 `state.current`,所以在路由里**不再**解析一次 —— 那会让每次轮询
+   * 多跑一条 `git rev-parse` 子进程(250ms 一次)。
+   *
+   * 生命周期:动作开始时写入、`finally` 里删除。**不**跨动作残留(否则一次推送结束后
+   * 的轮询会读到上一条,界面会回跳)。
+   */
+  private readonly syncProgressByRoot = new Map<string, SyncProgressSnapshot>();
+
   constructor(
     private readonly runner: GitRunner,
     private readonly options: GitServiceOptions,
@@ -238,7 +354,19 @@ export class GitService {
     argv: readonly string[],
     cwd: string,
     context: string,
-    opts: { input?: string; env?: Readonly<Record<string, string>>; timeoutMs?: number; allow?: readonly number[] } = {},
+    opts: {
+      input?: string;
+      env?: Readonly<Record<string, string>>;
+      timeoutMs?: number;
+      allow?: readonly number[];
+      /**
+       * 逐行观察 stderr(进度源)。见 {@link syncProgressOptions} —— 这里**必须**
+       * 显式搬过去:`must()` 是逐字段构造 spec 的,漏一个字段的表现是
+       * 「`--progress` 加了、stderr 却仍是收集模式 ⇒ 一条进度都没有」,
+       * 而那看起来完全像「git 没报进度」(第一版就是这么静的)。
+       */
+      onStderrLine?: (line: string) => void;
+    } = {},
   ): Promise<GitRunResult> {
     const spec: Parameters<GitRunner['run']>[2] = {};
     if (opts.input !== undefined) {
@@ -250,9 +378,42 @@ export class GitService {
     if (opts.timeoutMs !== undefined) {
       spec.timeoutMs = opts.timeoutMs;
     }
+    if (opts.onStderrLine !== undefined) {
+      spec.onStderrLine = opts.onStderrLine;
+    }
     const res = await this.runner.run(argv, cwd, spec);
+    /*
+     * 失败分类的**顺序**是契约(2026-10,用户报「弹窗里出现未知错误」):
+     *
+     * 1. **超时优先**:`timedOut === true` 是**已知**条件 ⇒ 直接给 `timeout` 档,
+     *    **不**走 `classifyGitFailure`。理由:超时那一刻 stderr 可能已经有半截输出
+     *    (git 的进度行),按 stderr 分类要么命不中任何模式(⇒ 占位符)、要么指向一个
+     *    **次要**原因(比如把「传到一半被掐断」认成 auth)。超时就是这次失败的**原因**,
+     *    而已经收到的 stderr 一个字都不丢 —— 它连同**被终止的命令**与**超时值**
+     *    一起进 `detail`(见 {@link timeoutFailure})。
+     * 2. **没有退出码但不是超时**:进程被外部信号/宿主回收打断。stderr 有内容就用它分类
+     *    (那可能是真因);一个字节都没有时给一句**命名过的事实**,而不是占位符。
+     * 3. 其余照旧:交给 `classifyGitFailure`。
+     *
+     * ⚠️ 这三条只做一件事:让**已知**的条件不再冒充未知。真正的兜底
+     * (`classifyGitFailure` 的 `?? '未知错误'`)**没有删** —— 它仍然接住「git 以非零码退出
+     * 且一个字节都没写」这种我们确实不知道的情况(用户总指令:先做,不删)。
+     */
     const allow = opts.allow ?? [0];
-    if (res.exitCode === null || !allow.includes(res.exitCode)) {
+    if (res.timedOut === true) {
+      throw timeoutFailure(argv, context, spec.timeoutMs ?? DEFAULT_TIMEOUT_MS, res.stderr);
+    }
+    if (res.exitCode === null) {
+      if (firstLine(res.stderr) === '') {
+        throw new GitServiceError(
+          'internal',
+          `${context}失败:进程在写出任何输出之前就被终止了(宿主没有拿到它的退出码)。`,
+          commandDetail(argv, { stderr: res.stderr }),
+        );
+      }
+      throw classifyGitFailure(res.stderr, context);
+    }
+    if (!allow.includes(res.exitCode)) {
       throw classifyGitFailure(res.stderr, context);
     }
     return res;
@@ -265,6 +426,48 @@ export class GitService {
     opts: { binary?: boolean } = {},
   ): Promise<GitRunResult> {
     return this.runner.run(argv, cwd, opts.binary === true ? { binary: true } : {});
+  }
+
+  /**
+   * **在飞的网络动作进度** —— `sync-progress` 路由的唯一读点。
+   *
+   * 只查一次 Map,**不跑任何子进程**:客户端在动作在飞期间按 ~250ms 轮询它
+   * (见 `docs/proposals/push-progress.md` 的选型)。取不到 ⇒ `null`
+   * (没有动作在跑、或这个仓库不是这次动作的目标)。
+   *
+   * @param path - 客户端传来的仓库路径;与 `push`/`fetch`/`pull` 同一个 `state.current`。
+   */
+  public syncProgressOf(path: string): SyncProgressSnapshot | null {
+    return this.syncProgressByRoot.get(path) ?? null;
+  }
+
+  /**
+   * 给一次网络动作装上**进度源** —— 上游 `lib/progress/from-process.ts:19-46` 的
+   * `executionOptionsWithProgress()` 的宿主等价物。
+   *
+   * 做了两件事,两件都必要:
+   *  1. 挑本动作的解析器(`createSyncProgressParser`:push / fetch / pull 三支的步骤
+   *     权重表是**逐字镜像**的上游文件);
+   *  2. 把 `onStderrLine` 挂上去(`git-runner.ts` 会因此把 stderr 改成管道并逐行切,
+   *     同时**仍然**缓存尾部交给 `must()` 做失败分类)。
+   *
+   * `--progress` 由各自的 `*Argv()` 加(调用方传 `progress: true`)—— 上游
+   * `lib/git/push.ts:78` 的位置逐字同:三个开关之后、`--` 之前。
+   *
+   * @param kind - push / fetch / pull。
+   * @param root - 仓库根(进度表的键)。
+   * @param opts - 原本要交给 runner 的选项(env / timeoutMs);原样透传。
+   */
+  private syncProgressOptions(
+    kind: SyncProgressKind,
+    root: string,
+    opts: { env?: Readonly<Record<string, string>>; timeoutMs?: number } = {},
+  ): Parameters<GitRunner['run']>[2] {
+    const parser = createSyncProgressParser(kind);
+    return {
+      ...opts,
+      onStderrLine: createSyncProgressLineSink(kind, parser, (snapshot) => { this.syncProgressByRoot.set(root, snapshot); }),
+    };
   }
 
   private credentialEnv(): Readonly<Record<string, string>> | undefined {
@@ -1456,14 +1659,54 @@ export class GitService {
     await this.must(remoteSetUrlArgv(name, url), root, '修改远端地址');
   }
 
+  /**
+   * `--global` 配置读写用的工作目录。
+   *
+   * ## 为什么不能沿用「调用方给的 path」
+   *
+   * `git config --global` 与工作树**无关**,但 `config()` / `setConfig()` 原先无条件过
+   * `gate(path)`(`:206-214`,`allowedRoots` 白名单)。而客户端读全局身份时传的 path 是
+   * **`'.'`**(`src/core/desktop/lib/git/config.ts:203` 的 `getConfigValueInPath(name, null, …)`
+   * ⇒ `path ?? '.'`),于是「宿主进程 cwd 不在任何已登记仓库里」时这条读**必然**失败:
+   *
+   * ```
+   * config-get 失败: 这个目录不是 git 仓库。      ← 2026-10 探针实测原文
+   * ```
+   *
+   * 后果是 Git 页的三个字段(姓名 / 邮箱 / 默认分支)与『编辑全局 Git 配置』那行链接
+   * **永远空着**,而客户端 `getGlobalConfigValue()` 把 `!ok` 吞成 `null`
+   * (`config.ts:204-206`)⇒ 界面上一个字的错误都没有。
+   *
+   * ## 为什么这不是放宽安全边界
+   *
+   * `--global` 从不读写任何仓库:`gate` 要守的是「git 只能碰用户显式添加过的仓库」,
+   * 而全局配置文件在用户主目录里,是**设置界面本来就要编辑的东西**。而且能力上没有多一分
+   * ——任何**已登记**仓库路径本来就能执行同一件事(`path` 只当 cwd 用)。
+   *
+   * 取目录的顺序:全局 gitconfig 所在目录(`homedir()`,由
+   * {@link globalGitConfigPath} 算出,一定存在且与 `--global` 语义一致)
+   * → 第一个已登记仓库 → `process.cwd()`。
+   * @returns 一个存在的工作目录。
+   */
+  private globalConfigCwd(): string {
+    const configPath = globalGitConfigPath();
+    if (configPath !== null) {
+      return dirname(configPath);
+    }
+    const roots = this.options.allowedRoots();
+    return roots[0] ?? process.cwd();
+  }
+
   async config(path: string, key: string, scope: 'local' | 'global' = 'local'): Promise<string | null> {
-    const root = await this.gate(path);
+    // 见 `globalConfigCwd()`:全局作用域不读工作树,所以**不过** gate。
+    const root = scope === 'global' ? this.globalConfigCwd() : await this.gate(path);
     const res = await this.optional(configGetArgv(key, scope), root);
     return res.exitCode === 0 ? parseConfigValue(res.stdout) : null;
   }
 
   async setConfig(path: string, key: string, value: string, global = false): Promise<void> {
-    const root = await this.gate(path);
+    // 同上;读与写必须走同一条 cwd 规则,否则会出现「读得到、写不进」。
+    const root = global ? this.globalConfigCwd() : await this.gate(path);
     await this.must(configSetArgv(key, value, global), root, `写入配置 ${key}`);
   }
 
@@ -1474,13 +1717,21 @@ export class GitService {
       throw new GitServiceError('no-upstream', '这个仓库还没有远端。');
     }
     const targets = remote !== undefined && remote !== '' ? [remote] : names;
-    for (const name of targets) {
-      await this.must(fetchArgv(name), root, `抓取 ${name}`, {
-        ...(this.credentialEnv() !== undefined ? { env: this.credentialEnv() as Readonly<Record<string, string>> } : {}),
-        timeoutMs: 120_000,
-      });
-      // 抓取后同步远端默认分支指向;失败不致命(照 Desktop)。
-      await this.optional(['remote', 'set-head', '-a', '--', name], root);
+    try {
+      for (const name of targets) {
+        // `progress: true` + `syncProgressOptions` ⇒ 与上游 `lib/git/fetch.ts:52-84`
+        // 同形:一条 `--progress`,stderr 逐行喂给 `FetchProgressParser`。
+        await this.must(fetchArgv(name, { progress: true }), root, `抓取 ${name}`, this.syncProgressOptions('fetch', root, {
+          ...(this.credentialEnv() !== undefined ? { env: this.credentialEnv() as Readonly<Record<string, string>> } : {}),
+          timeoutMs: 120_000,
+        }));
+        // 抓取后同步远端默认分支指向;失败不致命(照 Desktop)。
+        await this.optional(['remote', 'set-head', '-a', '--', name], root);
+      }
+    } finally {
+      // 动作结束 ⇒ 进度立刻作废(上游 `performFetch` 的 `finally` 里
+      // `updatePushPullFetchProgress(repository, null)`,`app-store.ts:6004`)。
+      this.syncProgressByRoot.delete(root);
     }
   }
 
@@ -1511,10 +1762,15 @@ export class GitService {
      */
     const rebase = opts.rebase ?? ((await this.readPullWithRebase(root)) === true);
     const ffOnly = rebase ? false : await this.pullAllowsFfOnly(root);
-    await this.must(pullArgv({ remote, rebase, ffOnly }), root, '拉取', {
-      ...(this.credentialEnv() !== undefined ? { env: this.credentialEnv() as Readonly<Record<string, string>> } : {}),
-      timeoutMs: 180_000,
-    });
+    try {
+      // 上游 `lib/git/pull.ts:26` 的 `--progress`(位置同 fetch/push)。
+      await this.must(pullArgv({ remote, rebase, ffOnly, progress: true }), root, '拉取', this.syncProgressOptions('pull', root, {
+        ...(this.credentialEnv() !== undefined ? { env: this.credentialEnv() as Readonly<Record<string, string>> } : {}),
+        timeoutMs: 180_000,
+      }));
+    } finally {
+      this.syncProgressByRoot.delete(root);
+    }
   }
 
   /**
@@ -1583,17 +1839,30 @@ export class GitService {
     if (status.upstream !== null && status.upstream.includes('/')) {
       remoteBranch = status.upstream.slice(status.upstream.indexOf('/') + 1);
     }
-    await this.must(pushArgv({
-      remote,
-      branch: status.branch,
-      ...(remoteBranch !== undefined && remoteBranch !== '' ? { remoteBranch } : {}),
-      setUpstream: needUpstream,
-      forceWithLease: opts.force === true,
-      noVerify: opts.noVerify === true,
-    }), root, opts.force === true ? '强推' : '推送', {
-      ...(this.credentialEnv() !== undefined ? { env: this.credentialEnv() as Readonly<Record<string, string>> } : {}),
-      timeoutMs: 180_000,
-    });
+    try {
+      /*
+       * `progress: true` + `syncProgressOptions` —— 上游 `lib/git/push.ts:77-99`
+       * 与 `app-store.ts:5313-5329` 的宿主侧等价物:
+       * `git push --progress` 的 stderr 逐行喂给 `PushProgressParser`,
+       * 解析结果落进 `syncProgressByRoot`,由 `sync-progress` 路由读出去。
+       */
+      await this.must(pushArgv({
+        remote,
+        branch: status.branch,
+        ...(remoteBranch !== undefined && remoteBranch !== '' ? { remoteBranch } : {}),
+        setUpstream: needUpstream,
+        forceWithLease: opts.force === true,
+        noVerify: opts.noVerify === true,
+        progress: true,
+      }), root, opts.force === true ? '强推' : '推送', this.syncProgressOptions('push', root, {
+        ...(this.credentialEnv() !== undefined ? { env: this.credentialEnv() as Readonly<Record<string, string>> } : {}),
+        timeoutMs: 180_000,
+      }));
+    } finally {
+      // 上游 `performPush` 的 `updatePushPullFetchProgress(repository, null)`
+      // (`app-store.ts:5374`)—— 放在 `finally` 里,失败路径同样作废。
+      this.syncProgressByRoot.delete(root);
+    }
   }
 
   async clone(input: { url: string; path: string; branch?: string }): Promise<string> {

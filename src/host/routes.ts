@@ -688,6 +688,21 @@ export function createGitHandler(deps: RouteDeps): (request: IncomingMessage, re
     // ---------- 状态 / 同步 ----------
     'status': async (body) => deps.git.status(requirePath(body)),
     'sync-state': async (body) => deps.git.syncState(requirePath(body)),
+    /*
+     * **在飞的网络动作进度**(`git --progress` 的 stderr 解析结果)。
+     *
+     * 为什么需要一条**独立**的路由:推送本身是一条**一直阻塞到结束**的请求,
+     * 进度不可能搭它自己的响应回来(响应就是 `{ok:true}`,那时已经推完了)。
+     * 所以进度走**旁路** —— 推送请求照旧(信封、错误码、`detail` 全部不变,
+     * 见 `docs/push-failure-surfaces.md`),这条路由只查宿主内存里的一份 Map。
+     *
+     * 代价刻意压到最低:一次 Map 查询,**不跑任何子进程**(路径不做 `gate()`,
+     * 理由见 `GitService.syncProgressOf` 的注释),所以客户端可以按 ~250ms 轮询。
+     *
+     * 取不到 ⇒ `{ progress: null }`(没有动作在跑 / 不是这个仓库);**不报错** ——
+     * 「没有进度」是正常状态,把它做成 4xx 会让客户端每一轮都记一条诊断。
+     */
+    'sync-progress': async (body) => ({ progress: deps.git.syncProgressOf(requirePath(body)) }),
 
     // ---------- diff ----------
     'diff': async (body) => {

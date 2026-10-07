@@ -67,6 +67,21 @@ export interface GitRunResult {
    * 当成大小报给用户(旧实现里 `size` 最多就是 4MB,因为它是「保留了多少」)。
    */
   stdoutTotalBytes?: number;
+  /**
+   * **这次调用是被 `timeoutMs` 到点后由本模块主动终止的**。
+   *
+   * 为什么必须有这个字段(2026-10,用户报「推送失败弹窗里出现未知错误」):
+   * 超时之前只表达成 `exitCode: null`,而 `exitCode: null` 至少有**三种**成因 ——
+   * ①本模块的定时器到点(我们**知道**原因);②`handle.done` 被外部信号/宿主回收打断;
+   * ③`handle.done` reject。三种折成同一个形状 ⇒ `must()` 只能落
+   * `classifyGitFailure('', …)`,而 stderr 为空时那句兜底是**占位符**
+   * (`git-service.ts` 的 `?? '未知错误'`)⇒ 把「已知的超时」播成「未知错误」,
+   * 并且**丢掉了唯一可诊断的信息**(超时值、被终止的命令)。
+   *
+   * 所以把**已知的那一种**单独标出来:只有本模块的 `setTimeout` 到点才置 `true`。
+   * 它是 `exitCode: null` 的**子集**,不是替代 —— 没置 `true` 的 `null` 仍然是「不知道」。
+   */
+  timedOut?: boolean;
 }
 
 export interface GitRunOptions {
@@ -85,6 +100,19 @@ export interface GitRunOptions {
    * 新的原始字节路径见 `GitRunner.open`。
    */
   binary?: boolean;
+  /**
+   * **逐行**观察子进程的 stderr(git 的进度写在这里)。
+   *
+   * 给了它 ⇒ 这一次 spawn 走 `stderr: 'pipe'`(而不是收集模式),回调随数据到达被调用;
+   * `GitRunResult.stderr` **仍然照旧**有值(我们自己缓存尾部)—— 这是刻意的:
+   * `must()` 的失败分类(`classifyGitFailure`)读的就是它,观察进度**不能**把
+   * 「推送失败弹窗」那条链路的输入弄丢。
+   *
+   * 行边界与上游 `lib/progress/from-process.ts:91` 用的 `byline@5` **逐条对齐**
+   * (见 {@link createLineSplitter})—— git 的进度行是 **`\r` 分隔**的,
+   * 只按 `\n` 切会得到「0%…1%…2%…」一整行,解析器只认到第一段。
+   */
+  onStderrLine?: (line: string) => void;
 }
 
 /**
@@ -125,7 +153,15 @@ export interface GitRunner {
 
 /** 单次输出上限(收集后截断,避免超大仓 diff 撑爆内存)。 */
 export const OUTPUT_CAP_BYTES = 4 << 20;
-const DEFAULT_TIMEOUT_MS = 30_000;
+/**
+ * 没显式给 `timeoutMs` 时的默认上限。
+ *
+ * **导出**的理由:`GitService.must()` 要在超时文案里报出**真实的超时值**
+ * (`git-service.ts` 的 `timeoutFailure`)。默认值若只活在这里,那句文案就只能写
+ * 「超时」而不能写「超时(30 秒)」—— 而「超时值」正是这次要给出的可诊断信息之一。
+ * 两处各写一个常量是第二份真源,漂移了没人会发现。
+ */
+export const DEFAULT_TIMEOUT_MS = 30_000;
 
 /** 收集模式的三种形态:管道 / 继承 / 有界收集(可选 spill 兜底)。 */
 type CollectMode = { maxBytes: number; spill?: { maxBytes: number } };
@@ -158,6 +194,15 @@ interface SpawnedHandle {
   stdin?: { write(data: string): boolean; end(): void; on?(event: string, cb: (...args: unknown[]) => void): void } | undefined;
   /** `stdio.stdout === 'pipe'` 时才有。 */
   stdout?: AsyncIterable<Uint8Array> & { destroy?(): void } | undefined;
+  /**
+   * `stdio.stderr === 'pipe'` 时才有。
+   *
+   * 宿主 `dsh-subprocess-local` **确实提供它**:`bindManagedProcess` 的返回对象里
+   * `stderr: errMode === 'pipe' ? stderr : void 0`(`lib/runner-launch-*.js`),
+   * 而底下的子进程从 `spawnSubprocess` 起 stderr 就是 `"pipe"`。
+   * 本文件的接口之前没声明它,所以「读不到 git 进度」不是宿主不支持,是我们没用。
+   */
+  stderr?: AsyncIterable<Uint8Array> & { destroy?(): void } | undefined;
   done?: Promise<{ exitCode: number | null }>;
   terminate?: () => void;
   collected?: {
@@ -302,22 +347,36 @@ function spawnWith(
     return Promise.resolve({ exitCode: 1, stdout: '', stderr: bad });
   }
   const wantsInput = opts.input !== undefined;
+  /*
+   * **观察 stderr 时走管道,否则走收集**(逐字保留旧行为)。
+   *
+   * 两种模式不能同时要:宿主 `bindManagedProcess` 里 `stderr` 要么被
+   * `collectStream()` 接走(`collected.stderr` 有值、`handle.stderr` 是 `void 0`),
+   * 要么原样交出来(`handle.stderr` 有值、`collected.stderr` 没有)。
+   */
+  const observeStderr = opts.onStderrLine !== undefined;
+  const onStderrLine = opts.onStderrLine;
   let handle: SpawnedHandle;
   try {
-    handle = service.spawn({
-      argv,
-      cwd,
-      stdio: {
-        stdin: wantsInput ? 'pipe' : 'ignore',
-        stdout: { maxBytes: OUTPUT_CAP_BYTES },
-        stderr: { maxBytes: OUTPUT_CAP_BYTES },
-      },
-      graceMs: 2_000,
-      ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
-      ...(opts.env !== undefined ? { env: opts.env } : {}),
-    });
+    handle = spawnOnce(service, argv, cwd, opts, wantsInput, observeStderr);
   } catch (error) {
     return Promise.resolve({ exitCode: 127, stdout: '', stderr: messageOf(error) });
+  }
+  if (observeStderr && handle.stderr === undefined) {
+    /*
+     * 宿主这一版不暴露 stderr 管道 ⇒ **收掉这个进程,退回收集模式重来**。
+     *
+     * 为什么不能就这么继续:`must()` 的失败分类读的是 `res.stderr`,丢了它
+     * 「推送失败弹窗」那条链路会**静默**失效(界面只会说一句没有 stderr 的通用错)。
+     * 半途退化成「有进度但没有错误详情」比没有进度更坏 —— 那正是本仓反复付代价的
+     * 那类「看起来能用」的降级。此时进程刚起来,还没写任何东西,收掉是安全的。
+     */
+    try { handle.terminate?.(); } catch { /* 已退出 */ }
+    try {
+      handle = spawnOnce(service, argv, cwd, { ...opts, onStderrLine: undefined }, wantsInput, false);
+    } catch (error) {
+      return Promise.resolve({ exitCode: 127, stdout: '', stderr: messageOf(error) });
+    }
   }
 
   if (wantsInput) {
@@ -329,22 +388,74 @@ function spawnWith(
     }
   }
 
+  /*
+   * stderr 管道:自己读、自己缓存尾部。
+   *
+   * 缓存是**必须**的 —— 它替掉了收集模式本来会给的那份 `res.stderr`
+   * (`read(handle,'stderr')` 在管道模式下拿不到东西)。上限与收集模式同一个
+   * `OUTPUT_CAP_BYTES`,并且与收集模式一样**保留尾部**(错误在末尾)。
+   * 口径同上游 `lib/git/push-terminal-chunk.ts:21-40`:它数的是**字符**不是字节。
+   */
+  let pipedStderr: string | undefined;
+  let stderrDrained: Promise<void> | undefined;
+  const stderrStream = handle.stderr;
+  if (observeStderr && stderrStream !== undefined && onStderrLine !== undefined) {
+    const splitter = createLineSplitter(onStderrLine);
+    pipedStderr = '';
+    stderrDrained = (async () => {
+      try {
+        for await (const chunk of stderrStream) {
+          const text = splitter.push(chunk);
+          if (text !== '') {
+            pipedStderr = appendTail(pipedStderr ?? '', text, OUTPUT_CAP_BYTES);
+          }
+        }
+        const rest = splitter.flush();
+        if (rest !== '') {
+          pipedStderr = appendTail(pipedStderr ?? '', rest, OUTPUT_CAP_BYTES);
+        }
+      } catch {
+        /* 流被销毁(超时 terminate / 宿主回收)⇒ 已读到的部分就是全部 */
+      }
+    })();
+  }
+
   let timer: ReturnType<typeof setTimeout> | undefined;
   const done = Promise.resolve(handle.done).then(
     (d) => d ?? { exitCode: null },
     () => ({ exitCode: null }),
   );
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  /*
+   * ⚠️ 超时这一支**必须**把「是定时器到点」这件事带出去:它是「为什么没有退出码」的
+   * 唯一区别(`{@link GitRunResult.timedOut}`)。少了它,`must()` 只能把超时和
+   * 「句柄被外部打断」混成同一个形状,于是落回 `classifyGitFailure('')` 的占位符。
+   *
+   * 用一个闭包标志而不是给 resolve 值加字段:`Promise.race` 的成员类型会被收窄成
+   * 字面量联合,多一个可选字段就会在读取处报 TS2339(实测)。标志的语义同样精确 ——
+   * 它只在**本模块的定时器抢在 race 判定之前**触发时为 true,而定时器在 race 判定时
+   * 会被 `clearTimeout`(微任务先于定时器回调),所以不存在「已判定完才置位」的假阳性。
+   */
+  let timedOut = false;
   const timeout = new Promise<{ exitCode: number | null }>((resolve) => {
     timer = setTimeout(() => {
+      timedOut = true;
       try { handle.terminate?.(); } catch { /* 已退出 */ }
       resolve({ exitCode: null });
     }, timeoutMs);
   });
 
-  return Promise.race([done, timeout]).then((result) => {
+  return Promise.race([done, timeout]).then(async (result) => {
     if (timer !== undefined) {
       clearTimeout(timer);
+    }
+    /*
+     * 等管道读完再取结果。宿主的 `done` 本身要等 stderr 关闭
+     * (`bindManagedProcess` 的 `outputStreamsClosed`),所以这里通常立刻返回;
+     * 加一个有界的等待只是防一个不肯关流的实现把整次 git 调用挂住。
+     */
+    if (stderrDrained !== undefined) {
+      await Promise.race([stderrDrained, delay(2_000)]);
     }
     const out = read(handle, 'stdout');
     const err = read(handle, 'stderr');
@@ -352,8 +463,11 @@ function spawnWith(
     return {
       exitCode: result.exitCode,
       stdout: out.text,
-      stderr: err.text,
+      // 管道模式:用我们缓存的那一份(收集器此时没有 stderr)。
+      stderr: pipedStderr ?? err.text,
       stdoutTotalBytes: out.totalBytes,
+      // 只有本模块的定时器到点才置 true(见 `GitRunResult.timedOut` 的三条成因)。
+      ...(timedOut ? { timedOut: true } : {}),
       // 二进制路径的判定**按字节**更准(snapshot 的 totalBytes vs bytes.length),
       // 所以它优先;文本路径用收集器自己报的 `lossy`。
       ...(binary !== undefined
@@ -361,6 +475,121 @@ function spawnWith(
         : (out.truncated ? { stdoutTruncated: true } : {})),
     };
   });
+}
+
+/**
+ * 一次 spawn(spawnWith 的两条路都用它:管道观察一次、降级收集一次)。
+ *
+ * **不吞异常**:`service.spawn` 抛出的错误要原样变成 `exitCode: 127` 的
+ * `stderr`(`spawnWith` 的旧行为),把那句话换成一个笼统串会让「子进程起不来」
+ * 变得无法诊断。收集模式的 `stderr` 上限在这里是**唯一**一处决定。
+ */
+function spawnOnce(
+  service: SubprocessLike,
+  argv: readonly string[],
+  cwd: string,
+  opts: GitRunOptions,
+  wantsInput: boolean,
+  observeStderr: boolean,
+): SpawnedHandle {
+  return service.spawn({
+    argv,
+    cwd,
+    stdio: {
+      stdin: wantsInput ? 'pipe' : 'ignore',
+      stdout: { maxBytes: OUTPUT_CAP_BYTES },
+      stderr: observeStderr ? 'pipe' : { maxBytes: OUTPUT_CAP_BYTES },
+    },
+    graceMs: 2_000,
+    ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+    ...(opts.env !== undefined ? { env: opts.env } : {}),
+  });
+}
+
+/** 有界等待(只给「等 stderr 排空」那一处用;不引真定时器语义)。 */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+
+/**
+ * 保留**尾部**的有界拼接(与收集模式同一个口径)。
+ *
+ * 为什么保留尾部:错误在末尾。上游 `lib/git/push-terminal-chunk.ts:21-40` 做的是同一
+ * 件事(并且同样注明了「数的是字符不是字节」)。
+ */
+function appendTail(current: string, chunk: string, cap: number): string {
+  const next = current + chunk;
+  return next.length <= cap ? next : next.slice(next.length - cap);
+}
+
+/** `byline@5.0.0` 的分隔符集合(`lib/byline.js` 的 `_transform`)。 */
+const LINE_BREAK = /\r\n|[\n\v\f\r\u0085\u2028\u2029]/;
+
+/**
+ * 字节流 → 行(逐条对齐上游 `lib/progress/from-process.ts:91` 用的 `byline@5.0.0`)。
+ *
+ * 为什么必须自己写而不是装 `byline`:本仓不允许新增 npm 依赖,而这段规则很短。
+ * 对齐的是 byline 的**四条**语义(少一条就会给解析器喂错行):
+ *
+ *  1. 分隔符 = `\r\n | \n | \v | \f | \r | \x85 | \u2028 | \u2029`
+ *     (byline 的 `_transform` 用同一个字符类);
+ *  2. **空行丢弃**(byline 的 `keepEmptyLines` 缺省 false)—— 而 git 的进度行恰好是
+ *     连续 `\r`,切出来全是空行,不丢的话解析器要白跑几千次;
+ *  3. `\r` 与 `\n` 落在**两块之间**时算一个分隔符(byline 的 `_lastChunkEndedWithCR`);
+ *  4. 最后一段没有分隔符的内容**留到流结束**才交(byline 的 `_flush` → `_pushBuffer(…,0,…)`)。
+ *
+ * 一处**刻意**的改进:字节→字符串用流式 `TextDecoder`。byline 是每块各自
+ * `chunk.toString('utf8')`,多字节字符跨块会坏(对 git 的进度行没有影响,但对
+ * `remote:` 后面可能出现的中文分支名/路径有意义)。**行边界不变**。
+ * @param onLine - 每切出一行(非空)时调用。
+ * @returns `push(chunk)` 与 `flush()`;内部状态只在这里。
+ */
+function createLineSplitter(onLine: (line: string) => void): {
+  push(chunk: Uint8Array): string;
+  flush(): string;
+} {
+  const decoder = new TextDecoder();
+  let carry = '';
+  let lastEndedWithCR = false;
+  return {
+    /*
+     * 返回值是**这一块原始文本**(要不要缓存尾部由调用方决定):行回调只负责解析,
+     * 错误详情那份缓存必须是**原始字节序的全文**,不能只留切出来的行
+     * (否则 `classifyGitFailure` 看到的东西与收集模式不一致)。
+     */
+    push(chunk: Uint8Array): string {
+      const text = decoder.decode(chunk, { stream: true });
+      if (text === '') {
+        return '';
+      }
+      const parts = text.split(LINE_BREAK);
+      // CRLF 跨块:后一块开头的 `\n` 属于前一块结尾的 `\r`。
+      if (lastEndedWithCR && text.startsWith('\n')) {
+        parts.shift();
+      }
+      if (carry !== '') {
+        parts[0] = carry + (parts[0] ?? '');
+        carry = '';
+      }
+      lastEndedWithCR = text.endsWith('\r');
+      carry = parts.pop() ?? '';
+      for (const part of parts) {
+        if (part.length > 0) {
+          onLine(part);
+        }
+      }
+      return text;
+    },
+    flush(): string {
+      const rest = decoder.decode();
+      const tail = carry + rest;
+      carry = '';
+      if (tail.length > 0) {
+        onLine(tail);
+      }
+      return rest;
+    },
+  };
 }
 
 /**
