@@ -974,8 +974,6 @@ export function RepositoryPanel(props: {
   const [indicators, setIndicators] = useState<Record<string, RepoIndicators>>({});
   const [confirmRemove, setConfirmRemove] = useState<RepoEntry | null>(null);
   const [aliasFor, setAliasFor] = useState<{ repo: RepoEntry; value: string } | null>(null);
-  /** 远程仓库段是否展开。**默认折叠** —— 它不得占据本地列表的位置(见下面那段注释)。 */
-  const [remoteOpen, setRemoteOpen] = useState(false);
 
   /*
    * 点外面关闭。**不能**再靠「一个包住一切的 inset:0 覆盖层」来判:那个覆盖层是
@@ -1206,17 +1204,6 @@ export function RepositoryPanel(props: {
     });
   }, [initOffer, props, store]);
 
-  const query = filter.trim().toLowerCase();
-  const linkedRemotes = new Set(
-    snap.repos
-      .map((r) => r.remote)
-      .filter((x): x is string => x !== null && x !== undefined),
-  );
-  const remoteHits = snap.remoteRepos
-    .filter((r) => !snap.hidden.includes(r.fullName))
-    .filter((r) => query === '' || r.fullName.toLowerCase().includes(query))
-    .slice(0, 40);
-
   return (
     <>
       {/*
@@ -1397,134 +1384,34 @@ export function RepositoryPanel(props: {
         </div>
 
         {/*
-         * 远程仓库(可选登录)。**这不是 Desktop 的一部分** —— 上游的
-         * `RepositoriesList` 只列本地仓库。这一段是本插件原有的产品能力
-         * (列出你账号下未隐藏的仓库,可一键隐藏),换成上游实现后如果直接删掉就是
-         * **功能回归**,所以保留 —— 但**收在本地列表下面、默认折叠**。
+         * ⚠️ **这里原先有「GitHub 远端仓库清单」那一段(2026-10 按用户指令移除)。**
          *
-         * ## 为什么必须收起来(真 Chrome 实测,不是审美)
+         * 用户原话:「然后【当前仓库】下拉 repo list 的**底部不用显示 GitHub 的
+         * remote repo list 了**,因为 Clone a repository 的 dialog 里有」。
          *
-         * 这里以前是「分隔线 + 组头 + `.gw-repo-list` 的行」三块平铺,而
-         * `.gw-repo-list` 在 `repository-list.scss` 里是 `flex:1 1 auto`(那是给
-         * **面板自己**写的容器契约)。于是**同一个 flex:1 同时落在本地段的祖先和远端段上**,
-         * 两者抢面板高度,而远端段是后写的、又带 `overflow:auto`,结果把本地列表挤到 0:
+         * 上游依据(这一条是「我们多画了」,不是「上游少了」):
+         *  - `ui/repositories-list/repositories-list.tsx` 全文 `grep -ci remote` = **0**;
+         *    它只渲染 `Repositoryish = Repository | CloningRepository`
+         *    (`ui/repositories-list/group-repositories.ts:50`)—— 即**本地**仓库
+         *    (含「正在克隆」那一个),没有「你账号下的远端仓库」这一节;
+         *  - 所以那不是移植缺口,而是我们自造的 UI。它现在有了**正确的家**:
+         *    Clone 弹窗的 GitHub 页签(上游 `ui/clone-repository/**`,见
+         *    `src/client/clone-dialog.tsx`),那里的列表本来就是干这件事的。
          *
-         * | 量(真 Chrome,面板 250×157) | 修前 | 修后 |
-         * |---|---|---|
-         * | `.repository-list`(上游列表根) | 45px | 占满剩余 |
-         * | `.filter-list-container` | **0px** | >0 |
-         * | `.ReactVirtualized__Grid` 内联 `height` | **0px** | >0 |
-         * | 渲染出来的 `.repository-list-item` | **0 行** | 全部仓库 |
-         * | 远端段 | 157px(吃掉整个面板) | 折叠成一行的开关 |
+         * **数据源与全部方法一个都没删**(「先做,不删」):
+         *  - 宿主路由 `remote-repos` / `remote-repos/hide` / `remote-repos/unhide`
+         *    (`src/host/routes.ts:1228/1233/1241`,逐字未动);
+         *  - 客户端包装 `api.remoteRepos` / `api.hideRemote` / `api.unhideRemote`
+         *    (`src/client/api.ts:942-944`);
+         *  - store 的 `loadRemoteRepos` / `hideRemote` / `unhideRemote`
+         *    与快照字段 `remoteRepos` / `remoteReposLoading` / `hidden`
+         *    (`src/client/store.ts:538-539`);
+         *  - 行组件 `RemoteRow`(本文件下方,现在导出但**没有渲染方**)。
+         *    Clone 弹窗消费的是同一份 `snap.remoteRepos`。
          *
-         * Grid 高度 0 ⇒ **一行都不渲染**(react-virtualized 按测得高度裁),于是用户
-         * 看到的是「打开下拉只有手写远端仓库、本地仓库列表根本看不到」—— 与截图一致。
-         * **注意:本地的 DOM 其实排在远端段之前**,所以这不是「顺序错了」,而是
-         * 「本地那段被压成 0 高度」;§8.2 那句「位置基准错」只解释了面板整体偏位,
-         * 没有解释列表消失。
-         *
-         * 为什么不是「干脆删掉远端段」:那是**功能回归**(多仓库清单是 Desktop 没有的
-         * 产品能力)。为什么不是「挪进 Add ▾ 菜单」:`Add ▾` 的三项目前由本文件已有的
-         * 回调实现、且是**创建/添加仓库**的动作,把「你账号下的仓库清单」塞进去会同时
-         * 改掉那个菜单的语义与上游文案。收成**一个默认折叠的开关**是改动最小、
-         * 又不丢能力的做法,并且**绝不占据本地列表的位置**。
-         *
-         * 折叠态本身也承载信息(数量 / 拉取中),所以折叠不等于藏起来。
+         * 回收条件:要在这块下拉里再看一次远端清单时,从本仓历史取回这段 JSX
+         * (它从未被删出仓库历史),并把 `RemoteRow` 的导出收回去。
          */}
-        {snap.auth?.signedIn === true && (
-          <div className="gw-remote-section" data-gw-remote-section>
-            {/*
-             * ⚠️ `gw-pitem` 是**必须的**,不是装饰 —— 这个按钮此前**一条规则都没有**
-             * (`gw-remote-toggle` 在 `styles.ts` 与全部 scss 里 **0 命中**),于是它按
-             * **浏览器默认按钮 chrome** 渲染。真 Chrome 实测(2026-10,`/tmp/j2-repofid`):
-             *
-             * | 量 | 裸 `<button>` 实测 | 加 `gw-pitem` 之后 |
-             * |---|---|---|
-             * | `background-color` | `rgb(239,239,239)`(buttonface) | `rgba(0,0,0,0)` |
-             * | `border` | `2px outset rgb(0,0,0)` | `0px none` |
-             * | `border-radius` | `0px` | `7px` |
-             * | `font` | `13.3333px Arial` | `inherit`(12px) |
-             * | `color` | `rgb(0,0,0)` | `--dsw-alias-label-primary` |
-             * | `display` | `inline-block` | `flex`(子元素才排得开) |
-             * | 三个子元素 | 全 `display:inline`,挤成 `GitHub · @LinXueyuanStdio2 个仓库` | `.grow` 撑满 / `.tail` 靠右 |
-             *
-             * 为什么复用 `gw-pitem` 而不是新写一条 CSS:它就是**同一张表里的行原语**
-             * (图标 + `.grow` + `.tail`,与本段下面的 `RemoteRow` 同构),而
-             * `styles.ts:369-377` 已经为它写好 `.gw-pitem` 本体与 `.gw-pitem .grow` /
-             * `.gw-pitem .tail` 三条。加一个类名 = 零新增样式(「优先复刻结构、不叠声明」)。
-             * `gw-remote-toggle` 保留为身份类,将来要单独调时还有抓手。
-             */}
-            <button
-              type="button"
-              className="gw-pitem gw-remote-toggle"
-              aria-expanded={remoteOpen}
-              title={remoteOpen ? '收起远程仓库列表' : '展开你账号下的远程仓库'}
-              onClick={() => setRemoteOpen((v) => !v)}
-            >
-              {/*
-               * `gw-remote-chevron` / `.open` 在 CSS 里同样**零规则**(类名在 DOM 上、
-               * 产物里一条都没有),所以「展开时朝上」只能由本文件给。包一层 `span` 是
-               * 因为 `Icon` 的 props 里**没有** `style`(`src/client/icons.ts:136` 只有
-               * name/size/className/title),而那个文件不归本文件所有 —— 不为一行旋转改它。
-               */}
-              <span
-                className={remoteOpen ? 'gw-remote-chevron open' : 'gw-remote-chevron'}
-                style={{ display: 'inline-flex', flex: 'none',
-                  transform: remoteOpen ? 'rotate(180deg)' : undefined }}
-              >
-                <Icon name="chevron-down" size={10} />
-              </span>
-              <span className="grow">GitHub · @{snap.auth.login}</span>
-              <span className="tail">
-                {snap.remoteReposLoading ? '拉取中…' : `${remoteHits.length} 个仓库`}
-              </span>
-            </button>
-            {/*
-              * ⚠️ **`maxHeight` 不是审美,是防「本地列表再次整段消失」。**
-              *
-              * 实测(同一个真 Chrome 探针,`/tmp/j2-repofid/result-many.json`,40 个远程仓库):
-              * 展开后 `.gw-remote-list` 按内容长到 **1124px**,而面板只有 **735px**;
-              * `.gw-remote-section` 是 `flex:0 0 auto`(不收缩)⇒ 收缩的只能是有
-              * `min-height:0` 的 `.gw-repo-local` ⇒ 它被压成 **0**,`react-virtualized`
-              * 再次 memo 出 `height: 0px`,**三行本地仓库一行都不渲染**
-              * (`16_reopen_and_selection.rows` = `[]`,截图 `/tmp/j2-repofid/shot-many.png`
-              * 里左栏只剩远程行)。这正是上一轮花整条线修掉的那个塌陷,只是触发者换成了
-              * 我们自己的远端段 —— 所以**上限必须写在列表自己身上**:
-              * 远端段再怎么长,也只能吃掉面板的一部分,本地列表永远拿得到高度。
-              *
-              * 为什么是 `min(40vh, 320px)` 而不是 `40%`:百分比 `max-height` 对
-              * **auto 高度**的父盒(`.gw-remote-section` 是 `display:block`,高度由内容决定)
-              * 无法解析,按规范退化成 `none` —— 那等于没写。视口单位与父盒是否确定无关。
-              *
-              * ⚠️ 这段注释的**形态**本身是个坑:它必须是 JSX children 位置的「花括号 + 块注释」
-              * (本行上方就是这个形态),**不能**把块注释裸着塞进 `remoteOpen && (` 的括号里 ——
-              * 实测 esbuild 报 `Unexpected "}"`(与 goal 文档 §11.13 记的那次同族)。
-              * 而且注释正文里也**不能**写出那个块的结束定界符,否则它会把本注释提前关掉
-              * (我第一版就是这么把构建弄红的,§7.2「注释里的同名 token 会被命中」同一课)。
-              */}
-            {remoteOpen && (
-              <div className="gw-repo-list gw-remote-list" style={{ maxHeight: 'min(40vh, 320px)' }}>
-                {remoteHits.length === 0 && (
-                  <div className="gw-hint">
-                    {snap.remoteReposLoading ? '正在拉取你的仓库…' : '没有匹配的远程仓库。'}
-                  </div>
-                )}
-                {remoteHits.map((repo) => (
-                  <RemoteRow
-                    key={repo.fullName}
-                    repo={repo}
-                    linked={linkedRemotes.has(repo.fullName)}
-                    onHide={() => { void store.hideRemote(repo.fullName); }}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {snap.auth?.signedIn !== true && snap.repos.length > 0 && (
-          <div className="gw-hint">未登录:只显示本地仓库。登录后会列出你有权限的全部仓库。</div>
-        )}
       </div>
 
       {/*
@@ -1628,7 +1515,18 @@ export function RepositoryPanel(props: {
   );
 }
 
-function RemoteRow(props: { repo: RemoteRepo; linked: boolean; onHide: () => void }): ReactNode {
+/**
+ * 「远端仓库」那一行(图标 + `owner/name` + 日期/已关联 + 隐藏按钮)。
+ *
+ * ⚠️ **2026-10 起没有渲染方**:它原先唯一的调用点是上面那段被移除的远端清单
+ * (见「这里原先有…」那段注释)。按「先做,不删」**保留整份实现**,并**导出**
+ * 以免它变成一条 `@typescript-eslint/no-unused-vars`(同文件 `repoLabel` 的先例;
+ * 审计 §2.5 把这类「导出但无外部引用」记为可接受的现状,不是缺陷)。
+ *
+ * 回收条件:远端清单回到这块下拉里,或 Clone 弹窗的 GitHub 页签改用这一行
+ * (它现在的行是 `clone-dialog.tsx` 的 `CloneRepoRow`,形状同族但不带隐藏按钮)。
+ */
+export function RemoteRow(props: { repo: RemoteRepo; linked: boolean; onHide: () => void }): ReactNode {
   const { repo } = props;
   return (
     <div className="gw-pitem" style={{ cursor: 'default' }} title={repo.description ?? repo.fullName}>

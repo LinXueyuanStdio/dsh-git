@@ -486,6 +486,22 @@ export interface Snapshot {
    * (`lib/popup-manager.ts:131`)把错误推进**弹窗队列**;关闭 = 把队首 pop 掉。
    */
   pushFailure: GitError | null;
+  /**
+   * 最近一次**生成提交信息失败**的原始错误;`null` = 没有尚未关闭的失败弹窗。
+   *
+   * 用户 2026-10-07 报:「Changes 页面左下角点击生成的时候,**如果出现生成错误,
+   * 错误通知里缺失具体信息**」。改前这条失败走 `store.fail()`,而那个方法对
+   * `code === 'internal'` **刻意不附 `detail`**(`fail()` 的 suffix 判据),
+   * 于是宿主放在信封里的原始证据(生成 diff 失败时的 git stderr、
+   * 见 `git-service.ts` 的 `classifyGitFailure`)在客户端被**丢掉**;
+   * 而且它只是一条 7 秒后消失、无法选中的 toast。
+   *
+   * 这里照推送失败那条已经落地的模式(`pushFailure` 字段 + `bits.tsx` 的弹窗,
+   * 见 `docs/push-failure-surfaces.md` §10)原样搬运宿主的机器可读错误:
+   * **不在这里折成文案、不在这里截断**,弹窗逐字播 `message`、把 `detail` 放进
+   * 可滚可选的 `<pre>`、并附一行 `错误码:<code>`。
+   */
+  generateFailure: GitError | null;
   repos: RepoEntry[];
   hidden: string[];
   canPickDirectory: boolean;
@@ -614,6 +630,7 @@ function initial(): Snapshot {
     ready: false,
     globalError: null,
     pushFailure: null,
+    generateFailure: null,
     repos: [],
     hidden: [],
     canPickDirectory: false,
@@ -1048,6 +1065,53 @@ export class GitStore {
       return false; // 用户取消:静默(取消不是错误)
     }
     return this.addRepo('@pick');
+  }
+
+  /**
+   * 只**选一个目录**（不添加仓库）—— 克隆弹窗「Choose…」那一条。
+   *
+   * 为什么要走 store 而不是在弹窗里直接 `api.pickDirectory()`（改前就是那样）：
+   * 目录选择有**两条**通道，而它们的可用性互不相同：
+   *  1. `uiWorkspace.pickDirectory`（**客户端原生**弹窗，由 `src/client/index.ts:115-117`
+   *     从注入的服务里取到，拿到的是绝对路径）—— 只有它能在宿主没装
+   *     `directoryPickerController` 的 profile 里工作；
+   *  2. 宿主路由 `pick-directory`（`src/index.ts:381-400`，只有 `hasHostPicker()` 为真时才
+   *     交给路由，否则路由恒回 `{path:null}`）。
+   * 改前克隆弹窗只走第 2 条：宿主没有那个可选服务时，点「Choose…」**毫无反应、也不报错**
+   * ——上游 `clone-repository.tsx:593-646` 的 `onChooseDirectory` 至少还会返回
+   * `undefined`（用户取消）而不是静默失败。这里与同文件的 `addRepoViaDialog()` 用**同一份**
+   * 优先级与同一条错误文案（一处策略、两处调用点）。
+   *
+   * @returns 选中的**绝对路径**；`null` 表示「用户取消」或「两条通道都不可用」
+   *   （后者已经用一条可读 toast 说清，见下）。
+   */
+  public async pickCloneDirectory(): Promise<string | null> {
+    if (this.pickDirectory !== undefined) {
+      const attempt = this.pickDirectory();
+      if (attempt !== null) {
+        try {
+          const chosen = await attempt;
+          return chosen === null || chosen === '' ? null : chosen;
+        } catch (error) {
+          this.toast(
+            `目录选择不可用:${error instanceof Error ? error.message : String(error)}。请直接在「Local path」里填写绝对路径。`,
+            'err',
+          );
+          return null;
+        }
+      }
+    }
+    const result = await api.pickDirectory();
+    if (!result.ok) {
+      this.fail(result.error);
+      return null;
+    }
+    if (result.value.path === null) {
+      // 宿主也没有选择服务：给出可操作提示，而不是让按钮看起来「点了没反应」。
+      this.toast('这个环境没有目录选择器:请直接在「Local path」里填写绝对路径。', 'err');
+      return null;
+    }
+    return result.value.path;
   }
 
   async removeRepo(path: string): Promise<void> {
@@ -1646,7 +1710,22 @@ export class GitStore {
     const result = await api.generate({ path, files, stagedOnly: this.state.stagedOnly, provider, model });
     this.setCommitField('generating', false);
     if (!result.ok) {
-      this.fail(result.error);
+      /*
+       * 生成失败 ⇒ **弹窗**(带 `detail` 与错误码),不是一条只播一行的 toast。
+       *
+       * 为什么不能继续用 `this.fail()`:
+       *  1. `fail()` 对 `code === 'internal'` **不附 `detail`** —— 而生成路线上
+       *     「取 diff 失败」正是 `internal`(`classifyGitFailure` 兜底),宿主明明把
+       *     git 原始 stderr 放进了 `detail`,客户端却把它丢了;
+       *  2. toast 是**一条**,`Toast` 原语只吃一个 `text` 字符串 ⇒ 放不下
+       *     限高可滚、可选中复制的 `<pre>`,也放不下 `错误码:` 那一行;
+       *  3. 用户 2026-10-07 的硬要求是「生成错误必须给出具体信息」,
+       *     这与推送失败那轮(`docs/push-failure-surfaces.md` §10)是同一条契约。
+       *
+       * `fail()` 一个字没删:它仍然是其它 30 处失败路径的出口(那里没有 detail 可播,
+       * 或者 detail 已经在 suffix 里播了)。
+       */
+      this.emit({ generateFailure: result.error });
       return;
     }
     const hasUserText = this.state.commitForm.summary.trim() !== '';
@@ -2781,6 +2860,20 @@ async setHideWhitespaceHistory(value: boolean): Promise<void> {
       return;
     }
     this.emit({ pushFailure: null });
+  }
+
+  /**
+   * 关闭**生成提交信息失败**弹窗(与 {@link clearPushFailure} 同形)。
+   *
+   * 关闭路径是契约的一部分:没有它,弹窗会**永远关不掉** —— 快照里那场失败还在,
+   * 下一次重渲染它就复活(`push-failure-workbench-wiring-probe.mjs` 的 R2 判的正是这条:
+   * 「DOM 藏了、快照还留着错误」比不弹更坏)。
+   */
+  public clearGenerateFailure(): void {
+    if (this.state.generateFailure === null) {
+      return;
+    }
+    this.emit({ generateFailure: null });
   }
 
   /**

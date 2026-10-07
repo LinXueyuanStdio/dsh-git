@@ -1060,6 +1060,20 @@ export function createGitHandler(deps: RouteDeps): (request: IncomingMessage, re
       await deps.git.push(requirePath(body), { force: bool(body, 'force'), noVerify: bool(body, 'noVerify') });
       return { ok: true };
     },
+    /*
+     * **克隆目标路径的预检**(`clone/validate-path`)—— 上游
+     * `ui/clone-repository/clone-repository.tsx:687-733` 的 `validateClonePath()` 的宿主等价物。
+     *
+     * 为什么需要一条**独立**的路由(而不是让 `clone` 自己先报错):上游是在用户**边打字**
+     * 的时候校验目标路径的(`onPathChanged` / `updateUrl` / 窗口重新获得焦点 / 切页签都会
+     * 触发),错误当场出现在对话框里、并**把 Clone 按钮禁掉**。把校验塞进 `clone` 的响应里
+     * 就只能做到「按下之后才知道」——那正是改前我们这边的形态。
+     *
+     * 代价刻意压到最低:只做一次 `stat` + 一次 `readdir`,**不跑任何子进程、不写盘、不碰
+     * 仓库白名单**(目标路径按定义还不是我们登记的仓库);`requirePath` 只做字符串校验。
+     */
+    'clone/validate-path': async (body) => ({ kind: await deps.git.inspectClonePath(requirePath(body)) }),
+
     'clone': async (body) => {
       const url = str(body, 'url');
       const path = str(body, 'path');

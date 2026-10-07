@@ -5,7 +5,7 @@
  */
 
 import type {
-  BranchEntry, CommitDetail, CommitEntry, DiffResult, GitError, RepoEntry, RepoStatus, SyncProgressPayload, SyncState,
+  BranchEntry, ClonePathKind, CommitDetail, CommitEntry, DiffResult, GitError, RepoEntry, RepoStatus, SyncProgressPayload, SyncState,
 } from '../core/types.ts';
 import { MAX_BLOB_BYTES, isTextContentType } from '../core/blob.ts';
 import { payloadError, noteNormalized, narrowed } from './payload.ts';
@@ -571,6 +571,16 @@ const SHAPES: Readonly<Record<string, Shape>> = {
     },
   },
   'clone': { record: { root: 'string', repos: RepoEntryListShape } },
+  /*
+   * 克隆目标路径的预检(`clone/validate-path`)。`kind` 是**闭集**:
+   * `ClonePathKind` 的五档穷尽了上游 `validateClonePath()` 的结局,写成闭集是为了
+   * 新 host 回了第六种取值时**当场失败**而不是让未知取值静默走进某个 `default` 分支。
+   */
+  'clone/validate-path': {
+    record: {
+      kind: { literal: ['absent', 'empty', 'non-empty', 'not-a-directory', 'unreadable'] },
+    },
+  },
 
   // ---------- 配置 ----------
   'config-get': { record: { key: 'string', scope: 'string', value: 'string|null' } },
@@ -889,6 +899,18 @@ export const api = {
   syncProgress: (path: string) =>
     call<{ progress: SyncProgressPayload | null }>('sync-progress', { path }),
   clone: (url: string, path: string, branch?: string) => call<{ root: string; repos: RepoEntry[] }>('clone', { url, path, ...(branch !== undefined ? { branch } : {}) }),
+  /**
+   * **克隆目标路径的预检**（宿主 `clone/validate-path` → `GitService.inspectClonePath`）。
+   *
+   * 上游是在用户边打字时校验目标路径的（`ui/clone-repository/clone-repository.tsx:570-591`
+   * 的 `validatePath()`，由 `onPathChanged` / `updateUrl` / 切页签 / 窗口 focus 触发），
+   * 错误当场显示并把 Clone 按钮禁掉。这条路由就是那个校验的宿主半 ——
+   * 浏览器半没有 `readdir`，判定必须在能看见磁盘的一侧做（详见 `ClonePathKind` 的注释）。
+   *
+   * `kind === 'absent' | 'empty'` 表示**可以克隆**；其余三档各自对应上游一句文案。
+   */
+  cloneValidatePath: (path: string) =>
+    call<{ kind: ClonePathKind }>('clone/validate-path', { path }),
 
   // ---------- 配置 ----------
   configGet: (path: string, key: string, scope: 'local' | 'global') => call<{ key: string; scope: string; value: string | null }>('config-get', { path, key, scope }),

@@ -10,7 +10,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { lstat, mkdir, open as openFd, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open as openFd, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import {
@@ -18,7 +18,7 @@ import {
   isImmutableRev, looksBinary, parseRangeHeader,
 } from '../core/blob.ts';
 import type {
-  BranchEntry, CommitDetail, CommitEntry, DiffResult, GitError, RepoStatus, SyncState,
+  BranchEntry, ClonePathKind, CommitDetail, CommitEntry, DiffResult, GitError, RepoStatus, SyncState,
 } from '../core/types.ts';
 import {
   addArgv, applyCachedArgv, applyReverseArgv, blobContentArgv, blobIndexEntryArgv, blobSizeArgv, blobTreeEntryArgv, branchCreateArgv, branchDeleteArgv, branchListArgv,
@@ -1915,6 +1915,53 @@ export class GitService {
       // 上游 `performPush` 的 `updatePushPullFetchProgress(repository, null)`
       // (`app-store.ts:5374`)—— 放在 `finally` 里,失败路径同样作废。
       this.syncProgressByRoot.delete(root);
+    }
+  }
+
+  /**
+   * **克隆目标路径的预检** —— 上游 `ui/clone-repository/clone-repository.tsx:687-733` 的
+   * `validateClonePath()` 在宿主侧的等价物。
+   *
+   * ## 为什么必须落在宿主半(不是「顺手放这边」)
+   *
+   * 上游那个函数体就是 `await readdir(path)` + `catch (error.code)`;而**浏览器半没有
+   * 文件系统**:`src/client/shim-node-fs-promises.ts` 只有 `access` / `stat` / `readFile`
+   * (且都靠注入式宿主钩子),**没有 `readdir`**;路由表里也没有任何「列一个任意目录」
+   * 的端点(`repo/tree` 需要一个**已登记仓库**的路径,而克隆目标按定义还不是仓库)。
+   * ⇒ 判定只能发生在能看见磁盘的一侧。
+   *
+   * ## 逐档对齐(消息在客户端,见 `src/client/clone-dialog.tsx` 的 `clonePathMessage`)
+   *
+   * 先 `stat` 再 `readdir`,而不是直接 `readdir` 再读 errno —— **语义等价**,但两种
+   * 「不是目录」的分岔(路径是一个文件 / 路径中间有一段是文件)都会先被 `stat` 归到
+   * `isDirectory() === false` 这一支,不必依赖 `readdir` 的 errno 风味。
+   *
+   * 未知 errno **一律折成 `'unreadable'`**(绝不放行):上游那一支也是「记日志 + 报
+   * 『读不到这个路径』」,而不是当成可以克隆。
+   *
+   * @param path - 用户输入的克隆目标绝对路径。
+   * @returns 上游那五种结局的分类(见 `ClonePathKind`)。
+   */
+  public async inspectClonePath(path: string): Promise<ClonePathKind> {
+    try {
+      const info = await stat(path);
+      if (!info.isDirectory()) {
+        // 上游 `readdir` 对文件路径抛 ENOTDIR ⇒ 'There is already a file with this name…'。
+        return 'not-a-directory';
+      }
+      const entries = await readdir(path);
+      return entries.length === 0 ? 'empty' : 'non-empty';
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      // 目录不存在 ⇒ 上游返回 null(允许克隆,git 自己建)。
+      if (code === 'ENOENT') {
+        return 'absent';
+      }
+      // 路径中间有一段是文件 ⇒ 上游同样归到 ENOTDIR 那一句。
+      if (code === 'ENOTDIR') {
+        return 'not-a-directory';
+      }
+      return 'unreadable';
     }
   }
 

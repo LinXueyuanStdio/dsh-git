@@ -7,6 +7,13 @@
  * 不涉及 Copilot 付费能力。
  *
  * 约定:diff 文本先截断(默认 24k 字符),避免大仓把请求撑爆。
+ *
+ * **失败一律带 `detail`(2026-10-07,用户报「生成错误时通知里缺失具体信息」)**:
+ * 每一处失败都经 `modelCallDetail` / `rawOutputDetail` 把**真的拿到的机器事实**
+ * (provider/model、`finish` 原因、`LlmFailure` 的 `code`/`status`/`requestId`/原文、
+ * 已收到的模型输出、解析失败时的原样输出)拼成 `detail` 交给客户端弹窗的 `<pre>`。
+ * 只放拿到的东西,一个字段都不编 —— 与 `docs/push-failure-surfaces.md` §10.5
+ * 「让宿主命名已知条件」同一条纪律。**兜底占位符一个字没删**(「先做,不删」)。
  * @module dsh-git/host/commit-message
  */
 
@@ -134,6 +141,11 @@ export class CommitMessageGenerator {
         : DEFAULT_SYSTEM_PROMPT);
 
     let text = '';
+    /*
+     * 最后一条 `finish` 分片:失败时把它交给 `modelCallDetail` 当**机器事实**
+     * (改前它被就地丢掉,于是「模型没有返回内容」这句话里没有任何具体信息)。
+     */
+    let lastFinish: unknown;
     try {
       for await (const chunk of llm.stream({
         provider: input.choice.provider,
@@ -149,22 +161,61 @@ export class CommitMessageGenerator {
         const c = chunk as { type?: string; text?: string };
         if (c.type === 'text-delta' && typeof c.text === 'string') text += c.text;
         if (c.type === 'finish') {
+          lastFinish = chunk;
           const reason = (c as { reason?: { kind?: string; failure?: { message?: string } } }).reason;
           if (reason?.kind === 'error' || reason?.kind === 'aborted') {
-            throw new GitServiceError('internal', `模型调用失败:${reason.failure?.message ?? '未知错误'}`);
+            /*
+             * 占位符 `?? '未知错误'` **一个字没删**(「先做,不删」,而且
+             * `push-failure-detail-probe.mjs` 的 A14 把「占位符仍然活着」钉成判据);
+             * 但**具体信息不再只靠它**:`detail` 里逐字带上 provider/model 与
+             * `LlmFailure` 的机器字段(见 `modelCallDetail`)。
+             */
+            throw new GitServiceError(
+              'internal',
+              `模型调用失败:${reason.failure?.message ?? '未知错误'}`,
+              modelCallDetail(input.choice, { type: 'finish', reason }, text),
+            );
           }
         }
       }
     } catch (error) {
       if (error instanceof GitServiceError) throw error;
       const message = error instanceof Error ? error.message : String(error);
-      throw new GitServiceError('internal', `模型调用失败:${message}`);
+      throw new GitServiceError(
+        'internal',
+        `模型调用失败:${message}`,
+        modelCallDetail(input.choice, error, text),
+      );
     }
 
     if (text.trim() === '') {
-      throw new GitServiceError('internal', '模型没有返回内容,请换一个模型再试。');
+      /*
+       * 「模型没有返回内容」是**已知条件**,不是未知:宿主手里就有 `finish` 分片
+       * (它的 `reason.kind` 能区分 `max-tokens` / `stop` / `aborted` …)。
+       * 改前这句话只说「换一个模型再试」,用户看不出到底发生了什么 —— 与
+       * `docs/push-failure-surfaces.md` §10.5 那条「让宿主命名已知条件」同一裁决。
+       */
+      throw new GitServiceError(
+        'internal',
+        '模型没有返回内容,请换一个模型再试。',
+        modelCallDetail(input.choice, lastFinish, text),
+      );
     }
-    const parsed = parseCommitMessageJson(text);
+    let parsed: { title: string; description: string };
+    try {
+      parsed = parseCommitMessageJson(text);
+    } catch (error) {
+      /*
+       * 解析失败时**模型的原样输出就是唯一的具体信息** —— 改前它被整段丢掉,
+       * 用户只看到「模型返回的内容无法解析为提交信息。」,无从判断模型到底说了什么。
+       * `parseCommitMessageJson` 自己的行为一个字没改(它仍抛同一句话),
+       * 这里只是把它的失败**再接上一层 detail**。
+       */
+      if (error instanceof GitServiceError) {
+        throw new GitServiceError('internal', error.message, rawOutputDetail(input.choice, text));
+      }
+      throw error;
+    }
     return {
       title: parsed.title,
       description: parsed.description,
@@ -172,6 +223,105 @@ export class CommitMessageGenerator {
       model: input.choice.model,
     };
   }
+}
+
+/** `detail` 里逐字带上模型原样输出时的上限(超出部分**标注**截断,不静默丢)。 */
+const RAW_OUTPUT_DETAIL_LIMIT = 2000;
+
+/** 逐字渲染一个可能是任意形状的值(不 JSON.stringify 成一行,便于人读)。 */
+function describeValue(value: unknown): string {
+  if (value === undefined) {
+    return '(没有)';
+  }
+  if (value === null) {
+    return 'null';
+  }
+  if (typeof value === 'string') {
+    return value === '' ? '(空字符串)' : value;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  if (value instanceof Error) {
+    return `${value.name}: ${value.message}`;
+  }
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/**
+ * 一次**模型调用失败**的机器事实 —— 弹窗 `<pre>` 里逐字播出的 `detail`。
+ *
+ * 为什么要有它(第一手):`commit-message/generate` 改前**每一处**失败都只抛
+ * `{code, message}`,于是 provider 给出的 `code` / `status` / `requestId`
+ * (`dsh-llm` 的 `LlmFailure` 真有这三个字段:`lib/typert.host.js` 的声明
+ * `{message, code, status?, providerRetryAfterMs?, requestId?, offloadImages?}`)
+ * 在宿主这一层就被丢掉了;用户在通知里看到的只有宿主拼的一句话。
+ *
+ * **只放真的拿到的东西**,一条都不编(没有的字段整行不写):
+ *  · 生成用的 `provider/model`(一定是已知的,它就是请求参数);
+ *  · `finish` 的 `kind`(区分 `error` / `aborted` / `max-tokens` / `stop` …);
+ *  · provider 失败的 `code` / `status` / `requestId` / 原文;
+ *  · **已经收到的模型输出**(共几字符 + 原文);一个字节都没有时如实写出来。
+ *
+ * ⚠️ 不写「退出码」这类不存在的东西(与 `docs/push-failure-surfaces.md` §10.5.2 同一条纪律)。
+ * @param choice - 这次生成用的 provider/model。
+ * @param failureContext - `finish` 分片、`reason.failure`、或抛出的异常;`undefined` = 没拿到。
+ * @param textReceived - 到失败为止收到的模型输出。
+ */
+function modelCallDetail(
+  choice: LlmModelChoice,
+  failureContext: unknown,
+  textReceived: string,
+): string {
+  const lines: string[] = [
+    `生成用的模型: ${choice.provider}/${choice.model}`,
+  ];
+  const finish = failureContext as { type?: string; reason?: { kind?: string; failure?: Record<string, unknown> } } | undefined;
+  const reason = finish !== undefined && finish !== null && finish.type === 'finish' ? finish.reason : undefined;
+  if (reason !== undefined) {
+    lines.push(`finish 原因: ${describeValue(reason.kind)}`);
+    const failure = reason.failure;
+    if (failure !== undefined && failure !== null) {
+      lines.push(`provider 失败码: ${describeValue(failure.code)}`);
+      if (failure.status !== undefined) {
+        lines.push(`provider HTTP 状态: ${describeValue(failure.status)}`);
+      }
+      if (failure.requestId !== undefined) {
+        lines.push(`provider 请求 id: ${describeValue(failure.requestId)}`);
+      }
+      lines.push(`provider 原文: ${describeValue(failure.message)}`);
+    }
+  } else if (failureContext !== undefined) {
+    lines.push(`调用抛出的异常: ${describeValue(failureContext)}`);
+  }
+  lines.push(
+    textReceived === ''
+      ? '已收到的模型输出: 0 字符(一个字节都没有)'
+      : `已收到的模型输出(${textReceived.length} 字符):\n${textReceived}`,
+  );
+  return lines.join('\n');
+}
+
+/**
+ * 解析失败时的 `detail`:模型**原样输出**(唯一能解释「为什么解析不了」的证据)。
+ *
+ * 超出 {@link RAW_OUTPUT_DETAIL_LIMIT} 时**显式标注**截断 —— 不学
+ * `git-service.ts` 那条静默 `slice(0, 2000)`:静默截断会让读者以为已经看完了。
+ * @param choice - 这次生成用的 provider/model。
+ * @param raw - 模型的原样输出。
+ */
+function rawOutputDetail(choice: LlmModelChoice, raw: string): string {
+  const head = `生成用的模型: ${choice.provider}/${choice.model}\n`
+    + `模型原样输出(无法解析为 {"title","description"}),共 ${raw.length} 字符:`;
+  if (raw.length <= RAW_OUTPUT_DETAIL_LIMIT) {
+    return `${head}\n${raw}`;
+  }
+  return `${head}\n${raw.slice(0, RAW_OUTPUT_DETAIL_LIMIT)}`
+    + `\n…[已截断:原文共 ${raw.length} 字符,这里只保留前 ${RAW_OUTPUT_DETAIL_LIMIT} 字符]`;
 }
 
 /**

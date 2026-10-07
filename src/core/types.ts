@@ -301,3 +301,46 @@ export type SyncProgressPayload = {
   /** 上游 `IGitProgressInfo.done`(那一行带 `, done`)。 */
   readonly done: boolean;
 };
+
+/**
+ * **克隆目标路径的预检结果** —— `clone/validate-path` 路由载荷的 `kind` 字段。
+ *
+ * ## 为什么是「五档分类」而不是 `{exists, isDirectory, entryCount}`
+ *
+ * 上游 `ui/clone-repository/clone-repository.tsx:687-733` 的 `validateClonePath()` 判的
+ * 不是三个布尔量,而是 **`readdir(path)` 的几种结局**,而且**每一档对应一句不同的
+ * 用户文案**(长度 0 / 长度 > 0 / `ENOTDIR` / `ENOENT` / 其它 errno)。把结果折成布尔量
+ * 会让「这个文件夹里已经有文件」与「这里已经有一个同名文件」在客户端**分不开** ——
+ * 而那正是上游用两条不同文案说清的两件事。所以这里搬运的是**分类**,不是原始字段。
+ *
+ * ## 为什么不直接把 `readdir` 的结果(文件名数组)送过来
+ *
+ * 客户端只需要「空 / 非空」这一个比特;把目标目录的**文件名清单**送进浏览器没有消费者
+ * (而且那个目录不是我们登记的仓库,不该有内容流出)。
+ *
+ * ## 逐档与上游的对应
+ *
+ * | 上游 `readdir(path)` | 上游返回 | 这里 |
+ * |---|---|---|
+ * | 正常返回、长度 0 | `null`(允许克隆) | `'empty'` |
+ * | 正常返回、长度 > 0 | `new Error('This folder contains files. …')` | `'non-empty'` |
+ * | 抛 `ENOTDIR` | `new Error('There is already a file with this name. …')` | `'not-a-directory'` |
+ * | 抛 `ENOENT` | `null`(允许克隆,git 自己建目录) | `'absent'` |
+ * | 抛别的(`EACCES` / `EPERM` / …) | `new Error('Unable to read path on disk. …')` | `'unreadable'` |
+ *
+ * ⚠️ **`'.app'` 那一条不在这个类型里**:上游 `:694-701` 是纯字符串判断
+ * (`__DARWIN__ && basename(resolve(path)).toLowerCase().endsWith('.app')`),不需要磁盘
+ * ⇒ 它留在客户端,不为它跑一次路由。
+ *
+ * ⚠️ 上游**没有**「目标位置上已经有一个仓库」这条规则 —— 那种目录一定是**非空**的,
+ * 由 `'non-empty'` 一档接住。我们没有另立一条(另立就是造一条上游没有的判据)。
+ *
+ * 命名与 `SyncProgressPayload` 同因:写成 `type` 而不是 `interface`,避开
+ * `naming-convention` 对新接口的 `/^I[A-Z]/` 要求。
+ */
+export type ClonePathKind =
+  | 'absent'
+  | 'empty'
+  | 'non-empty'
+  | 'not-a-directory'
+  | 'unreadable';

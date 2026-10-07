@@ -89,7 +89,6 @@ dsh plugin --profile <profile> add /path/to/dsh-git
 
 ## 已知边界（M1）
 
-- M1 只做**文件级**暂存；行级/块级部分暂存（自建补丁 + `git apply --cached`）排在 M2。
 - 远端页签以 GitHub 为准；本地未推送的提交在 Code 树里看不到对应文件。
 
 ## 开发

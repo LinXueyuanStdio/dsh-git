@@ -182,6 +182,22 @@ const GENERIC_NO_HOST_REASON =
   + '所以没有 git 的原文可以引用。下面是宿主给出的机器可读错误码。';
 
 /**
+ * **生成提交信息**这条路径在「宿主只给了占位符、且没有 `detail`」时的正文。
+ *
+ * 判据与 {@link GENERIC_NO_HOST_REASON} 同形(同一件事、另一条路径):
+ * 宿主 `commit-message.ts` 在 provider 的失败里拿不到 `failure.message` 时写的是
+ * `模型调用失败:未知错误`;那是**占位符**,不是原因(用户 2026-10-07 的要求:
+ * 「不许出现『未知错误』这种占位符」,见 `docs/push-failure-surfaces.md` §10.3 的同一裁决)。
+ *
+ * 措辞只陈述宿主**真的**知道的事:模型调用失败了,而宿主没有拿到 provider 的原因。
+ * **不编** provider 名/模型名/HTTP 状态码 —— 那些要么在载荷里(就逐字播 `detail`)、要么就没有。
+ */
+const GENERATE_NO_HOST_REASON =
+  '这次模型调用失败了,而宿主没有拿到 provider 给出的失败原因(它写进 message 的是一个占位符),'
+  + '所以这里没有原文可以引用。下面是宿主给出的机器可读错误码;'
+  + '如果它也没有更多信息,可以换一个模型重试。';
+
+/**
  * **推送失败的弹窗** —— 上游 `PushNeedsPullWarning` / `WorkflowPushRejectedDialog` /
  * `AppError` 三者在浏览器半的等价物。
  *
@@ -343,7 +359,93 @@ export function PushFailureDialog(props: {
 }
 
 /**
- * 宿主 toast 原语的**停留时长**(它自己管「停留 → 淡出 → 调 onDone」)。
+ * **生成提交信息失败**的弹窗 —— 与 {@link PushFailureDialog} **同一套证据契约**,
+ * 只是触发路径不同(提交表单的「生成」按钮 → `store.generateCommitMessage` →
+ * 宿主 `commit-message/generate`)。
+ *
+ * ## 为什么不是 toast(用户 2026-10-07 报的那条)
+ *
+ * > 「Changes 页面左下角点击生成的时候,**如果出现生成错误,错误通知里缺失具体信息**」
+ *
+ * 改前这条失败走 `store.fail()`:
+ *  1. 它对 `code === 'internal'` **不附 `detail`**(见 `store.ts` 的 `fail()`),
+ *     而生成路线上「取 diff 失败」正是兜底的 `internal` ⇒ 宿主放在信封里的
+ *     git 原始 stderr 被**客户端丢掉**;
+ *  2. 通知本身是一条 `Toast` 原语的**单字符串横幅**(`Toasts` 的 `text={current.message}`),
+ *     放不下限高可滚、可选中复制的 `<pre>`,也没有 `错误码:` 那一行的位置。
+ *
+ * 所以这里照推送那轮已经落地的模式(`docs/push-failure-surfaces.md` §10,
+ * 判据 `push-failure-detail-probe.mjs`)原样复刻四件事:
+ *  1. 宿主的 `message` **逐字**(唯一例外是 {@link HOST_PLACEHOLDER},见下);
+ *  2. `detail` **逐字、不截断**放进 `<pre className="gw-dialog-detail">`
+ *     (`.gw-dialog pre` 已经是 `max-height:180px; overflow:auto; user-select:text`),
+ *     长文**滚动**而不是把原因裁掉;
+ *  3. 一行 `错误码:<code>`(载荷里唯一的机器可读字段,`core/types.ts` 的 `GitError`);
+ *  4. **不编**:载荷里没有的东西(provider 名、模型名、退出码、失败命令)一句都不写。
+ *
+ * ⚠️ **宿主侧的现实**(第一手实测,见 `docs/commit-generate-surfaces.md`):
+ * `commit-message/generate` 这条路由**今天不给 `detail`** —— `CommitMessageGenerator`
+ * 的每一处失败都只抛 `GitServiceError('internal', message)`,provider 失败的
+ * `code`/`status`/`requestId`(`dsh-llm` 的 `LlmFailure` 真有这三个字段)与
+ * 解析失败时模型的原样输出**都被宿主丢掉**了。本轮已把宿主那几处补上 `detail`
+ * (纯增量、无新路由,**需要重启 DSH 才生效**);在那之前,这个弹窗照样是对的:
+ * 有 `detail` 就播,没有就不播,绝不编。
+ *
+ * ⚠️ **与推送那条不同的唯一一点**:上游**没有**「生成提交信息失败」这个表面
+ * (上游的生成是 Copilot,本产品按 `goal-port-desktop.md` §1.3 明确排除),
+ * 所以标题/按钮文案**没有上游可抄**,是我们按本插件既有对话框的形状定的
+ * (`goal-port-desktop.md` §2.1 允许的例外:必须写明理由 —— 这里没有上游对应物)。
+ */
+export function GenerateFailureDialog(props: {
+  error: GitError;
+  onDismiss: () => void;
+}): ReactNode {
+  const { error, onDismiss } = props;
+  const titleId = useId();
+  const hasDetail = error.detail !== undefined && error.detail !== '';
+  /*
+   * 与 {@link PushFailureDialog} **共用**同一个占位符常量(不是第二份真源):
+   * 宿主在没有 provider 原因时写的是 `模型调用失败:未知错误`
+   * (`src/host/commit-message.ts`),把它当原因播出去就是用户报的「缺失具体信息」。
+   */
+  const hostPlaceholder = error.message.includes(HOST_PLACEHOLDER);
+  const reasonText = hostPlaceholder
+    ? (hasDetail ? '' : GENERATE_NO_HOST_REASON)
+    : error.message;
+
+  /*
+   * 两个处理器都过 `useCallback`:本仓的 `react/jsx-no-bind` 会解析标识符
+   * (`const f = () => …` 再交给 JSX 属性一样算违规),`useCallback` 的 init 是
+   * `CallExpression` ⇒ 不落进那个集合。理由与 `PushFailureDialog` 逐字相同。
+   */
+  const onKeyDown = useCallback((event: React.KeyboardEvent): void => {
+    if (event.key === 'Escape') {
+      event.stopPropagation();
+      onDismiss();
+    }
+  }, [onDismiss]);
+  const onBackdropMouseDown = useCallback((event: React.MouseEvent): void => {
+    if (event.target === event.currentTarget) {
+      onDismiss();
+    }
+  }, [onDismiss]);
+
+  return (
+    <div className="gw-dialog-scrim" onKeyDown={onKeyDown} onMouseDown={onBackdropMouseDown}>
+      <div className="gw-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId}>
+        <h4 id={titleId}>生成提交信息失败</h4>
+        {reasonText === '' ? null : <p>{reasonText}</p>}
+        {hasDetail ? <pre className="gw-dialog-detail">{error.detail}</pre> : null}
+        <p className="gw-dialog-code">错误码:{error.code}</p>
+        <div className="gw-dialog-actions">
+          <button className="gw-btn primary" autoFocus={true} onClick={onDismiss}>关闭</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
  *
  * 这两个数不是审美量,是从 `store.ts` 的既有两个定时器**倒推**出来的:
  *

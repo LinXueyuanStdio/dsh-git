@@ -528,7 +528,9 @@ export function PreferencesDialog(props: IPreferencesDialogProps): ReactNode {
  * ⚠️ 2026-10:原先这里还有三个**本文件私有**的家伙,已随「三页搬进 `preferences-pages.tsx`」
  * 一起删除(留着就是第二份真源):
  *   · `DeviceFlowPanel`(设备码面板)—— 现在是 `preferences-pages.tsx` 的导出组件;
- *   · `RepositoriesSection`(「仓库」页正文)—— 同上,现在是那边的私有组件;
+ *   · `RepositoriesSection`(「仓库」页正文)—— 同上,曾是那边的私有组件;
+ *     ⚠️ **2026-10 它已被整体删除**(那一页按用户指令从 `TABS` 移除,见 `preferences-pages.tsx`),
+ *     所以这一条现在只是历史记账,不是「它还在那边」。
  *   · `accountsFromAuth()`(宿主登录态 → 上游 `Account`)—— 同上,现在是那边的私有函数。
  * 本文件现在只剩**模态外壳**:`PluginDialog` + 上游竖向 `TabBar` + 页脚 `<form>` +
  * `#preferences.gw-prefs-body` 那一层。

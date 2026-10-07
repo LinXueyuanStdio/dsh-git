@@ -8,7 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { api } from './api.ts';
 import { Icon } from './icons.ts';
-import { ConfirmDialog, Empty } from './bits.tsx';
+import { ConfirmDialog, Empty, GenerateFailureDialog } from './bits.tsx';
 import { DiffSettings } from './diff-settings.tsx';
 import { DesktopDiff } from './desktop-diff.tsx';
 import { getPreferredExternalEditor } from './prefs.ts';
@@ -26,6 +26,17 @@ import {
   showChangesFileMenu,
   showChangesListMenu,
 } from './changes-file-menu.ts';
+/*
+ * **提交选项(齿轮)的菜单** —— 上游 `ui/changes/commit-message.tsx:1053-1130`:
+ * 齿轮按钮 `onClick` 里现拼 `IMenuItem[]`(三项 `type:'checkbox'`)再交给
+ * `showContextualMenu()`(`:29` 的 import)。上游那个 `showContextualMenu` 是
+ * Electron 主进程能力,浏览器里默认只打印;本仓**已有的**宿主是
+ * `src/client/context-menu-host.tsx`(纯命令式 DOM 的 in-browser 菜单),
+ * 逐文件菜单与仓库列表菜单走的是同一条链 —— 这里**复用同一个**,不新建第二套。
+ */
+import { installContextMenuHost } from './context-menu-host.tsx';
+import { showContextualMenu } from '../core/desktop/lib/menu-item.ts';
+import type { IMenuItem } from '../core/desktop/lib/menu-item.ts';
 import { SplitPane, toCommit, useSplitWidth, SIDEBAR_WIDTH_STORAGE_KEY } from './history-view.tsx';
 import {
   aheadBehindOf,
@@ -35,7 +46,7 @@ import {
   tipOf,
 } from './sync-state.ts';
 import { commitPlaceholderOf, includeStateOf, prepopulateCommitSummaryOf, summaryOrPlaceholderOf } from './store.ts';
-import type { GitStore, IncludeState, Snapshot } from './store.ts';
+import type { CommitForm, GitStore, IncludeState, Snapshot } from './store.ts';
 import { supportsLineSelection } from './file-kind.ts';
 import type { ChangedFile } from '../core/types.ts';
 import type { LineSelectionSpec } from '../core/partial-stage.ts';
@@ -1542,6 +1553,138 @@ const NO_EMOJI: Map<string, Emoji> = new Map();
  *     路径就是上游那条(`ui/history/commit-list.tsx:757` 的菜单项)。
  *     退役条件:History 那条菜单项接线后,本条注释改写成「已由 History 菜单进入」。
  */
+
+/**
+ * **提交选项(齿轮)菜单的项** —— 上游 `ui/changes/commit-message.tsx:1082-1128`
+ * 的 `onCommitOptionsButtonClick` 里现拼的那三行。
+ *
+ * 上游逐字(每一项都是 `type: 'checkbox'`,选中态就是那个提交选项本身):
+ *
+ * | 上游顺序 | 标签(上游原文) | 出现条件 | `checked` | 动作 |
+ * |---|---|---|---|---|
+ * | 1 | `Bypass Commit Hooks`(`__DARWIN__`)/ `Bypass Commit hooks`(`:1090`) | **只在** `enableHooksEnvironment()` 为真时 push(`:1084`) | `skipCommitHooks` | `onUpdateCommitOptions(repository, { skipCommitHooks: !… })`(`:1091-1095`) |
+ * | 2 | `Add Signed-off-by Trailer` / `Add Signed-off-by trailer`(`:1105`) | **无条件**(`items.push` 直接在条件块外,`:1099`) | `signOffCommits` | 同上换成 `signOffCommits`(`:1106-1110`) |
+ * | 3 | `Allow Empty Commit` / `Allow empty commit`(`:1119`) | 只在 `showAllowEmptyCommitOption` 为真时(`:1114`;Changes 页恒真,`filter-changes-list.tsx:1018`) | `allowEmptyCommit` | 同上换成 `allowEmptyCommit`(`:1120-1124`) |
+ * | — | (三项全关时齿轮按钮多一个 `.default-options` 类,`:1066-1071`) | — | — | 纯外观 |
+ *
+ * **三个选项在本插件里仍然都在列**(与改前的内联面板逐项一致:面板三项无条件渲染),
+ * 所以上游那两条「出现条件」在这里恒真 —— 这不是漏抄判据,而是我们的能力面本来就有
+ * 这三项(`skipCommitHooks`/`signOffCommits` 由 `store.setCommitField` 写进提交载荷,
+ * `filter-changes-list.tsx:1018` 的 `showAllowEmptyCommitOption` 在 Changes 页恒真)。
+ *
+ * **文案**:上游是英文 + `__DARWIN__` 两档,本插件按既有裁决**中文化**
+ * (`goal-port-desktop.md` §11.9),并保留上游原文在括号里,便于逐条对照。
+ * 这三条标签与改前内联面板里的**逐字相同**(用户看到的文字没变,只是从面板搬进了菜单)。
+ *
+ * ⚠️ **上游没有 disabled 语义**:三项都是纯 checkbox,任何状态下都可点
+ * (`commit-message.tsx:1082-1128` 里 `enabled` 零命中)。所以这里也不造一个
+ * `enabled` 判据 —— 那会是我们自己发明的语义。
+ */
+export function commitOptionsMenuItems(store: GitStore, form: CommitForm): IMenuItem[] {
+  return [
+    {
+      type: 'checkbox',
+      checked: form.noVerify,
+      label: '绕过提交钩子(Bypass Commit Hooks)',
+      action: () => { store.setCommitField('noVerify', !form.noVerify); },
+    },
+    {
+      type: 'checkbox',
+      checked: form.signoff,
+      label: '追加 Signed-off-by(Auto Signed-off-by Trailer)',
+      action: () => { store.setCommitField('signoff', !form.signoff); },
+    },
+    {
+      type: 'checkbox',
+      checked: form.allowEmpty,
+      label: '允许空提交(Allow Empty Commit)',
+      action: () => { store.setCommitField('allowEmpty', !form.allowEmpty); },
+    },
+  ];
+}
+
+/**
+ * 打开齿轮菜单。上游 `onCommitOptionsButtonClick`(`:1079-1128`)的第一句是
+ * `e.preventDefault()`,然后 `showContextualMenu(items)`。
+ *
+ * @returns 菜单关闭后 resolve(与上游 `showContextualMenu` 同形)。
+ */
+export async function showCommitOptionsMenu(store: GitStore, form: CommitForm): Promise<void> {
+  installContextMenuHost();
+  await showContextualMenu(commitOptionsMenuItems(store, form));
+}
+
+/**
+ * 「模型」按钮**收起时**显示的文字 —— **只有模型名**(用户 2026-10-07 第二轮裁决:
+ * 「当前选中模型只用显示模型名称,不用显示 provider 名称」)。
+ *
+ * 找不到(宿主落盘的 pin 不在可用清单里 / 清单还没到)时退回原始 `provider/id` ——
+ * 宁可显示一个丑但真实的值,也不假装它可用、更不显示空。
+ * @param models - 宿主可用模型清单(`snap.models`)。
+ * @param model - 当前 `provider/id`。
+ */
+export function modelButtonText(
+  models: readonly { provider: string; id: string; name: string }[],
+  model: string,
+): string {
+  const found = models.find((m) => `${m.provider}/${m.id}` === model);
+  if (found !== undefined) {
+    return found.name;
+  }
+  return model === '' ? '未选模型' : model;
+}
+
+/**
+ * **模型选择器**的菜单项 —— 每一项是 `name · providerName`,**provider 名在末尾**
+ * (用户裁决:下拉列表保持原设计)。
+ *
+ * ## 为什么不是原生 `<select>` + `<option label>`(实测过的,别再走回头路)
+ *
+ * `<option>` 的 `label` 属性看起来正好是「收起时短、列表里长」的机制,而且**在 Chromium 里
+ * 收起状态确实用它**(本机 headless Chrome 实测:`Accessibility.getPartialAXTree` 里
+ * combobox 的 `value` 是 `label`「Model OK」,而不是文本内容
+ * 「Model OK · Provider AAAA」;截图里渲染出来的也是短的)。
+ * **但同一次实测也证明下拉列表里每一项用的还是 `label`**:AX 树里两个 `option` 节点的
+ * `name` 分别是 `Model OK` / `Model B` ⇒ 一旦挂上 `label`,**列表里就再也看不到 provider 名**。
+ * 用户的两条要求(收起只显示模型名 / 列表里 provider 名在末尾)**互相冲突**,
+ * 原生 `<select>` 满足不了 ⇒ 这里的下拉用本仓**已有的**菜单宿主
+ * (`context-menu-host.tsx` 的 in-browser 菜单,与齿轮同一个机制),两处文案各自可控。
+ *
+ * `checked` 标出当前模型(宿主菜单会画一个 ✓)—— 这是原生 select 的「选中项高亮」的等价物。
+ * @param store - store(选中一项就写偏好)。
+ * @param models - 宿主可用模型清单。
+ * @param model - 当前 `provider/id`。
+ */
+export function modelMenuItems(
+  store: GitStore,
+  models: readonly { provider: string; providerName: string; id: string; name: string }[],
+  model: string,
+): IMenuItem[] {
+  return models.map((entry) => ({
+    type: 'checkbox' as const,
+    checked: `${entry.provider}/${entry.id}` === model,
+    label: `${entry.name} · ${entry.providerName}`,
+    action: () => { void store.setModelPersisted(`${entry.provider}/${entry.id}`); },
+  }));
+}
+
+/**
+ * 打开模型菜单。写的是**同一个偏好**(`store.setModelPersisted` → `api.setPrefs({model})`),
+ * 也就是设置页「默认模型」那个下拉的同一个键 —— 不新增第二份偏好存储。
+ * @param store - store。
+ * @param models - 宿主可用模型清单。
+ * @param model - 当前 `provider/id`。
+ * @returns 菜单关闭后 resolve。
+ */
+export async function showModelMenu(
+  store: GitStore,
+  models: readonly { provider: string; providerName: string; id: string; name: string }[],
+  model: string,
+): Promise<void> {
+  installContextMenuHost();
+  await showContextualMenu(modelMenuItems(store, models, model));
+}
+
 function CommitBox(props: {
   store: GitStore;
   snap: Snapshot;
@@ -1848,8 +1991,29 @@ function CommitBox(props: {
         value={form.description} readOnly={form.generating}
         onChange={(event) => store.setCommitField('description', event.target.value)} onKeyDown={onKey} />
 
-      <div className="row">
+      {/*
+        操作行 —— **三项必须同一行,齿轮右对齐,生成与模型选择器依次左对齐**
+        (用户 2026-10-07 第三轮裁决)。
+
+        改前的两个问题(都是布局,不是数据):
+         1. `.gw-commit .row{display:flex;…;flex-wrap:wrap}`(`styles.ts:466`)⇒ 空间紧时
+            **齿轮会被挤到第二行**;这里用**行内** `flexWrap:'nowrap'` 顶掉它
+            (不动那个共享规则 —— 它还给别的行用);
+         2. 行里那个 `<span className="grow" />` 在本面**是个空操作**:全仓只有
+            `.gw-toolbar .grow{flex:1}`(`styles.ts:416`)与 `.gw-pitem .grow{…}`
+            (`:608`),**没有** `.gw-commit .row .grow` 的规则 ⇒ 齿轮一直贴在模型选择器
+            右边,不是右对齐。所以右对齐改由齿轮自己的 `marginLeft:'auto'` 兑现
+            (span 保留:先做不删,而且它将来若被补上规则也不冲突)。
+
+        ⚠️ **与上游不同,而且这一次是用户裁决压过上游**:上游
+        `ui/changes/commit-message.tsx:1235-1245` 的 `.action-bar` 是
+        `display:flex`(无 `justify-content`、无 `margin-left:auto`),齿轮**紧跟**
+        生成按钮左对齐(`_commit-message.scss:252-257`)。用户明确要求齿轮右对齐 ⇒
+        按用户的来;**不要**把这一条读成「抄漏了」。
+      */}
+      <div className="row" style={{ flexWrap: 'nowrap' }}>
         <button className="gw-btn" aria-disabled={form.generating || status === null || stagedCount === 0}
+          style={{ flexShrink: 0, whiteSpace: 'nowrap' }}
           title={stagedCount === 0
             ? '请先勾选一个或多个文件(生成只依据纳入提交的变更)'
             : '用 DSH 模型列表里的模型生成提交信息'}
@@ -1861,12 +2025,55 @@ function CommitBox(props: {
           <Icon name="sparkle" size={11} />
           {form.generating ? '生成中…' : '生成'}
         </button>
-        <span className="gw-hint gw-mono" style={{ padding: 0 }} title="生成用的模型(设置里可改)">
-          {snap.model === '' ? '未选模型' : snap.model.split('/').pop()}
-        </span>
+        {/*
+          模型**选择器**(用户 2026-10-07:「生成按钮右边的模型应该是模型选择器,
+          要读取宿主可用的模型列表,允许用户选择不同的模型来生成 commit msg」)。
+
+          改前这里是一个只读的 `<span>{snap.model.split('/').pop()}</span>` ——
+          它显示的就是**真正会被发出去**的那个模型(生成请求的 `provider`/`model`
+          由 `store.generateCommitMessage` 从 `snap.model` 拆出来),但用户改不了它:
+          想换模型必须去设置弹窗的「默认模型」。
+
+          数据源是**宿主的模型清单** `snap.models`(`api.models()` → 宿主
+          `commit-message/models` → `ctx.llm.listProviders()` + `listModels()`,
+          由 `store.start()` 的 `loadPrefs() → loadModels()` 读回)。
+
+          选中项直接写进**同一个偏好**(`store.setModelPersisted`),也就是设置页
+          「默认模型」那个下拉写的**同一个键** —— 不新增第二份偏好存储。
+          值用 `provider/id`(与 `snap.model` 和 `store.loadModels` 的判据同形)。
+
+          **两处文案(用户 2026-10-07 第二轮裁决)**:
+           · **收起时只显示模型名**(`modelButtonText()`,用户原话「当前选中模型只用显示
+             模型名称,不用显示 provider 名称」);
+           · **下拉列表里保持原设计**:每一项 `name · providerName`,provider 名在**末尾**。
+          这两条**原生 `<select>` 满足不了**(`<option label>` 会把两处一起改短 ——
+          本机 headless Chrome 实测的 AX 树读数与理由写在 `modelMenuItems()` 的 JSDoc 里),
+          所以下拉用本仓已有的菜单宿主,与齿轮同一个机制。
+
+          **宽度**(用户第二轮追加:「宽度可缩小一点」):`maxWidth: 132`;超长模型名按
+          `text-overflow:ellipsis` 截断,完整 `provider/id` 仍在 `title` 与菜单里。
+          观感(截断是否好看、宽度是否合适)只能由用户截图判定 —— jsdom 没有布局引擎。
+        */}
+        <button type="button" className="gw-btn ghost gw-model-select" aria-haspopup="menu"
+          style={{ maxWidth: 132, minWidth: 0, flexShrink: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+          title={`生成用的模型:${snap.model === '' ? '未选' : snap.model}(点击选择;会被记住,与设置页的「默认模型」是同一个偏好)`}
+          onClick={() => { void showModelMenu(store, snap.models, snap.model); }}>
+          {modelButtonText(snap.models, snap.model)}
+        </button>
+        {/* 空操作 span:本面没有 `.gw-commit .row .grow` 规则(见上面操作行的注释),右对齐靠齿轮的 marginLeft。 */}
         <span className="grow" />
         <button className="gw-btn ghost" title="提交选项" aria-expanded={optionsOpen}
-          onClick={() => setOptionsOpen((v) => !v)}>
+          style={{ marginLeft: 'auto', flexShrink: 0 }}
+          onClick={() => {
+            /*
+             * 上游 `commit-message.tsx:1079-1128`:`e.preventDefault()` 之后现拼
+             * `IMenuItem[]` 交给 `showContextualMenu`。`optionsOpen` 只用来表达
+             * 「菜单正开着」(aria-expanded),菜单关闭后复位 —— 面板已经不在了
+             * (用户要求:设置项进菜单而不是出现在下面),但状态位保留。
+             */
+            setOptionsOpen(true);
+            void showCommitOptionsMenu(store, form).finally(() => { setOptionsOpen(false); });
+          }}>
           <Icon name="gear" size={12} />
         </button>
       </div>
@@ -1912,25 +2119,18 @@ function CommitBox(props: {
         {commitButtonText}
       </button>
 
-      {optionsOpen && (
-        <div className="gw-commit-options">
-          <label className="gw-chk">
-            <input type="checkbox" checked={form.noVerify}
-              onChange={(event) => store.setCommitField('noVerify', event.target.checked)} />
-            绕过提交钩子(Bypass Commit Hooks)
-          </label>
-          <label className="gw-chk">
-            <input type="checkbox" checked={form.signoff}
-              onChange={(event) => store.setCommitField('signoff', event.target.checked)} />
-            追加 Signed-off-by(Auto Signed-off-by Trailer)
-          </label>
-          <label className="gw-chk">
-            <input type="checkbox" checked={form.allowEmpty}
-              onChange={(event) => store.setCommitField('allowEmpty', event.target.checked)} />
-            允许空提交(Allow Empty Commit)
-          </label>
-        </div>
-      )}
+      {/*
+        提交选项的**内联面板已删除**(用户 2026-10-07:「生成按钮右边的设置按钮,
+        点击后的设置项内容应该在菜单里(右键菜单)而不是出现在下面」)。
+        上游的形状本来就是一个上下文菜单:`ui/changes/commit-message.tsx:1053-1130`
+        的 `renderCommitOptionsButton` + `onCommitOptionsButtonClick` → `showContextualMenu(items)`。
+        **只删了这一个面板**:三个选项的状态(`form.noVerify` / `form.signoff` /
+        `form.allowEmpty`)与动作(`store.setCommitField`)一个字没动,现在由
+        `commitOptionsMenuItems()` 渲染成菜单里的三个 checkbox
+        (项序/checked 语义逐条照上游,见那个函数的注释)。
+        ⚠️ 旧类名 `.gw-commit-options` 的 CSS 规则**故意保留**在 `styles.ts`(「先做,不删」;
+        退役条件:确认全仓再没有第二个消费方时,连那条规则一起删)。
+      */}
 
       {form.amend && hasPreviousCommit && (
         <div className="gw-hint" style={{ padding: 0 }}>
@@ -1958,6 +2158,19 @@ function CommitBox(props: {
           body="你输入的摘要与描述会被生成结果覆盖。对应 Desktop 的 Commit message override 提示。"
           confirmText="覆盖" danger
           onDone={(okay) => { setConfirmGenerate(false); if (okay) void store.generateCommitMessage({ force: true }); }} />
+      )}
+      {/*
+        **生成失败**的弹窗(用户 2026-10-07:「如果出现生成错误,错误通知里缺失具体信息」)。
+        改前这条失败走 `store.fail()` —— 对 `code === 'internal'` **不附 `detail`**、
+        而且只是一条 7 秒的 toast;现在失败原样进快照(`store.generateFailure`),
+        由 `bits.tsx` 的 `GenerateFailureDialog` 逐字播 `message` + 可滚可选的
+        `<pre>{detail}</pre>` + `错误码:<code>`(与推送失败那条已经落地的模式同形,
+        见 `docs/push-failure-surfaces.md` §10)。
+      */}
+      {snap.generateFailure !== null && (
+        <GenerateFailureDialog
+          error={snap.generateFailure}
+          onDismiss={() => { store.clearGenerateFailure(); }} />
       )}
       {confirmUndo && undoCommit !== null && (
         <ConfirmDialog
