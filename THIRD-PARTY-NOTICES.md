@@ -113,12 +113,14 @@ Copyright (c) GitHub, Inc.
 
 > **为什么 `package.json` 里没有 `dependencies`。** 上表这些包是**构建期**依赖:代码已经被
 > esbuild 打进 `lib/*.js`,运行时不会再 `import` / `require` 它们,所以它们只能是
-> `devDependencies`(否则每个用户的 profile 会白白再装一遍这 96 个包)。宿主提供的那些写进
-> `peerDependencies`(只有 `@deepseek-ai/schemastery`,它是 host 半唯一的运行时外部导入);
-> `react` / `react-dom` 由宿主的 ModuleLoader 在运行时解析,不需要 npm 安装。
+> `devDependencies`(否则每个用户的 profile 会白白再装一遍这 96 个包)。
 > 判据不是惯例,而是**产物本身**:两个 bundle 里的外部 `import` / `require` 只有
 > `@deepseek-ai/schemastery`、`@deepseek-ai/dsh-client-ui-primitives`、`react`、
-> `react-dom`、`react/jsx-runtime`(外加 node 内置),动态 `import()` 为 0。
+> `react-dom`、`react/jsx-runtime`(外加 node 内置),动态 `import()` 为 0 ——
+> 所以宿主提供的这 4 个(jsx-runtime 属 react 的子路径)写进 `peerDependencies`:
+> `@deepseek-ai/schemastery` 是必需的(host 半静态 import 它,缺了插件加载不起来),
+> 其余三个标 `optional`(由宿主的 ModuleLoader 在运行时解析;标 optional 是为了避免
+> pnpm 的 `auto-install-peers` 在用户 profile 里再装一份自己的 react)。
 
 | # | 包 | 版本 | 许可 | 版权 |
 |---:|---|---|---|---|

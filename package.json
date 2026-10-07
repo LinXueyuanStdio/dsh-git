@@ -51,6 +51,9 @@
   "bugs": {
     "url": "https://github.com/LinXueyuanStdio/dsh-git/issues"
   },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
@@ -64,7 +67,21 @@
     "typecheck": "node scripts/check-types.mjs"
   },
   "peerDependencies": {
-    "@deepseek-ai/schemastery": "~3.18.4"
+    "@deepseek-ai/schemastery": "~3.18.4",
+    "@deepseek-ai/dsh-client-ui-primitives": ">=0.2.0-rc.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-client-ui-primitives": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@deepseek-ai/schemastery": "^3.18.4",
@@ -105,7 +122,9 @@
     "parse-dds": "^1.2.1",
     "prettier": "^3.3.3",
     "quick-lru": "^3.0.0",
+    "react": "^18.3.1",
     "react-css-transition-replace": "^4.0.5",
+    "react-dom": "^18.3.1",
     "react-transition-group": "^4.4.5",
     "react-virtualized": "^9.22.5",
     "sass": "^1.105.1",
