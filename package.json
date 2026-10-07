@@ -1,7 +1,7 @@
 {
   "name": "@linxueyuan/dsh-git",
   "description": "DSH 插件:在官方右侧栏提供「dsh-git」本地仓库工作台——多仓库下拉 + Changes/History 本地 git(暂存·提交·同步) + Code/Issues/PR/Actions 远端页签,commit message 由 DSH 模型列表里的模型生成",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
