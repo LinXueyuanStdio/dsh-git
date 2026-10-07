@@ -3,8 +3,8 @@
   <title id="tabs-title">dsh-git 的六个页签</title>
   <desc id="tabs-desc">六列页签清单。Changes：文件级暂存与 diff，提交信息由模型生成。History：提交历史。Code：远端文件树，没有远端时退化为本地工作区视图。Issues：列表加详情，可新建、评论、关闭重开。Pull requests：列表加详情，可新建。Actions：workflow runs，可重跑或取消。</desc>
 
-  <rect width="1200" height="200" rx="20" fill="#0f1115"/>
-  <rect x="1" y="1" width="1198" height="198" rx="19" fill="none" stroke="#23262d"/>
+  <rect width="1200" height="200" rx="20" fill="#ffffff"/>
+  <rect x="1" y="1" width="1198" height="198" rx="19" fill="none" stroke="#d8dee4"/>
 
   <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif">
 
@@ -14,9 +14,9 @@
       <rect x="0" y="9.5" width="11" height="2.6" rx="1.3" fill="#7aaaff"/>
       <circle cx="16.5" cy="13" r="3.2" fill="#4d6bfe"/>
     </g>
-    <text x="64" y="104" font-size="22" font-weight="600" fill="#ebeef2">Changes</text>
-    <text x="64" y="136" font-size="18" fill="#8b949e">文件级暂存 / diff</text>
-    <text x="64" y="160" font-size="18" fill="#8b949e">模型生成提交信息</text>
+    <text x="64" y="104" font-size="22" font-weight="600" fill="#1f2328">Changes</text>
+    <text x="64" y="136" font-size="18" fill="#59636e">文件级暂存 / diff</text>
+    <text x="64" y="160" font-size="18" fill="#59636e">模型生成提交信息</text>
 
     <!-- 2 History -->
     <g transform="translate(245 40)">
@@ -24,8 +24,8 @@
       <circle cx="3" cy="5" r="3.2" fill="#4d6bfe"/>
       <circle cx="3" cy="15" r="3.2" fill="#4d6bfe"/>
     </g>
-    <text x="245" y="104" font-size="22" font-weight="600" fill="#ebeef2">History</text>
-    <text x="245" y="136" font-size="18" fill="#8b949e">提交历史</text>
+    <text x="245" y="104" font-size="22" font-weight="600" fill="#1f2328">History</text>
+    <text x="245" y="136" font-size="18" fill="#59636e">提交历史</text>
 
     <!-- 3 Code -->
     <g transform="translate(426 40)" fill="none" stroke="#4d6bfe" stroke-width="2.2" stroke-linecap="round">
@@ -33,17 +33,17 @@
       <path d="M4 10h6a4 4 0 004-4V5.5"/>
     </g>
     <circle cx="440" cy="43" r="3" fill="#7aaaff"/>
-    <text x="426" y="104" font-size="22" font-weight="600" fill="#ebeef2">Code</text>
-    <text x="426" y="136" font-size="18" fill="#8b949e">远端文件树</text>
-    <text x="426" y="160" font-size="18" fill="#8b949e">无远端时看本地</text>
+    <text x="426" y="104" font-size="22" font-weight="600" fill="#1f2328">Code</text>
+    <text x="426" y="136" font-size="18" fill="#59636e">远端文件树</text>
+    <text x="426" y="160" font-size="18" fill="#59636e">无远端时看本地</text>
 
     <!-- 4 Issues -->
     <g transform="translate(607 40)">
       <circle cx="10" cy="10" r="7.4" fill="none" stroke="#4d6bfe" stroke-width="2.4"/>
     </g>
-    <text x="607" y="104" font-size="22" font-weight="600" fill="#ebeef2">Issues</text>
-    <text x="607" y="136" font-size="18" fill="#8b949e">列表 + 详情</text>
-    <text x="607" y="160" font-size="18" fill="#8b949e">新建 / 评论 / 关闭</text>
+    <text x="607" y="104" font-size="22" font-weight="600" fill="#1f2328">Issues</text>
+    <text x="607" y="136" font-size="18" fill="#59636e">列表 + 详情</text>
+    <text x="607" y="160" font-size="18" fill="#59636e">新建 / 评论 / 关闭</text>
 
     <!-- 5 Pull requests -->
     <g transform="translate(788 40)">
@@ -51,18 +51,18 @@
       <circle cx="3" cy="16" r="3" fill="#4d6bfe"/>
       <circle cx="15" cy="4" r="3" fill="#7aaaff"/>
     </g>
-    <text x="788" y="104" font-size="22" font-weight="600" fill="#ebeef2">Pull requests</text>
-    <text x="788" y="136" font-size="18" fill="#8b949e">列表 + 详情</text>
-    <text x="788" y="160" font-size="18" fill="#8b949e">可新建 PR</text>
+    <text x="788" y="104" font-size="22" font-weight="600" fill="#1f2328">Pull requests</text>
+    <text x="788" y="136" font-size="18" fill="#59636e">列表 + 详情</text>
+    <text x="788" y="160" font-size="18" fill="#59636e">可新建 PR</text>
 
     <!-- 6 Actions -->
     <g transform="translate(969 40)">
       <circle cx="10" cy="10" r="8" fill="none" stroke="#4d6bfe" stroke-width="2.2"/>
       <path d="M8 6.4l6.2 3.6L8 13.6z" fill="#7aaaff"/>
     </g>
-    <text x="969" y="104" font-size="22" font-weight="600" fill="#ebeef2">Actions</text>
-    <text x="969" y="136" font-size="18" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">workflow runs</text>
-    <text x="969" y="160" font-size="18" fill="#8b949e">重跑 / 取消</text>
+    <text x="969" y="104" font-size="22" font-weight="600" fill="#1f2328">Actions</text>
+    <text x="969" y="136" font-size="18" fill="#59636e" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">workflow runs</text>
+    <text x="969" y="160" font-size="18" fill="#59636e">重跑 / 取消</text>
 
   </g>
 </svg>
