@@ -696,6 +696,18 @@ await build({
   define,
   banner: { js: banner },
   footer: { js: footer },
+  /*
+   * 浏览器半也要 sourcemap —— 而且它**不只是一个本地文件**:DSH 的
+   * `@deepseek-ai/dsh-client-modules` 原生支持客户端 sourcemap
+   * (`lib/index.js` 的 `readSourceMap()`:`readFileSync(`${clientPath}.map`)`,
+   * 校验必须是合法 v3,再由它自己把 `sourceMappingURL` 追加到产物上;文件不存在时
+   * 返回 `undefined` ⇒ map 是**可选**的,缺了不报错)。所以这一行让浏览器 devtools
+   * 能直接看到我们的 TS 源码。
+   *
+   * ⚠️ 它**不进 npm 包**:`package.json` 的 `files` 是显式清单(`lib/index.js` +
+   * `lib/client.js`),`npm pack` 里 map 数为 0 —— 本地调试 / devtools 用,不发出去。
+   */
+  sourcemap: true,
 });
 
 console.log(`dsh-git: lib/index.js + lib/client.js 构建完成 (build ${BUILD_STAMP})`);

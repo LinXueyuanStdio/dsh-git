@@ -94,6 +94,9 @@ const ARTIFACTS = [
   'lib/index.js',
   'lib/index.js.map',
   'lib/client.js',
+  // 浏览器半的 sourcemap:宿主 `dsh-client-modules` 会读它并喂给 devtools,
+  // 所以它和别的生成物一样要进清单(否则被手改/被别的构建覆盖都没人发现)。
+  'lib/client.js.map',
 ];
 
 /** 构建入口(别的 lane 持有,这里只调用、不修改)。 */
