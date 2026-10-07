@@ -1,6 +1,6 @@
 {
   "name": "@linxueyuan/dsh-git",
-  "description": "DSH 插件:在官方右侧栏提供「dsh-git」本地仓库工作台——多仓库下拉 + Changes/History 本地 git(暂存·提交·同步) + Code/Issues/PR/Actions 远端页签,commit message 由 DSH 模型列表里的模型生成",
+  "description": "DSH 插件:在官方右侧栏提供「dsh-git」本地仓库工作台——多仓库下拉 + Changes/History 本地 git(暂存·提交·同步) + Code/Issues/PR/Actions 远端页签,commit message 由 DSH 模型列表里的模型生成 | Local Git workbench for the DSH sidebar: multi-repo picker, Changes/History, GitHub tabs (Code/Issues/PR/Actions), and commit messages written by your configured DSH model.",
   "version": "1.0.0",
   "type": "module",
   "main": "lib/index.js",
@@ -9,7 +9,10 @@
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
-  "author": "LinXueyuanStdio",
+  "author": {
+    "name": "兮尘",
+    "url": "https://github.com/LinXueyuanStdio"
+  },
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -36,12 +39,17 @@
     "lib/index.js",
     "lib/client.js",
     "cordis.patch.yml",
-    "icon.svg"
+    "icon.svg",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/LinXueyuanStdio/dsh-git.git"
+  },
+  "homepage": "https://github.com/LinXueyuanStdio/dsh-git#readme",
+  "bugs": {
+    "url": "https://github.com/LinXueyuanStdio/dsh-git/issues"
   },
   "publishConfig": {
     "access": "public",
@@ -55,7 +63,13 @@
     "check:generated:rebuild": "node scripts/check-generated.mjs --rebuild",
     "typecheck": "node scripts/check-types.mjs"
   },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "~3.18.4"
+  },
   "devDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.4",
+    "@floating-ui/core": "^1.7.3",
+    "@floating-ui/react-dom": "^2.1.6",
     "@types/classnames": "^2.3.0",
     "@types/deep-equal": "^1.0.4",
     "@types/event-kit": "^2.4.4",
@@ -72,38 +86,33 @@
     "@types/textarea-caret": "^3.0.4",
     "@typescript-eslint/eslint-plugin": "^6.13.2",
     "@typescript-eslint/parser": "^6.13.2",
+    "classnames": "^2.5.1",
+    "date-fns": "^4.1.0",
+    "deep-equal": "^2.2.3",
     "esbuild": "^0.28.2",
     "eslint": "^8.55.0",
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-react": "^7.33.2",
     "eslint-plugin-react-hooks": "^5.2.0",
-    "jsdom": "^27.4.0",
-    "prettier": "^3.3.3",
-    "sass": "^1.105.1",
-    "typescript": "^5.9.3"
-  },
-  "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.4",
-    "@floating-ui/core": "^1.7.3",
-    "@floating-ui/react-dom": "^2.1.6",
-    "classnames": "^2.5.1",
-    "date-fns": "^4.1.0",
-    "deep-equal": "^2.2.3",
     "event-kit": "^2.5.0",
     "focus-trap": "^7.6.5",
     "focus-trap-react": "^10.3.1",
     "fuzzaldrin-plus": "^0.6.0",
+    "jsdom": "^27.4.0",
     "lodash": "^4.17.21",
     "mem": "^4.3.0",
     "memoize-one": "^6.0.0",
     "parse-dds": "^1.2.1",
+    "prettier": "^3.3.3",
     "quick-lru": "^3.0.0",
     "react-css-transition-replace": "^4.0.5",
     "react-transition-group": "^4.4.5",
     "react-virtualized": "^9.22.5",
+    "sass": "^1.105.1",
     "semver": "^7.8.5",
     "string-argv": "^0.3.2",
     "textarea-caret": "^3.1.0",
+    "typescript": "^5.9.3",
     "zod": "^4.6.5"
   }
 }
