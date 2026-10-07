@@ -7,8 +7,8 @@
     "react-readonly-props-and-state",
     "insecure-random"
   ],
-  "scannedFiles": 432,
-  "total": 1299,
+  "scannedFiles": 441,
+  "total": 1291,
   "byFileRule": {
     "scripts/build.mjs": {
       "@typescript-eslint/no-unused-vars": 1,
@@ -89,7 +89,7 @@
       "react/jsx-no-bind": 3
     },
     "src/client/changes-view.tsx": {
-      "curly": 24,
+      "curly": 21,
       "react/jsx-boolean-value": 6,
       "react/jsx-no-bind": 33
     },
@@ -192,7 +192,7 @@
       "@typescript-eslint/explicit-member-accessibility": 57,
       "@typescript-eslint/member-ordering": 4,
       "@typescript-eslint/naming-convention": 3,
-      "curly": 48
+      "curly": 45
     },
     "src/client/styles-base.ts": {
       "curly": 2
@@ -288,7 +288,7 @@
     },
     "src/core/types.ts": {
       "@typescript-eslint/naming-convention": 14,
-      "react-readonly-props-and-state": 8
+      "react-readonly-props-and-state": 6
     },
     "src/host/auth.ts": {
       "@typescript-eslint/explicit-member-accessibility": 13,

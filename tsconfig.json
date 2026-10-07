@@ -34,7 +34,20 @@
     "paths": {
       "path": ["./src/client/shim-node-path.ts"],
       "url": ["./src/client/shim-node-url.ts"],
-      "fs/promises": ["./src/client/shim-node-fs-promises.ts"]
+      "fs/promises": ["./src/client/shim-node-fs-promises.ts"],
+      // `util`:唯一的使用方是镜像的进度解析器
+      // `src/core/desktop/lib/progress/git.ts:1`(`stripVTControlCharacters`),
+      // 而它只由宿主半 import(`src/host/sync-progress.ts`)。
+      // 不补这条 `paths`,那条 import 就是一个 TS2307、镜像目录多一个文件进
+      // type-check 基线,而那条红不是产品缺陷。
+      //
+      // ⚠️ **实测(2026-10):esbuild 也读本文件的 `paths`** —— 所以这一条不只影响
+      // tsc,它让浏览器半也能解析 `util`(把 `lib/progress/git.ts` 单独按浏览器半
+      // 打一次 = 5,297 B / 4 个模块,用的就是 `shim-node-util.ts`)。
+      // `scripts/build.mjs` 的 `clientAlias` 里也显式列了同一条,免得解析依赖
+      // 「esbuild 恰好读 paths」这个隐式事实。替身的正确性由
+      // `docs/probes/shim-node-util-probe.mjs` 对着真 `node:util` 钉住。
+      "util": ["./src/client/shim-node-util.ts"]
     }
   },
   // 只看浏览器半:我们的适配层 + 它的依赖(镜像树)。host 半由 tsconfig.host.json 管。

@@ -96,6 +96,23 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
   // ⚠️ `holdMs` 只声明**可选**、不写默认值:`3000` 是上游实现的默认
   // (`Toast.tsx:8` 的 `HOLD_MS`)。本地重声明再写一遍默认值,两边一改就会静默分叉
   // —— 那正是本文件头注释记的漂移缺陷类。
+  //
+  // ⚠️ **2026-10 修正:`actions` 的元素属性不能加 `readonly`(曾经的漂移)**。
+  // 上游那三个元素属性是**可变的**——`readonly` 只加在**数组**上:
+  //
+  //     上游 Toast.tsx:52  actions?: readonly { label: string; prefix?: string; onClick: () => void }[]
+  //     逐字展开            actions?: ReadonlyArray<{ label: string; prefix?: string; onClick: () => void }>
+  //
+  // (两者 TypeScript 语义**完全等价**:`readonly T[]` 就是 `ReadonlyArray<T>` 的语法糖。)
+  //
+  // 为什么写成 `ReadonlyArray<…>` 而不是 `readonly {…}[]`:本文件把上游的**内联对象类型**
+  // 拆成了 `IToastProps`(见下面那条),于是 `react-readonly-props-and-state` 的
+  // `arraySignaturesShouldBeReadonly` 会检查这个成员。那个检查只看
+  // **类型注解的文本**是否以 `[]` 结尾(`eslint-rules/react-readonly-props-and-state.js:93-104`),
+  // 分不清 `readonly T[]`(已是只读数组)与 `T[]`(可变数组)⇒ 对 `readonly {…}[]`
+  // 是**假阳性**。`ReadonlyArray<…>` 是唯一既能逐字表达上游语义、
+  // 又能让那条规则安静下来的写法。**不要**把它改回 `readonly {…}[]` 去「更逐字」——
+  // 那会把这条闸门重新点亮,而两者编译后与类型上都没有区别。
   // ---------------------------------------------------------------------------
 
   /** `Toast` 的 prop 面(上游是 `Toast.tsx:46-53` 的内联对象类型;这里按本文件惯例拆成 `I*` 接口)。 */
@@ -110,12 +127,17 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
     readonly anchor?: HTMLElement | null;
     /** 淡出前的全不透明停留时长(毫秒);默认值属于实现(`HOLD_MS = 3000`)。 */
     readonly holdMs?: number;
-    /** 续在句子后面的行内动作;只有动作文字吃指针。 */
-    readonly actions?: readonly {
-      readonly label: string;
-      readonly prefix?: string;
-      readonly onClick: () => void;
-    }[];
+    /**
+     * 续在句子后面的行内动作;只有动作文字吃指针。
+     *
+     * 上游逐字:`readonly { label: string; prefix?: string; onClick: () => void }[]`
+     * ⇒ 等价于下面的 `ReadonlyArray<…>`,元素属性**可变**(理由见上方那段)。
+     */
+    readonly actions?: ReadonlyArray<{
+      label: string;
+      prefix?: string;
+      onClick: () => void;
+    }>;
     /** 淡出结束时调一次;由调用方在这里卸载。 */
     readonly onDone: () => void;
   }

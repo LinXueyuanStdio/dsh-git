@@ -201,10 +201,17 @@ const EXPECTED = new Map([
     'lib/git/index.ts',
     '上游是 36 行 `export *` 的桶文件,把整个 git 层一次转出;那一层每一支都走 dugite' +
       '(lib/git/core.ts:1 import dugite)并依赖 path/buffer/child_process —— 实测朴素闭包 = lib/git/** 51 文件' +
-      '+ dugite,而 lib/git/** 正是宿主已取代的一层(§2.4)。这里只保留 lib/app-state.ts:61-65 那三个' +
-      'type-only 名字:HookProgress(上游 lib/git/core.ts:38)、TerminalOutputListener(core.ts:32)、' +
+      '+ dugite,而 lib/git/** 正是宿主已取代的一层(§2.4)。这里只保留 type-only 名字:' +
+      'HookProgress(上游 lib/git/core.ts:38)、TerminalOutputListener(core.ts:32)、' +
       'IChangesetData(lib/git/log.ts:215),声明逐字。一处必需替代:上游 TerminalOutput(core.ts:30)是 ' +
-      'string|Buffer|Buffer[],而浏览器半 types:[] 没有 Buffer(TS2591),改用其超类 Uint8Array。',
+      'string|Buffer|Buffer[],而浏览器半 types:[] 没有 Buffer(TS2591),改用其超类 Uint8Array。' +
+      '**2026-10 补第四个名字 `IStatusResult`**(上游 lib/git/status.ts:33-69,**逐字**):' +
+      '上游 lib/stores/updates/changes-state.ts 写的是 `import { IStatusResult } from \'../../git\'`,' +
+      '也走这个桶文件;那份 353 行的「状态合并」纯函数(updateChangedFiles / updateConflictState /' +
+      'selectWorkingDirectoryFiles)是 Changes 页失效规则的上游原文,已逐字落到' +
+      'src/core/desktop/lib/stores/updates/changes-state.ts,所以这个类型名必须像上游一样从这里可解析。' +
+      '**回收条件**:若将来 changes-state.ts 被裁掉(那套合并规则不再逐字保留),这里的 IStatusResult' +
+      '也应一并删除 —— 它没有别的消费方。',
   ],
   // --- Preferences ▸ 弹窗移植(task:PORT A WHOLE SURFACE / Preferences)带进来的 shim ---
   // `ui/preferences/preferences.tsx` **没有被移植**(它把 Copilot 页签、`../dispatcher`
@@ -303,11 +310,54 @@ const EXPECTED = new Map([
   ],
   [
     'lib/stores/app-store.ts',
-    '上游 10936 行是 Desktop 的**整个应用状态容器**(import lib/api、lib/git/**、lib/stores/**、' +
-      'lib/databases/**、lib/notifications/**、lib/trampoline/**、main-process/** 与 dugite/dexie/keytar),' +
-      '§1.3 把它列为不沿用的第一名。实证:Preferences 的 Appearance 页' +
-      '(ui/preferences/appearance.tsx:10)只取**一个**名字 tabSizeDefault(上游 :532 的值 4,逐字)。' +
-      '本文件只有这一个常量,零其它运行期代码。',
+    '上游 10935 行(实测 `awk END{NR}`,旧记述写 10936)是 Desktop 的**整个应用状态容器**' +
+      '(import lib/api、lib/git/**、lib/stores/**、lib/databases/**、lib/notifications/**、' +
+      'lib/trampoline/**、main-process/** 与 dugite/dexie/keytar),§1.3 把它列为不沿用的第一名。' +
+      '本文件承担**两个角色**:' +
+      '① 常量替身 —— Preferences 的 Appearance 页(ui/preferences/appearance.tsx:13)取**一个**名字 ' +
+      'tabSizeDefault(上游 :532 的值 4,逐字);' +
+      '② **状态机采纳接缝(2026-10 新增)** —— 上游 `lib/stores/updates/changes-state.ts` 的 importer ' +
+      '**全仓库只有一处**:`app-store.ts:302-306`。那份 353 行是 Changes 页的失效/合并规则,已逐字 ' +
+      '镜像在 `lib/stores/updates/changes-state.ts`,但此前**零 importer** ⇒ 一直在 ' +
+      '`check-integration` 的「失去可达」名单里(在树里、没被用上)。' +
+      '同一个路径上的这份替身就是那条 import 边在浏览器半的**唯一合法落点**,所以这里' +
+      '**原样转出**上游那三个名字(名字与签名逐字,零实现),并额外给出一个**纯函数** ' +
+      '`applyChangesStatus()`,把上游 `_loadStatus` 对 changesState 的那两处写入' +
+      '(`app-store.ts:2999-3004`)合成一个状态进/状态出的函数。' +
+      '**刻意不复刻**:AppStore 类、repositoryStateCache/gitStoreCache/emitUpdate、' +
+      '`gitStore.loadStatus()`(一次真 git 调用,属 host)、`_loadStatus` 末尾的 ' +
+      '`updateChangesWorkingDirectoryDiff`(`:3018`,我们已落在 `src/client/store.ts` 的 `refreshStatus()`)。' +
+      '**退役条件**:`src/client/store.ts` 的授权模型换成镜像的 ' +
+      '`WorkingDirectoryFileChange.selection` 之后,它会直接 import 那个镜像模块并丢掉自己的 ' +
+      '`clearPartialAfterCommit` —— 那一刻本文件的 `applyChangesStatus` 与那三条 re-export ' +
+      '**必须删掉**(否则就是第二份必然漂移的真源),同时 `lib/git/index.ts` 的 `IStatusResult` ' +
+      '也一并删。计划见 `docs/changes-state-adoption.md`。',
+  ],
+  [
+    'lib/stores/git-store.ts',
+    '上游 1777 行**整个是宿主侧 git 能力**:import path / fs/promises / dugite / ../git(每一支都 ' +
+      "`import { git } from './core'` ⇒ dugite)/ ../git/stash / ../find-default-branch。" +
+      '§2.3 的「client 禁止 node 内置」+ §2.4 的「git 一律走 host 路由」合起来 ⇒ 这一层在浏览器半' +
+      '**不存在、也不应该存在**。这里保留上游的**导出名** `GitStore`(上游 :112 的 ' +
+      '`export class GitStore extends BaseStore`),但**刻意把它窄化成纯类型声明** —— 这是本文件' +
+      '唯一有争议的一处,判据写全:① 上游 `lib/stores/git-store-cache.ts:34` 会 `new GitStore(...)`, ' +
+      '若写成 no-op class 就得到**一个什么都不做的 store**,编译照过、错误推迟到用户点下去,是 §3 ' +
+      '失败模式 7/9 那一类**静默**失效;② 写成 `declare class` 则错误漏到**运行期**' +
+      '(`TypeError: GitStore is not a constructor`);③ 写成 **interface**,任何把它当值用的上游文件' +
+      '(最先会是 git-store-cache.ts)**在 `check-types` 那一刻就红**(TS2693)。' +
+      '⇒ 取 ③:唯一让错误停在编译期的写法。③ 写成 `type` 而不是 `interface`,是因为 ' +
+      '`.eslintrc.yml:67-75` 的 naming-convention 对 `selector: interface` 强制 `/^I[A-Z]/` ' +
+      '—— 写成 `interface GitStore` 会新增一条 lint 违规(实测 check-lint 0 → 1), ' +
+      '而改名 `IGitStore` 就不是上游导出名了;`type` 选择器不在那条规则里, ' +
+      '两者在 `new` 上的行为完全一样(都是 TS2693)。' +
+      '**本替身不复现**:任何 git 调用、`TypedBaseStore<string>` ' +
+      '的事件面(onDidUpdate/onDidError)、可实例化/可继承性;成员只声明**已落地消费方真正碰过**的' +
+      '两个(`defaultRemote` 上游 :1406、`setRemoteURL` 上游 :1534 —— 签名逐字,后者返回 ' +
+      '`Promise<boolean>`),所以它是一个**会随消费方增长而需要补成员**的窄化替身,漏成员会编译报错。' +
+      '零运行期代码、不可达、产物 0 字节(实测)。当前唯一消费方:' +
+      '`lib/stores/updates/update-remote-url.ts`(上游逐字)。' +
+      '**退役条件**:接上真实的宿主 git 门面(§2.4 的 git-argv → git-service → routes → api 四层)' +
+      '后,把本文件换成一份带实现的真替身;若那一天不来,它就一直是窄化替身。',
   ],
   [
     'lib/stores/copilot-store.ts',
@@ -630,7 +680,67 @@ const EXPECTED = new Map([
       '删掉三元才是结构改动。' +
       '**没有动的**:`theme-value-label` / `theme-selector` / `appearance-section` 等类名,' +
       '`ariaLabelledBy="theme-heading"` 等 id,`dateFormats` / `timeFormats` / `numberFormats` 的' +
-      '**示例值**(`Oct 19, 2017 (MMM d, yyyy)` 一类是格式样例,不是文案)。',
+      '**示例值**(`Oct 19, 2017 (MMM d, yyyy)` 一类是格式样例,不是文案)。' +
+      /*
+       * --- 同一文件上的**第二处**有意偏离:主题色板图改成构建期内联(2026-10)---
+       *
+       * 触发者:用户报「为什么主题这里图片加载失败了」(外观页三个色板的裂图)。
+       * 上面那条(中文文案)与本条是**独立的两件事**,必须分开读、可分开撤。
+       */
+      '\n【第二处偏离:主题色板图改为构建期内联 data URL(2026-10,用户报裂图)】' +
+      '**改的是什么**(2 行 + 1 条 import):' +
+      '`(before)` `import { encodePathAsUrl } from \'../../lib/path\'`;' +
+      '`const darkThemeImage = encodePathAsUrl(__dirname, \'static/ghd_dark.svg\')`;' +
+      '`const lightThemeImage = encodePathAsUrl(__dirname, \'static/ghd_light.svg\')` ⇒ ' +
+      '`(after)` `import ghdDarkThemeImage from \'../../static/common/ghd_dark.svg\'`、' +
+      '`import ghdLightThemeImage from \'../../static/common/ghd_light.svg\'`;' +
+      '`const darkThemeImage = ghdDarkThemeImage`;`const lightThemeImage = ghdLightThemeImage`。' +
+      '**为什么是 default 而不是命名导出**:esbuild 的 `dataurl` loader 对 `.svg` **只**产出' +
+      '默认导出(取 `{ dataUrl }` 会直接打包失败:`No matching export … for import "dataUrl"`),' +
+      '而本仓 ESLint 的 `no-restricted-syntax` 禁止 default export ⇒ 类型声明' +
+      '(`types/desktop-globals-client.d.ts` 的 `declare module \'*.svg\'`,写在**基线 0 条**的那个' +
+      'client 全局文件里而非 `client-platform-shims.d.ts`)是唯一能同时满足两边的位置。' +
+      '`<img src={…} alt="" />` 的五处标记与 `theme-value-label` 的标签文本**一字未动**。' +
+      '**为什么必须动上游这一处**(实测读数,不是推断):' +
+      '① 上游 `lib/path.ts:10` 是 `pathToFileURL(Path.resolve(...))`,而浏览器半的 ' +
+      '`src/client/shim-node-url.ts:36-38` 的 `pathToFileURL` **返回原串** ⇒ 产出的 `src` 是' +
+      '**根相对 HTTP 路径** `/dsh-git-diff/static/ghd_light.svg`(`__dirname` 固定为 `/dsh-git-diff`,' +
+      '见 `src/client/desktop-globals.ts:45`);' +
+      '② 宿主只注册 `/dsh-git` 前缀(`src/host/routes.ts:22`),`/dsh-git-diff/*` 必然 403/404 ⇒ ' +
+      '五张 `<img>` 的 `naturalWidth === 0`(裸 Chrome 实时读数:`complete=true, natural=0x0`,即裂图)。' +
+      '⚠️ **它不是 `file://`** —— 探针页是 `file://` 时那个相对路径才解析成 `file:`;生产页面是 ' +
+      '`http://127.0.0.1:43120/` 时它解析成 `http://127.0.0.1:43120/dsh-git-diff/…`(实测 403)。' +
+      '`dataurl` 内联后浏览器**不发任何请求**,于是既不依赖 `__dirname`、也不需要新增宿主静态路由。' +
+      '**资产来源**:两张 SVG **逐字节复制**自上游 `references/desktop/app/static/common/' +
+      'ghd_{light,dark}.svg`(1802 / 1765 字节,sha256 `befc478a…` / `5a29c02e…`),' +
+      '落在镜像同构路径 `src/core/desktop/static/common/`;该目录在上游是 `app/static/common/`,' +
+      '所以镜像里 `../../static/common/x.svg` 与上游同构(本探针的 A2/A4 判据读到的 ' +
+      '`naturalWidth=228` 与内容标记就是这两个文件真的被内联进产物的证据)。' +
+      '**为什么偏离落在调用点而不是 `lib/path.ts` 的 `encodePathAsUrl`**(评估过,结论是不该):' +
+      '① 那条 `src` 是**运行期拼串**,构建期 loader 碰不到它;全局改法只能让 `pathToFileURL` 返回' +
+      '**猜出来**的路径,且**必须新增一条宿主静态路由**(host 改动 = 必须重启应用);' +
+      '② `encodePathAsUrl` 还有 6 个**同类但已裁定为「不是缺陷」**的调用点' +
+      '(`ui/diff/index.tsx:38` 的 `NoDiffImage`、`ui/changes/no-changes.tsx:54`、' +
+      '`ui/repositories-list/repositories-list.tsx:31`、`ui/changes/multiple-selection.tsx`、' +
+      '`ui/branches/no-branches.tsx`、`ui/branches/no-pull-requests.tsx`,' +
+      '见 goal 文档 §5 与 §10.9),全局改动会把那 7 处一起换掉 —— 越权。' +
+      '**判据**(`docs/probes/appearance-theme-swatch-probe.mjs`,真 headless Chrome + CDP,' +
+      '对**真 `Appearance` 组件**的读数):' +
+      'A1 `src` 属性是 `data:` / A2 `complete=true` 且 `naturalWidth×naturalHeight = 228×120` /' +
+      'A3 逐张顺序与「解码后 SVG 长度只有 1802 与 1765 两种」/ A4 解码内容归属(浅色带 `#F6F8FA`、' +
+      '深色带 `#25292E`)/ A5 0 未捕获异常。**改后 19/19 · exit 0**;' +
+      '`--pre-fix`(用 esbuild 内存插件把这两行换回改动前的形式;**不碰磁盘**)' +
+      '**17 条红 · exit 1**(A1/A2/A3/A4 全红,A0/A5 仍绿)⇒ 判据承重。' +
+      '**退役条件**:出现**任意一条**即撤掉本偏离、把这 2 行按上游原文还原、并把两张 SVG 从' +
+      '`src/core/desktop/static/common/` 删除、同时删掉 `scripts/build.mjs` 的 ' +
+      '`clientLoader`(`.svg → dataurl`):' +
+      '① 宿主开始以 HTTP 提供插件的静态资产(例如 `ctx.webServer` 上有了一条能服务 ' +
+      '`/dsh-*/*.svg` 的路由)—— 那时 `encodePathAsUrl(__dirname, …)` 会真的取到文件,' +
+      '按上游原文还原即可(注意届时 `__dirname` 也必须指向宿主的服务根);' +
+      '② 上游自己把这两张图改成 import(或别的构建期内联机制)—— 直接与上游同步;' +
+      '③ 上游把 `static/` 挪出 `app/`(镜像同构路径不再成立)—— 重新核对资产来源后再定。' +
+      '撤除时**同时**删掉本条登记,并同步更新 `docs/probes/appearance-theme-swatch-probe.mjs` 的' +
+      '期望(它的 A1 会因此翻红,那是**正确**的)。',
   ],
   // 注:`lib/diff-parser.ts` 与 `ui/diff/text-diff-expansion.ts` 原本登记在这里
   // (上一轮把 `diff-helpers` 的说明符钉到我们自建的 `.ts` 孪生文件上)。

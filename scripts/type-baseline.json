@@ -4,9 +4,8 @@
   "typescript": "5.9.3",
   "programs": {
     "client": {
-      "src/client/changes-view.tsx": 1,
       "src/client/diff-ui.ts": 1,
-      "src/client/history-view.tsx": 2,
+      "src/client/history-view.tsx": 1,
       "src/client/icons.ts": 1,
       "src/client/repo-bar.tsx": 2,
       "src/core/desktop/lib/app-state.ts": 3,

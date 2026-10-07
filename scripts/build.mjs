@@ -60,7 +60,46 @@ const clientAlias = {
   // `os` 的唯一使用方是上游 `ui/changes/filter-changes-list.tsx` 的 `EOL`
   // (逐字镜像的 Changes 面之一),只用于拼剪贴板路径文本。
   os: './src/client/shim-node-os.ts',
+  /*
+   * `util` 的唯一使用方是镜像的进度解析器
+   * `src/core/desktop/lib/progress/git.ts:1` 的 `stripVTControlCharacters`。
+   *
+   * ⚠️ **这条 alias 今天是冗余的**(实测):esbuild 会读 `tsconfig.json` 的
+   * `paths`,而 `tsconfig.json` 里已经有 `"util": ["./src/client/shim-node-util.ts"]`
+   * (tsc 那半需要它,否则镜像多一条 TS2307)。写在这里是**为了让解析不依赖
+   * 「esbuild 恰好也读 paths」这个隐式事实** —— 那份配置哪天被改成不读,
+   * 这里仍然给出同一个替身,而不是突然变成 `Could not resolve "util"`。
+   *
+   * 实测代价(2026-10):把 `lib/progress/git.ts` 单独按浏览器半打一次
+   * = **5,297 B / 4 个模块**(替身 + 解析器 + 它的两个步骤表)。也就是说
+   * 万一有人把解析器 import 进 `src/client/**`,它会**成功**打包并带上替身,
+   * 而不是报错 —— 与 `path`/`url`/`fs/promises`/`os` 四条同形。
+   * 替身与真 `node:util` 的等价性由 `docs/probes/shim-node-util-probe.mjs` 钉住。
+   */
+  util: './src/client/shim-node-util.ts',
 };
+
+/**
+ * 浏览器半的 `.svg` 一律**内联成 data URL**。
+ *
+ * 为什么需要(2026-10,用户报「主题这里图片加载失败了」):
+ * 上游 `ui/preferences/appearance.tsx:143-144` 用
+ * `encodePathAsUrl(__dirname, 'static/ghd_light.svg')` 定位那两张主题色板图,
+ * 而在浏览器半那条链是 `shim-node-path.resolve` + `shim-node-url.pathToFileURL`
+ * (后者**返回原串**)⇒ 产出的 `src` 是一个**根相对 HTTP 路径**
+ * `/dsh-git-diff/static/ghd_light.svg`(实测;宿主只注册了 `/dsh-git` 前缀,
+ * 所以那个请求必然 403/404)⇒ 三张图 **`naturalWidth === 0`**,用户看到裂图。
+ *
+ * `dataurl` 让那两处 `import` 在**构建期**就变成 data URL:浏览器不再发任何请求,
+ * 因此**不需要**新增宿主静态路由、也**不**依赖 `__dirname` 的取值。
+ *
+ * ⚠️ 本 loader 只作用于**静态 import**。`encodePathAsUrl(...)` 那种**运行期拼串**
+ * 的调用点(镜像里还有 6 处:`ui/diff/index.tsx:38`、`ui/changes/no-changes.tsx:54`、
+ * `ui/repositories-list/repositories-list.tsx:31` 等)**不受本项影响** ——
+ * 它们仍然是「指向不存在的 URL」,但那是 goal 文档 §5 已登记的
+ * 「**不是**缺陷」现象(只有 `NoDiffImage` 那一张被点名),本项刻意不扩范围。
+ */
+const clientLoader = { '.svg': 'dataurl' };
 const clientInject = ['./src/client/desktop-globals.ts'];
 
 // react 系与 @deepseek-ai/* 由宿主 loader 提供,必须保持 external。
@@ -589,6 +628,7 @@ async function checkDesktopDiffUiBundles() {
       external: clientExternal,
       mainFields: ['browser', 'main'],
       alias: clientAlias,
+      loader: clientLoader,
       inject: clientInject,
       logLevel: 'silent',
     });
@@ -648,9 +688,10 @@ await build({
   // 实测产物 451KB,其中 react 与 react-dom 保持为外部 require(交平台解析),
   // 只有 react-virtualized 自己与它的依赖被内联。
   mainFields: ['browser', 'main'],
-  // 与 checkDesktopDiffUiBundles() 同一套 alias/inject:一旦 diff-ui.ts 被
+  // 与 checkDesktopDiffUiBundles() 同一套 alias/inject/loader:一旦 diff-ui.ts 被
   // changes-view/history-view 引用,这里的配置就已经就位,不需要再改。
   alias: clientAlias,
+  loader: clientLoader,
   inject: clientInject,
   define,
   banner: { js: banner },
