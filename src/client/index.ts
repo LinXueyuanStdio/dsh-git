@@ -61,14 +61,17 @@ const TAB_TITLE = 'git';
  * `sidebarRightTabs` **故意不在这里**。
  *
  * cordis 的静态 `inject` 只有「必需」一种语义(见 `@deepseek-ai/cordis` 的
- * `src/registry.ts`:数组形式 = 必需,对象形式的值是拦截配置)—— 声明了就**必须等到位**。
- * 而「右侧栏」并不是每个环境都有:普通 `dsh web` 的 profile 里,提供方
- * `@deepseek-ai/dsh-client-ui-sidebar-right` 只被 `dsh-web-app/cordis.patch.yml` 按名字引用、
- * 却不在公开 npm 的可用版本上(实测 0.1.5-alpha.1 vs 宿主 0.2.0-rc.2),服务因此永远不来。
- * 后果不是「我们的 tab 不出现」,而是**整个插件 pending、整个 Web UI 报
- * "Failed to load plugins / 1 entry did not activate"** —— 2026-10 实测踩到。
+ * `src/registry.ts`:数组形式 = 必需,对象形式的值是拦截配置)—— 声明了就**必须等到位**,
+ * 而**等待本身会挡住整条客户端启动链**(2026-10 实测:整个 Web UI 只剩
+ * "Failed to load plugins / 1 entry did not activate / @linxueyuan/dsh-git: pending")。
  *
- * 所以它按本仓 `types.ts:43` 的约定当**可选服务**:走 `ctx.get()`,拿不到就跳过注册。
+ * 但「当可选服务」**不等于**「用 `ctx.get()` 采样一次」:右侧栏的服务是真的会来的,
+ * 只是**比我们的 `apply` 晚**(2026-10-07 实测:同一 tick 里 `ctx.get()` 拿到 `undefined`,
+ * 而 `ctx.inject(['sidebarRightTabs'], …)` 的回调随后被调用、拿到的是 `object` + `function`)。
+ * 采样一次 ⇒ 在**所有**环境里都放弃注册,只是不再报错 —— 那是静默失败,不是兼容。
+ *
+ * 所以它走**动态 `ctx.inject`**:等到位再注册、服务不来就什么都不做,
+ * 两种语义都要(见 `apply` 里那段注册代码)。
  */
 export const inject = ['slots'];
 
@@ -165,20 +168,27 @@ export function apply(ctx: ClientCtx): void {
     console.warn(`[dsh-git] 宿主设置入口未接入(shortcuts 接不上),齿轮将回退到「更多」菜单:${String(error)}`);
   }
 
-  ctx.effect(() => {
-    /*
-     * 可选服务:属性访问(`ctx.sidebarRightTabs`)对未声明的服务会被 cordis 拒绝,
-     * 所以走 `ctx.get()`,并且连 `get` 抛错也要兜住 —— 拿不到就只是「这个环境没有右侧栏」,
-     * 不该让插件加载失败。
-     */
-    let tabs: SidebarRightTabsLike | undefined;
-    try {
-      tabs = ctx.get?.('sidebarRightTabs') as SidebarRightTabsLike | undefined;
-    } catch {
-      tabs = undefined;
-    }
+  /*
+   * tab 类型 + 正文 + 标题,三件都注册在**等到 `sidebarRightTabs` 之后**的子 fiber 里。
+   *
+   * 三种写法只有这一种同时对:
+   *  · 静态 `inject: ['sidebarRightTabs']` —— 服务不来就**永远 pending**,而 pending
+   *    会挡住整条客户端启动链(整个 Web UI 一起不可用)。**太硬**。
+   *  · `ctx.get('sidebarRightTabs')` 采样一次 —— 服务**晚到**就永远放弃注册,
+   *    界面上表现为「右侧栏在、别人的 tab 都在、就是没有 git」,而且不报错。**太早**。
+   *  · `ctx.inject([...], cb)` —— 子 fiber 等服务:到了注册、不来就什么都不做,
+   *    且**不阻塞**本插件自身的激活。**正好**。
+   *
+   * 这条也是宿主自己的写法:`dsh-github-workbench`、`dsh-context`、`dsh-remote`、
+   * `dsh-better-sidebar` 全都用 `ctx.inject(['sidebarRightTabs'], …)` 接这一席。
+   *
+   * 子 fiber 的回调返回值即 disposer:cordis 在服务消失 / 插件卸载时按序清理,
+   * 所以注册出来的 tab 类型与两个席位都不会留孤儿。
+   */
+  ctx.inject?.(['sidebarRightTabs'], function dshGitSidebarTab(injected) {
+    const tabs = injected.get('sidebarRightTabs') as SidebarRightTabsLike | undefined;
     if (tabs === undefined || typeof tabs.register !== 'function') {
-      console.warn('[dsh-git] 这个环境没有 sidebarRightTabs(右侧栏未组合),跳过 tab 注册;插件其余能力照常');
+      console.warn('[dsh-git] sidebarRightTabs 到了但形状不符(没有 register),跳过 tab 注册;插件其余能力照常');
       return;
     }
     const slots = ctx.slots;
@@ -232,7 +242,7 @@ export function apply(ctx: ClientCtx): void {
       disposeBody();
       disposeType();
     };
-  }, 'dsh-git: sidebar tab type + body + title');
+  });
 
   registerToastSeat(ctx);
 }
