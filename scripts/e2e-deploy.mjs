@@ -386,6 +386,20 @@ profileManifest.dependencies = {
   ...profileManifest.dependencies,
   '@deepseek-ai/dsh-base': DSH_VERSION,
   '@deepseek-ai/dsh-web-app': DSH_VERSION,
+  /*
+   * ⭐ **`@deepseek-ai/cordis` 必须显式装**(2026-10 在 CI 上查明,是本 E2E 抓到的最实的一条)。
+   *
+   * dsh 起子进程走的是平台包 `@deepseek-ai/dsh-subprocess`,而它是**一个独立的 Node
+   * 进程**,会在 profile 的模块链上 `import '@deepseek-ai/cordis'`。全新的 `$DSH_HOME`
+   * 里没有任何地方提供它 —— profile 模板的 `autoInstallPeers: false` 不会自动装 peer,
+   * 而开发机上 `$DSH_HOME/profiles/node_modules` 这个**共享根恰好被 Desktop 装过一份**,
+   * 于是本地一直看不出问题。
+   *
+   * 后果不是「某个小功能不好用」,而是:那个进程直接 `ERR_MODULE_NOT_FOUND` 崩掉 ⇒
+   * **每一次 git 调用都以「这个目录不是 git 仓库」收场**(退出码非 0,而 stderr 被
+   * `GitService.repoRoot` 丢掉,连崩溃痕迹都看不到)。装它,profile 才是完整的。
+   */
+  '@deepseek-ai/cordis': '^4.0.4',
 };
 writeFileSync(profileManifestPath, `${JSON.stringify(profileManifest, null, 2)}\n`);
 ok(`dependencies 锁到 ${DSH_VERSION}`);
