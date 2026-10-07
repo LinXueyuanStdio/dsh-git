@@ -25,6 +25,7 @@ import { FrameToasts, registerToastSource } from './bits.tsx';
 import { ErrorBoundary } from './error-boundary.tsx';
 import { GitStore } from './store.ts';
 import {
+  bootstrapCardStore, cardAuthOf,
   DSH_GIT_NS, DshGitSettingsCardController,
   type IConfigFormsLike, type IDshGitCardPagesFace, type IDshGitSettings,
 } from './host-settings-card.ts';
@@ -226,7 +227,7 @@ export function apply(ctx: ClientCtx): void {
  *   **click-through** — entries opt back into pointer events — so an occupant never blocks
  *   the app underneath. This is the additive seat for a frame-wide surface of your own:
  *   **a fresh `id` is added beside the shipped entries** instead of replacing them.」
- * · **宿主自己怎么用**(注册形状照抄的就是它们):
+ * · **宿主自己怎么用**(注册形状沿用的就是它们):
  *   `packages/client/ui-chat/src/client/apply.ts:268-279`(quota notice)、
  *   `packages/client/ui-schedule/src/client/index.ts:112-115`(DeleteToast)、
  *   `packages/client/ui-workspace/src/client/index.ts:297-309`(RowActionToast)、
@@ -406,9 +407,25 @@ function registerHostSettingsCard(ctx: ClientCtx): void {
         const globalStore = storeFor('');
         const pages: IDshGitCardPagesFace = {
           snap: globalStore.snapshot(),
-          auth: globalStore.snapshot().auth,
+          auth: cardAuthOf(globalStore.snapshot().auth),
           store: globalStore,
+          /*
+           * ⭐ **live**:卡片订阅的**真 store**。
+           *
+           * 没有这一条时,上面那两行(`snap` / `auth`)是**注册那一瞬间**的快照,而
+           * 注册发生在 `apply()` 里(`WorkbenchApp` 还没挂载)⇒ 它们是空的、而且永不更新:
+           * 仓库页永远「还没有仓库」、账号页永远未登录、添加/切换/移除点了界面不动。
+           * 实测读数(改前)见 `docs/probes/host-settings-card-live-probe.mjs`。
+           */
+          live: globalStore,
         };
+        /*
+         * ⭐ **装载**:`settings.plugins.tab` 不带 sessionId,所以卡片用的是
+         * `storeFor('')` 这颗**全局** store,而它**没有任何别的启动点**
+         * (右侧栏那颗是按 session 键的另一颗,由 `workbench.tsx:163` 启动)。
+         * 不装载 ⇒ 上面那个 live 订阅永远等不到数据。
+         */
+        void bootstrapCardStore(globalStore);
         const card = new DshGitSettingsCardController(
           configForms.get<IDshGitSettings>(DSH_GIT_NS),
           pages,

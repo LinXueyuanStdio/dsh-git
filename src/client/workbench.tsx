@@ -36,9 +36,27 @@ import { hostSettingsShortcutKeys, openHostSettings } from './host-settings-open
 import { Popover, PopoverAnchorPosition } from '../core/desktop/ui/lib/popover.tsx';
 import { ensurePrefAdaptations } from './pref-adapt.ts';
 import { useUnderlineLinks } from './prefs.ts';
+/*
+ * **运行期偏好总线**(`prefs-bus.ts`)—— 宿主设置卡片与 `WorkbenchApp` 是**两棵
+ * 互不相邻的树**(卡片 portal 到宿主自己的设置弹窗里),所以「字号」与「显示类偏好变了」
+ * 这两件事不能再用 prop 传,必须经由一份两边都能看见的真源。
+ *
+ * 改前这里持有的是**自己的一份 `useState`**(`fontScale` / `prefsRevision`,旧 `:146`
+ * 与 `:157`)⇒ 卡片里改字号**侧栏不当场变**(要刷新页面),而
+ * `bumpPreferencesRevision` 全仓**零订阅者** ⇒ 卡片写的日期/时间/数字格式要刷新才生效。
+ * 两处都不是「值没写进去」,而是「写进去没人听」—— 所以修法是**订阅**,不是再复制一份 state。
+ */
+import {
+  bumpPreferencesRevision,
+  fontScaleStore,
+  getFontScale,
+  getPreferencesRevision,
+  setFontScale,
+  subscribePreferencesRevision,
+} from './prefs-bus.ts';
 import { PopupType } from '../core/desktop/models/popup.ts';
 import { CloneDialog } from './clone-dialog.tsx';
-import { ConfirmDialog, Empty, Toasts } from './bits.tsx';
+import { ConfirmDialog, Empty, PushFailureDialog, registerToastSource } from './bits.tsx';
 import { ErrorBoundary } from './error-boundary.tsx';
 import { UICtx, type ConfirmOptions } from './gh.ts';
 import * as ghApi from './gh-api.ts';
@@ -143,7 +161,18 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
   const [cloneOpen, setCloneOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [dialog, setDialog] = useState<null | { opts: ConfirmOptions; resolve: (value: boolean) => void }>(null);
-  const [fontScale, setFontScale] = useState(0);
+  /*
+   * 界面缩放(px;`0` = 跟随宿主)—— **订阅** `prefs-bus` 的那一份,不再自己 `useState`。
+   *
+   * 为什么必须是 `useSyncExternalStore` 而不是「再 `useState` 一份 + 让卡片设法 setState」:
+   * 卡片与这里不是同一棵树,拿不到这里的 setter;而**两份 state 就是两份真源**,
+   * 迟早分叉(这正是改前那半个缺陷的成因)。
+   *
+   * `fontScaleStore.subscribe` 是**跨渲染稳定**的模块级函数(`prefs-bus.ts:114-120` 的
+   * 对象字面量只求值一次),所以 `useSyncExternalStore` 不会每帧重订阅。
+   * 第三个参数(服务端/首次渲染快照)传同一个读取器:值都是原始值,`Object.is` 天然稳定。
+   */
+  const fontScale = useSyncExternalStore(fontScaleStore.subscribe, getFontScale, getFontScale);
   /**
    * **显示类偏好的重渲染计数器**。
    *
@@ -153,8 +182,23 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
    * 写这类偏好就把它加一,于是这棵子树(顶栏 / 列表 / 变更区)全部重读。
    * 同一个值也写到根节点的 `data-prefs-revision` 上 —— 真 Chrome 探针据此断言
    * 「写入真的触发了重渲染」,而不是只看 localStorage。
+   *
+   * ⚠️ 改前这里是自己的一份 `useState`,于是**只有同一个弹窗里的写入**能通知到它;
+   * 宿主设置卡片那条路走的是 `prefs-bus.bumpPreferencesRevision()`,而它当时
+   * **零订阅者**(`prefs-bus.ts:148-151` 的注释自认了这一点)⇒ 卡片里改的格式
+   * 要刷新页面才生效。现在订阅的就是那个同一份计数器。
    */
-  const [prefsRevision, setPrefsRevision] = useState(0);
+  const prefsRevision = useSyncExternalStore(
+    subscribePreferencesRevision, getPreferencesRevision, getPreferencesRevision,
+  );
+  /**
+   * 偏好弹窗里任一「显示类偏好」被写之后的回调 —— 转交给**总线**里同一个计数器
+   * (`prefs-bus.ts:143` 的 `bumpPreferencesRevision`),于是「弹窗写的」与
+   * 「宿主设置卡片写的」走的是同一条通知链。
+   *
+   * 具名回调(不是 JSX 里的行内箭头):本仓 `react/jsx-no-bind` 连行内箭头都拦。
+   */
+  const onPreferencesChanged = useCallback((): void => { bumpPreferencesRevision(); }, []);
   /** 「Underline links」偏好:挂在根节点上,规则见 `pref-adapt.ts` 第 6 条。 */
   const underlineLinks = useUnderlineLinks();
 
@@ -171,6 +215,25 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
     // 列它的意义:万一将来同一实例被换上另一个 store,清理函数会先停掉旧的那个,
     // 而不是留下两个轮询器。原来这里是空理由的 `eslint-disable-next-line`。
   }, [store]);
+
+  /*
+   * **通知面搬到宿主的 `shell.overlay` 席位**(2026-10,用户裁决「右下角气泡」)。
+   *
+   * 改前 `Toasts` 是**这一棵树**的最后一个子级(`<ErrorBoundary label="提示条">` 里)。
+   * 现在由 `src/client/index.ts` 注册的 `shell.overlay` 条目渲染(`FrameToasts`),因为:
+   *  1. 那是宿主给「帧级浮层」的**正典席位**(`ui-layout/src/client/index.ts:95-103`),
+   *     它的文档里点名了 toast stack;宿主自己那些通知都注册在那儿
+   *     (`ui-chat` 的 quota notice、`ui-schedule` 的 DeleteToast、`ui-workspace` 的
+   *     RowActionToast…,清单见 `cordis-client-runner/src/client/slot-catalog.ts:2845` 起的
+   *     `occupants`),理由是「通知要活过报出它的面板」;
+   *  2. 宿主原语把横幅 portal 到 `document.body`,所以席位那一棵树**不占**任何 DOM
+   *     (它不会挡住帧里任何东西),几何由 `bits.tsx` 的 clamp 变量 + `styles.ts` 那条
+   *     带门控的规则决定。
+   *
+   * 席位不带 sessionId,所以这里把**本面板这颗 store** 登记成「帧级通知来源」——
+   * 哪个 session 报出通知就显示哪一条(多颗同时活着时后到的赢,见 `bits.tsx` 的规则)。
+   */
+  useEffect(() => registerToastSource(store), [store]);
 
   // GitHub token 同步:登录后远端页签要用同一个令牌。
   //
@@ -220,6 +283,30 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
   const reportPanelError = useCallback((message: string): void => {
     store.toast(message, 'err');
   }, [store]);
+
+  /*
+   * **推送失败弹窗**的三个出口(`store.pushFailure` 是唯一入口)。
+   *
+   * 为什么这一层必须有:探针 `push-failure-dialog-probe.mjs` 只证明
+   * 「真信封 ⇒ 真 `PushFailureDialog` 的 DOM/事件」,它的诚实边界 #2 写明
+   * **不证明**整棵 `WorkbenchApp` 挂载后同样 —— 那正是下面这三行 + 渲染位的事。
+   */
+  const pushFailure = snap.pushFailure;
+  /** 关闭弹窗 —— 上游 `app.tsx` 的 `onPopupDismissedFn` 把弹窗队列队首 pop 掉。 */
+  const dismissPushFailure = useCallback((): void => { store.clearPushFailure(); }, [store]);
+  /**
+   * 「抓取」出口 —— 上游 `push-needs-pull-warning.tsx:56-64` 的 `onFetch`:
+   * `await dispatcher.fetch(…)` **之后**才 `onDismissed()`。**顺序是契约**:
+   * 抓取在飞的时候弹窗必须还在(否则用户点完就只看到一个消失的框、不知道抓没抓);
+   * 上游那 9 行里 `setState({isLoading:true})` 的作用就是这个,我们没有 loading 态,
+   * 靠「先 fetch 后 dismiss」表达同一件事。
+   *
+   * 第二个 rejected 分支是**防御**:`store.fetch()` 自己把失败交给 `fail()`(toast),
+   * 正常不会抛;万一抛了,弹窗也不该变成关不掉的模态。
+   */
+  const fetchAfterPushFailure = useCallback((): void => {
+    void store.fetch().then(dismissPushFailure, dismissPushFailure);
+  }, [store, dismissPushFailure]);
 
   const counts = snap.counts;
   const tabCount = (id: TabId): number | undefined => {
@@ -415,14 +502,27 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
             store={store}
             snap={snap}
             fontScale={fontScale}
+            /* 直接给总线那个写入口(`prefs-bus.ts:99` 的 `setFontScale`):弹窗与卡片
+               写的是**同一份**值,于是「弹窗改字号」与「卡片改字号」不再各写各的。 */
             onFontScale={setFontScale}
-            onPreferencesChanged={() => setPrefsRevision((value) => value + 1)}
+            onPreferencesChanged={onPreferencesChanged}
             /*
              * 打开时预选哪一页。`preferencesTab` 只在**打开的那一次**被读 ——
              * 语义是初值,见下面 `openPreferencesAt` 的注释与那个 prop 的 JSDoc。
              */
             initialSelectedTab={preferencesTab}
             onClose={closePopup}
+            />
+          </ErrorBoundary>
+        )}
+        {pushFailure !== null && (
+          <ErrorBoundary label="推送失败" resetKey={`${pushFailure.code}:${pushFailure.message}`}
+            onError={reportPanelError}>
+            <PushFailureDialog
+              error={pushFailure}
+              onFetch={fetchAfterPushFailure}
+              onOpenPreferences={openPreferences}
+              onDismiss={dismissPushFailure}
             />
           </ErrorBoundary>
         )}
@@ -440,9 +540,12 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
               onDone={(okay) => { dialog.resolve(okay); setDialog(null); }} />
           </ErrorBoundary>
         )}
-        <ErrorBoundary label="提示条" onError={reportPanelError}>
-          <Toasts store={store} toasts={snap.toasts} />
-        </ErrorBoundary>
+        {/*
+          提示条**不再挂在这里**:通知面搬到宿主的 `shell.overlay` 席位
+          (`src/client/index.ts` 的 `dsh-git.toasts` 条目 → `bits.tsx` 的 `FrameToasts`),
+          本组件只把 `store` 登记成通知来源(见上面那个 effect)。错误边界跟着搬到席位
+          条目那一层(index.ts 里包着 `FrameToasts`)。
+        */}
       </div>
     </UICtx.Provider>
   );
@@ -724,8 +827,28 @@ function MenuPopover(props: {
         {item('刷新状态与历史', () => { void store.refreshAll(); }, snap.busy !== '')}
         {item('抓取远端(fetch)', () => { void store.fetch(); }, (snap.sync?.remotes.length ?? 0) === 0)}
         {item('拉取(pull)', () => { void store.pull(); }, snap.sync?.upstream == null)}
-        {item('推送(push)', () => { void store.push(false); }, snap.status?.unborn === true)}
-        {item('强推(--force-with-lease)', () => { void store.push(true); }, snap.sync?.canForcePush !== true)}
+        {/*
+         * ⚠️ 这两项的 `disabled` 判据 2026-10 补齐(用户报「推送失败没有弹窗」这一轮
+         * 顺带查出来的**同一族**缺陷:入口没接上,点下去没反应/报错)。
+         *
+         * 上游在「没有远端」时**根本不推**:`performPush` 第一件事就是
+         * `if (remote === null) { _showPopup({type: PopupType.PublishRepository}) }`
+         * (`lib/stores/app-store.ts:5222-5229`),而 `ui/toolbar/push-pull-button.tsx:527-539`
+         * 在那个状态下渲染的是 **Publish repository** 按钮(标题 `Publish this repository to GitHub`)。
+         * 我们的顶栏那条路已经按同一判据截住了(`toolbar.tsx:646-651` 的
+         * `remotes.length === 0 ⇒ toast + return`),但**菜单这两项当时漏了** ⇒
+         * 它会把一个没有远端的仓库推到宿主,拿到 `no-upstream` 错(`git-service.ts:1614-1615`)。
+         * 两条入口判据不一致,用户看到的就是「同一个动作,一个入口说不支持、另一个入口直接报错」。
+         *
+         * 同时补上 `snap.busy !== ''`:宿主侧的网络动作是**互斥**的
+         * (`store.ts:1804-1806` 的 `isNetworkActionInProgress()` 直接 return),
+         * 而 `store.push` 的提前 return **不产生任何反馈** ⇒ 那就是「点了没反应」。
+         * 菜单项显式禁用,与「刷新状态与历史」那一项同口径。
+         */}
+        {item('推送(push)', () => { void store.push(false); },
+          snap.status?.unborn === true || (snap.sync?.remotes.length ?? 0) === 0 || snap.busy !== '')}
+        {item('强推(--force-with-lease)', () => { void store.push(true); },
+          snap.sync?.canForcePush !== true || (snap.sync?.remotes.length ?? 0) === 0 || snap.busy !== '')}
         <div className="gw-pop-title">打开</div>
         {item('在浏览器打开仓库', () => {
           if (remote !== '') window.open(`https://github.com/${remote}`, '_blank', 'noopener');

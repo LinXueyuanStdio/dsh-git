@@ -103,6 +103,20 @@ const TAB_ITEMS = TABS.map((entry) => ({
 export function DshGitCard(props: DshGitCardProps): ReactNode {
   const state = props.useDshGitSettings((snapshot) => snapshot);
   /**
+   * **实时数据面**(仓库清单 + 登录态)。
+   *
+   * ⚠️ 这一行是本卡片「参数加载得出来」的**唯一**通道,不要退回读 `props.pages.snap`:
+   * 那两个字段是 `index.ts` 在**注册那一瞬间**拍的快照(`apply()` 期间,`WorkbenchApp`
+   * 都还没挂载),里面 `repos: []`、`auth: null`,而且没有任何订阅 ⇒
+   * 仓库页永远「还没有仓库」、账号页永远「未登录」、点按钮界面不动。
+   * 判据与改前读数见 `docs/probes/host-settings-card-live-probe.mjs` 的 A2/A3/B1/B2。
+   *
+   * `props.pages.auth/snap` 仍然在注入面里 —— 它们是**静态回退面**
+   * (`hooks.dshGitSnapshot` 由 controller 用 `staticSource()` 造出来给没有 `live` 的
+   * 调用点,例如 `docs/probes/host-settings-card-driver.tsx`),不是第二份真源。
+   */
+  const live = props.useDshGitSnapshot((view) => view);
+  /**
    * 界面缩放的**当前值** —— 从 `hooks.fontScaleValue` 那个 observable 读。
    *
    * ⚠️ 这里的 `?? FONT_SCALE_DEFAULT` 不只是「运行期兜底」,它还是**正确性**:
@@ -188,9 +202,9 @@ export function DshGitCard(props: DshGitCardProps): ReactNode {
         >
           <PreferencesPageBody
             tab={entry.id}
-            auth={props.pages.auth}
+            auth={live.auth}
             store={props.pages.store}
-            snap={props.pages.snap}
+            snap={live.snap}
             fontScale={fontScale}
             onFontScale={props.onFontScale}
             onLogout={props.onLogout}

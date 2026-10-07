@@ -77,7 +77,7 @@
  * @module dsh-git/client/toolbar
  */
 
-import { useLayoutEffect, useMemo, useState } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ComponentType, CSSProperties, ReactNode } from 'react';
 
 import { Toolbar } from '../core/desktop/ui/toolbar/toolbar.tsx';
@@ -620,8 +620,24 @@ export function WorkbenchToolbar(props: WorkbenchToolbarProps): ReactNode {
    * (那条理由写在上面 `push` 的注释里)。盒子在每次 render 时被刷新,所以点击时读到的是
    * **当前正在显示的那份** `snap` —— 这比「点击时冻结一个旧值」更正确:
    * 下拉里的值来自上一帧,而上一帧正是用户看到文案的那一帧。
+   *
+   * ⚠️ **2026-10 修正:这个盒子必须是真正的 `useRef`,不能是每次渲染新建的普通对象。**
+   *
+   * 改前写的是 `const pullWithRebaseRef: { current: boolean | undefined } = { current: undefined }`
+   * —— 一个**普通字面量对象**。它在组件体里每次渲染都换身份,而 `pullWithRebaseRef` 进了
+   * 下面 `useMemo` 回调的闭包 ⇒ `react-hooks/exhaustive-deps` 报
+   * 「missing dependency: 'pullWithRebaseRef'」。那条报错在这里是**在理的**:
+   * 它是一个被闭包捕获的**每次渲染都可能不同的值**,规则分不清「故意要最新的」还是「写漏了」。
+   *
+   * 用 `useRef` 之后两件事同时成立:
+   *   · `.current` 仍然每次渲染被刷新(语义与改前**逐字相同**);
+   *   · ref **对象本身**是跨渲染稳定的 ⇒ `exhaustive-deps` 认可它,不必进依赖数组,
+   *     所以门面仍然**每帧都不重建**(这是上面那条「不能并进依赖」的理由要守的东西)。
+   *
+   * 换句话说:这不是「给规则让路」,而是把「这个盒子跨渲染稳定」从**注释里的约定**
+   * 变成**类型能表达的承诺** —— 改前那句注释说的稳定性,代码里其实并不成立。
    */
-  const pullWithRebaseRef: { current: boolean | undefined } = { current: undefined };
+  const pullWithRebaseRef = useRef<boolean | undefined>(undefined);
   pullWithRebaseRef.current = snap.sync?.pullWithRebase;
 
   const syncDispatcher = useMemo(

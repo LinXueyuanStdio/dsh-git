@@ -52,6 +52,7 @@ import {
 import { Branch, BranchType } from '../core/desktop/models/branch.ts';
 import { removeRemotePrefix } from '../core/desktop/lib/remove-remote-prefix.ts';
 import { repositoryForEntry } from './repo-bar.tsx';
+import { remoteNameOf } from './sync-state.ts';
 import { api } from './api.ts';
 import { ConfirmDialog } from './bits.tsx';
 import type { GitStore, Snapshot } from './store.ts';
@@ -196,8 +197,16 @@ export function BranchDropdownContent(props: BranchDropdownContentProps): ReactN
   const [filter, setFilter] = useState('');
   /** 正在重命名的分支(`from` = 原名,`value` = 输入框当前值);`null` = 没有对话框。 */
   const [renaming, setRenaming] = useState<{ from: string; value: string } | null>(null);
-  /** 正在确认删除的分支名;`null` = 没有对话框。 */
+  /** 正在确认删除的本地分支名;`null` = 没有对话框。 */
   const [removing, setRemoving] = useState<string | null>(null);
+  /**
+   * 正在确认删除的**远端**分支;`null` = 没有对话框。
+   *
+   * 与 `removing` **分开**是刻意的:两条路的 argv、风险与回执都不同
+   * (`git branch -D` 动本地 ref;`git push <remote> --delete` 会**改远端**
+   * —— 别人也会受影响),共用一个状态会让两句话混在一起。
+   */
+  const [remoteRemoving, setRemoteRemoving] = useState<{ remote: string; branch: string; label: string } | null>(null);
 
   const currentName = snap.status?.branch ?? '';
   /**
@@ -245,10 +254,58 @@ export function BranchDropdownContent(props: BranchDropdownContentProps): ReactN
   const beginDelete = useCallback((name: string) => {
     const branch = allBranches.find((b) => b.name === name);
     if (branch !== undefined && branch.type === BranchType.Remote) {
-      store.toast(
-        `「${name}」是远端分支:删除远端分支要 host 的 deleteRemoteBranch(push --delete)路由,今天还没有。`,
-        'err',
-      );
+      /*
+       * 远端分支:**走 `git push <remote> --delete <branch>`**。
+       *
+       * 2026-10 之前这里是一句**假话**(原话直接沿用在报告里):
+       * 「删除远端分支要 host 的 deleteRemoteBranch(push --delete)路由,今天还没有。」
+       * —— 而那条路由(`src/host/routes.ts:977` 的 `remote-branch-delete`)与包装
+       * (`src/client/api.ts:944` 的 `api.deleteRemoteBranch`)**都已经存在**,
+       * 只是全仓 0 调用点(审计 `docs/dead-code-and-missing-state-audit.md` §2.3 第 7 项)。
+       * 换句话说:界面在用一句**过期的话**解释一个**没接线**的能力。
+       *
+       * 上游的判据与落点(`app-store.ts:5050-5080`):
+       *  - 分支类型是 `Remote` ⇒ **不需要先 checkout**(注释逐字:
+       *    「If solely a remote branch, there is no need to checkout a branch.」);
+       *  - 远端名取 `branch.remoteName`(`models/branch.ts` 从 `refs/remotes/<remote>/…`
+       *    解析,拿不到会**抛错**——所以这里自己再兜一层),
+       *    分支短名取 `branch.nameWithoutRemote`;
+       *  - 落点是 `lib/git/branch.ts:119-143` 的 `deleteRemoteBranch`。
+       *
+       * 我们额外需要「往哪个远端推」:`snap.sync.remote`(宿主 `sync-state` 给的
+       * 当前上游远端名)是第一选择;它缺失时(没有 upstream 但有远端跟踪分支)
+       * 退回 `branch.remoteName`。两个都拿不到 ⇒ **明确拒绝**,不发请求。
+       */
+      /*
+       * `Branch.remoteName` 对「ref 不是 `refs/remotes/<remote>/<name>`」会**抛错**
+       * (镜像 `models/branch.ts` 的 getter,上游同)—— 而 `toDesktopBranches` 把
+       * 宿主的 ref 原样传进来。所以这里必须 try/catch:一个畸形 ref 不该让
+       * 整个下拉崩掉。
+       */
+      let parsedRemote: string | null = null;
+      let shortName = name;
+      try {
+        parsedRemote = branch.remoteName;
+        shortName = branch.nameWithoutRemote;
+      } catch {
+        parsedRemote = null;
+      }
+      /*
+       * 「往哪个远端推」用**上游同一份判定**:`sync-state.ts` 的 `remoteNameOf`
+       * (它读 `status.upstream` 的 remote 前缀,退回 `sync.remotes[0]`)。
+       * 不在本文件里自己写第三个版本 —— 顶栏同步段用的就是它。
+       * 拿不到 ⇒ **明确拒绝**,不发请求(见下面那句 toast)。
+       */
+      const remote = remoteNameOf(snap) ?? parsedRemote;
+      if (remote === null || remote === undefined || remote === '') {
+        store.toast(
+          `「${name}」是远端跟踪分支,但拿不到它属于哪个远端(没有 upstream 也没有远端名):删除远端分支需要一个远端名。`,
+          'err',
+        );
+        return;
+      }
+      setRemoving(null);
+      setRemoteRemoving({ remote, branch: shortName, label: name });
       return;
     }
     if (name === currentName) {
@@ -258,7 +315,7 @@ export function BranchDropdownContent(props: BranchDropdownContentProps): ReactN
     }
     setRenaming(null);
     setRemoving(name);
-  }, [allBranches, currentName, store]);
+  }, [allBranches, currentName, snap, store]);
 
   /*
    * 两个确认框的三个回调。
@@ -293,6 +350,16 @@ export function BranchDropdownContent(props: BranchDropdownContentProps): ReactN
     }
     void deleteBranchInRepo(store, repoPath, target);
   }, [removing, repoPath, store]);
+
+  /** 远端分支删除确认框的确认分支(与 `onDeleteDone` 同一条纪律:先取值再清空)。 */
+  const onRemoteDeleteDone = useCallback((okay: boolean) => {
+    const target = remoteRemoving;
+    setRemoteRemoving(null);
+    if (!okay || target === null) {
+      return;
+    }
+    void deleteRemoteBranchInRepo(store, repoPath, target.remote, target.branch);
+  }, [remoteRemoving, repoPath, store]);
 
   return (
     <div className="branches-container">
@@ -363,6 +430,27 @@ export function BranchDropdownContent(props: BranchDropdownContentProps): ReactN
           onDone={onDeleteDone}
         />
       )}
+
+      {/*
+        远端分支的删除确认。上游 `_deleteBranch`(`app-store.ts:5050-5080`)在远端那一支
+        直接 `deleteRemoteBranch(repository, remote, nameWithoutRemote)` ——
+        也就是 `git push <remote> --delete <branch>`,**改的是远端**。
+        所以这句必须与本地那条说得不一样:本地那条结尾是「远端上还留着这个分支」,
+        这一条恰恰相反。
+      */}
+      {remoteRemoving !== null && (
+        <ConfirmDialog
+          title={`删除远端分支 ${remoteRemoving.label}?`}
+          body={
+            `这会在远端 ${remoteRemoving.remote} 上执行删除(git push ${remoteRemoving.remote} --delete ${remoteRemoving.branch})。\n\n` +
+            '远端上的这个分支会消失,**别人也会看不到它**;本地的远端跟踪分支会一起清掉。' +
+            '这个动作在远端上无法从 dsh-git 撤销(只能重新推一次同名分支)。'
+          }
+          confirmText="删除远端分支"
+          danger={true}
+          onDone={onRemoteDeleteDone}
+        />
+      )}
     </div>
   );
 }
@@ -413,6 +501,34 @@ async function deleteBranchInRepo(store: GitStore, repoPath: string, name: strin
     return;
   }
   store.toast(`已删除分支 ${name}`);
+  await store.refreshAll();
+}
+
+/**
+ * 真正落库:**远端**分支删除。argv 等价于 `git push <remote> --delete <branch>`
+ * (宿主 `remote-branch-delete` 路由 → `git-service.ts:1410-1440` 的
+ * `deleteRemoteBranch`,上游 `lib/git/branch.ts:119-143`)。
+ *
+ * 与 {@link deleteBranchInRepo} 的三点差别,逐条说明:
+ *  1. **远端名是必需的**(本地那条不需要):宿主会拿它去比对 `git remote` 的输出,
+ *     不存在就拒绝 —— 所以「拿不到远端名」这一档在**调用前**就得拦住
+ *     (`beginDelete` 里做了:两个来源都空 ⇒ 直接 toast,不发请求);
+ *  2. **「远端 ref 已经不在了」按上游折成成功**:宿主顺手删掉本地那份过期的
+ *     remote-tracking ref(`git-service.ts:1437` 的 `update-ref -d`),所以
+ *     真的走到 `!result.ok` 的都是有意义的原因(远端不存在 / 没权限 / 非快进保护),
+ *     一律原话回显,不吞;
+ *  3. **刷新照旧**:分支清单与 `sync-state` 都会变,`refreshAll()` 一次拿全。
+ * @param store - 用来弹 toast 与刷新。
+ * @param remote - 远端名(必须是 `git remote` 里存在的名字)。
+ * @param branch - 远端上的分支短名(**不带** `<remote>/` 前缀)。
+ */
+async function deleteRemoteBranchInRepo(store: GitStore, repoPath: string, remote: string, branch: string): Promise<void> {
+  const result = await api.deleteRemoteBranch(repoPath, remote, branch);
+  if (!result.ok) {
+    store.toast(result.error.message, 'err');
+    return;
+  }
+  store.toast(`已删除远端分支 ${remote}/${branch}`);
   await store.refreshAll();
 }
 

@@ -243,6 +243,32 @@ export interface IDesktopDiffProps {
    */
   readonly onSelectionChanged?: ((spec: LineSelectionSpec) => void) | undefined;
   /**
+   * **行/块级丢弃**(上游 `IDiffProps.onDiscardChanges`,`ui/diff/index.tsx:95-99`)。
+   *
+   * 上游链路:`side-by-side-diff.tsx:1454-1473`(行号 gutter 右键)/
+   * `:1530-1556`(hunk 手柄右键)在选区上算出 `withSelectNone().withRangeSelection(...)`
+   * 之后回调,再由 `ui/changes/changes.tsx:75-97` 的 `onDiscardChanges` 分派:
+   * `askForConfirmationOnDiscardChanges`(上游默认 **true**,`app-store.ts:490`)为真 ⇒
+   * 弹 `PopupType.ConfirmDiscardSelection`,否则直接
+   * `dispatcher.discardChangesFromSelection(...)` ⇒ `lib/git/apply.ts:102-120`。
+   *
+   * 缺省 = **不提供这个入口**:上游 `side-by-side-diff.tsx:1458` 在
+   * `onDiscardChanges === undefined` 时**直接 return** ⇒ 右键连菜单都不弹 ——
+   * 这正是本插件 2026-10 之前的状态(`docs/discard-lines-contract.md` §4)。
+   * @param spec - 要丢弃的行选区(`selectionToSpec()` 的输出,与暂存共用同一个坐标系)。
+   */
+  readonly onDiscardChanges?: ((spec: LineSelectionSpec) => void) | undefined;
+  /**
+   * 丢弃前是否让调用方弹确认框(上游 `askForConfirmationOnDiscardChanges`)。
+   *
+   * 缺省 `true`(照上游默认值 `app-store.ts:490` 的 `confirmDiscardChangesDefault`)。
+   * 它同时决定右键菜单文案里那个省略号(`side-by-side-diff.tsx:1565-1567`)——
+   * 所以「有确认」与「文案带 `…`」是一致的,不会出现「文案承诺了确认框、实际直接丢」。
+   * 拉起的确认框由调用方负责(本组件不渲染弹窗:它是渲染层,弹窗归页面);
+   * 调用方通过它决定「收到选区之后是弹框还是直接丢」。
+   */
+  readonly askForConfirmationOnDiscardChanges?: boolean | undefined;
+  /**
    * 给一个有确定高度的框(320px),用于**没有可分配高度**的容器(History 页签里是滚动区)。
    * 缺省时容器 `flex:1;min-height:0`,由父级 flex 分配高度。
    *
@@ -868,6 +894,54 @@ export function DesktopDiff(props: IDesktopDiffProps): ReactNode {
     onSelectionChanged(selectionToSpec(next, selectableIndices));
   }, [selectable, onSelectionChanged, hideWhitespaceInDiff, selectableIndices, selection]);
 
+  /**
+   * **行/块级丢弃** → 调用方(上游 `ui/changes/changes.tsx:75-97` 的 `onDiscardChanges`)。
+   *
+   * 三件事必须与 `handleIncludeChanged` 逐条对齐,否则会出现「屏幕上选的行」与
+   * 「被丢弃的行」不是同一批(**而 `git apply` 不会报错**):
+   *
+   *  1. **隐藏空白时不提供**:此时 patch 来自 `git diff -w`,行号空间与 host 重新取的
+   *     那份不同 —— 与暂存那条守卫同源(`setHideWhitespace` 的注释里逐条写了理由);
+   *  2. **只读 diff 不提供**:上游 `canSelect(file)` 为假时 `onContextMenuLine` /
+   *     `onContextMenuHunk` 都已经提前 return,这里再判一次是**纵深防御**
+   *     (探针里 `selectable={false}` 的那一档必须一个菜单都不弹);
+   *  3. **走同一份 `selectableIndices`**:上游给的是 `DiffSelection`,而补丁要用
+   *     `LineSelectionSpec`(`buildPartialPatchFromRaw` 的入参),两者必须由**同一个**
+   *     可选中行集合换算 —— 所以这里复用 `selectionToSpec`,不另写一份。
+   *
+   * ⚠️ 上游 `onDiscardChanges(this.props.diff, newSelection)` 传的是
+   * **props 里那份未展开的 diff**(`side-by-side-diff.tsx:1604-1606` 的注释点明了原因:
+   * 展开 hunk 后行模型会平移)。我们这一层拿到的 `diff` 就是那份(`useMemo` 自 `patch`),
+   * 所以换算出来的 spec 与 host 重新取的那份 patch 同坐标系。
+   */
+  const handleDiscardChanges = useCallback((_diff: ITextDiff, next: DiffSelection): void => {
+    if (!selectable || props.onDiscardChanges === undefined) {
+      return;
+    }
+    if (props.hideWhitespaceInDiff) {
+      return;
+    }
+    const spec = selectionToSpec(next, selectableIndices);
+    /*
+     * `askForConfirmationOnDiscardChanges`(见该 prop 的 JSDoc)被**显式读一次**,
+     * 而且这是一个有后果的分支:
+     *
+     *  - 上游把这个 prop 交给 `SideBySideDiff` **只**为了菜单文案那个省略号
+     *    (`side-by-side-diff.tsx:1565-1567`),「谁弹框」在调用方
+     *    (`ui/changes/changes.tsx:84-96`);
+     *  - 本组件是**纯渲染层**,不渲染任何弹窗。调用方(页面)已经按上游那条语义
+     *    渲染了确认框,所以这里**恒传 `false`**(见下面那处 JSX);
+     *  - 万一有人传了 `true`,正确的行为是**拒绝执行**而不是默默丢弃 ——
+     *    因为那意味着「有人以为这里会弹框」,而实际不会:直接丢会**绕过确认**,
+     *    这是不可逆动作,必须响亮地停下(与 `discard-lines-contract.md` §2
+     *    那条「静默做错方向比报错危险」同一条纪律)。
+     */
+    if (props.askForConfirmationOnDiscardChanges === true) {
+      return;
+    }
+    props.onDiscardChanges(spec);
+  }, [selectable, props, selectableIndices]);
+
   // ---- 图片 diff(History:committed vs its parent / Changes:索引→工作区) ----
   /**
    * 候选判据:**宿主判了二进制** + **路径在上游的图片白名单里**。
@@ -1026,6 +1100,29 @@ export function DesktopDiff(props: IDesktopDiffProps): ReactNode {
             onOpenBinaryFile={props.onOpenBinaryFile ?? noop}
             onChangeImageDiffType={onChangeImageDiffType}
             onHideWhitespaceInDiffChanged={props.onHideWhitespaceInDiffChanged}
+            /*
+             * 行/块级丢弃(2026-10 接线)。它以前**根本不存在这个 props 面**
+             * (`diff-ui.ts` 的 `ISeamlessDiffSwitcherProps` 里有字段,但没人传)⇒
+             * `side-by-side-diff.tsx:1458` 直接 return ⇒ 行号 gutter 右键连菜单都不弹,
+             * 用户只能暂存、不能丢弃(`docs/discard-lines-contract.md` §4)。
+             *
+             * `askForConfirmationOnDiscardChanges` **恒传 `false`**,这是一个**刻意**的选择,
+             * 理由要说清(传 `true` 也不会有第二道确认框,只会多一个省略号):
+             *
+             *  - 上游那个 props 的唯一运行期用途是决定菜单文案**带不带 `…`**
+             *    (`side-by-side-diff.tsx:1565-1567`)—— 它**自己不弹任何框**;
+             *  - 「谁来弹框」由调用方决定(`ui/changes/changes.tsx:84-96`:
+             *    `askForConfirmationOnDiscardChanges` 为真就发
+             *    `PopupType.ConfirmDiscardSelection`,否则直接丢);
+             *  - 我们这一层**不在 `Diff` 的渲染路径上渲染弹窗**(它是纯渲染层),
+             *    确认框由 `changes-view.tsx` 按调用方语义渲染。若这里传 `true`,
+             *    菜单会写「Discard … Line…」,而确认框在**另一个组件**里 ——
+             *    两处状态一漂移就会出现「文案承诺了确认、实际直接丢了」。
+             *
+             * ⇒ 省略号留给真正负责确认的那一层(调用方),这里恒 `false`。
+             */
+            onDiscardChanges={props.onDiscardChanges === undefined ? undefined : handleDiscardChanges}
+            askForConfirmationOnDiscardChanges={false}
           />
         </>
       )}

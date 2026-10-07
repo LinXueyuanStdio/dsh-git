@@ -34,6 +34,7 @@ import {
   type SettingsFieldState, type SettingsFormActions, type SettingsFormScope, type SettingsFormShell,
 } from '@deepseek-ai/dsh-client-ui-primitives';
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store';
+import { waitForRoutes, type AuthStatePayload } from './api.ts';
 import { fontScaleStore, setFontScale, type IPreferenceSource } from './prefs-bus.ts';
 import {
   startDeviceSignIn,
@@ -106,18 +107,60 @@ export interface IDshGitCardState extends SettingsFormShell {
 }
 
 /**
- * 卡片要读的 **store 面**(结构化类型,不是 `GitStore` 的别名)。
+ * 卡片里「谁登录了」的最小形状(账号页)。
  *
- * 为什么只声明读的那两面:`index.ts` 里那颗 store 是**按 session 记忆化**的
- * (`storeFor(sessionId)`,`src/client/index.ts:72-82`),而 `settings.plugins.tab`
- * 席位**不带 sessionId**(与 `sidebar.right.pane.tab` 不同)⇒ 卡片拿到的是
- * **全局那一颗**(`storeFor('')`)。这是本轮的已知边界,报告里如实登记。
+ * 与 `preferences-pages.tsx` 的 `PreferencesAuth` 结构兼容(多了可缺省的 `endpoint`)。
+ * 单独具名是为了让 {@link IDshGitCardLiveView} 与静态回退面共用同一份契约。
+ */
+export interface IDshGitCardAuth {
+  readonly login: string;
+  readonly tokenTail: string;
+  /** 该账号的 GitHub API 基址;缺省 = 未知(老 host / 静态回退面)。 */
+  readonly endpoint?: string;
+}
+
+/**
+ * 卡片要读的 **live store 面**(结构化类型,不是 `GitStore` 的别名)。
+ *
+ * ## 2026-10:这个接口从「声明了但没人用」变成承重件
+ *
+ * 它原先**只被声明、零引用**(`grep -rn IDshGitCardStoreLike src/` 只有定义行),
+ * 而真正喂给卡片的是 `pages.snap` / `pages.auth` 两个**普通值**。于是
+ * `src/client/index.ts` 里那句 `snap: globalStore.snapshot()` 把
+ * **注册那一瞬间**的快照冻进了卡片:注册发生在 `apply()` 期间(`WorkbenchApp`
+ * 都还没挂载),那份快照里 `repos: []`、`auth: null`;而卡片**没有任何订阅** ⇒
+ * 仓库清单永远是空的、账号页永远显示未登录、点「添加 / 切换 / 移除」界面不动。
+ *
+ * 实测(`docs/probes/host-settings-card-live-probe.mjs`,改前):
+ * 「仓库」面板 = 「…还没有仓库。…」、「账号」面板里没有 `auth/state` 报的登录名,
+ * 而卡片自己打过的路由**只有 2 条**(`config-get` / `config-file-info`)——
+ * 连 `repos` / `auth/state` 都没请求过。
  */
 export interface IDshGitCardStoreLike {
   /** 订阅快照变化。 */
   subscribe(listener: () => void): () => void;
-  /** 当前快照(仓库清单 + 当前仓库);引用稳定是 `useSyncExternalStore` 的前提。 */
-  snapshot(): IPreferencesSnapshot;
+  /**
+   * 当前快照;**同一个引用必须一直返回到真的变了**
+   * (`useSyncExternalStore` 的硬要求:`getSnapshot` 每次现造新对象 ⇒ 无限重渲染)。
+   */
+  snapshot(): IDshGitCardStoreSnapshot;
+}
+
+/** {@link IDshGitCardStoreLike} 的一份快照:卡片读的那几个字段。 */
+export interface IDshGitCardStoreSnapshot extends IPreferencesSnapshot {
+  /** 登录态;`null` = 还没读到 / 未登录(由 {@link cardAuthOf} 收窄)。 */
+  readonly auth: AuthStatePayload | null;
+}
+
+/**
+ * 卡片**实时**读的那份视图 —— 由 `hooks.dshGitSnapshot` 交给渲染层绑成
+ * `useDshGitSnapshot`,组件在**每次 store emit** 时重读。
+ */
+export interface IDshGitCardLiveView {
+  /** 登录态(账号页)。`null` = 未登录。 */
+  readonly auth: IDshGitCardAuth | null;
+  /** 「仓库」页签的数据源(仓库清单 + 当前仓库)。 */
+  readonly snap: IPreferencesSnapshot;
 }
 
 /**
@@ -128,12 +171,23 @@ export interface IDshGitCardStoreLike {
  * 由 `preferences-pages.tsx` 拥有真源 —— 这里再声明一遍就是第二份契约。
  */
 export interface IDshGitCardPagesFace {
-  /** 登录态(账号页)。`null` = 未登录。 */
-  readonly auth: { readonly login: string; readonly tokenTail: string } | null;
-  /** 「仓库」页签的数据源(仓库清单 + 当前仓库)。 */
+  /** 登录态(账号页)。`null` = 未登录。**静态回退面**;`live` 存在时以 live 为准。 */
+  readonly auth: IDshGitCardAuth | null;
+  /** 「仓库」页签的数据源(仓库清单 + 当前仓库)。**静态回退面**;同上。 */
   readonly snap: IPreferencesSnapshot;
   /** 「仓库」页签 + 账号页要的那几条 store 动作(`preferences-pages.tsx` 的类型)。 */
   readonly store: IPreferencesStore;
+  /**
+   * **可选**:实时数据源。
+   *
+   * - 给了(真实席位 `src/client/index.ts` 给的是本插件的全局 `GitStore`)⇒
+   *   卡片订阅它,仓库清单 / 登录态 / 写动作的后果都**当场**反映到界面;
+   * - 不给(探针夹具 / 旧调用点)⇒ 退回上面那两个静态字段,逐字保持改动前的行为。
+   *
+   * 为什么用「可选 + 回退」而不是直接换掉 `auth`/`snap`:那是给已经存在的调用点
+   * (含 `docs/probes/host-settings-card-driver.tsx`,那份夹具不允许改)留的兼容面。
+   */
+  readonly live?: IDshGitCardStoreLike;
 }
 
 /**
@@ -155,6 +209,15 @@ export type DshGitCardSelector = <S>(selector: (state: IDshGitCardState) => S) =
  * (`packages/client/ui-slots/src/index.ts:566-571` 的 `PropsHooks`)。
  */
 export type DshGitFontScaleSelector = <S>(selector: (value: number) => S) => S;
+
+/**
+ * `hooks.dshGitSnapshot` 由渲染层绑成的选择器钩子(卡片读的**实时**数据面)。
+ *
+ * 为什么必须是选择器钩子而不是把快照当 prop:`pages.snap` 是**普通值**,一旦传进来
+ * 就与 store 脱钩;只有走 slot 的 `hooks` 隔间,宿主渲染层才会把它绑成
+ * `useSyncExternalStore` 订阅,store 每次 `emit` 都让卡片重渲染。
+ */
+export type DshGitSnapshotSelector = <S>(selector: (view: IDshGitCardLiveView) => S) => S;
 
 /** 卡片席位注入给组件的那一面(快照 + 写动作)。 */
 export interface IDshGitCardFace extends SettingsFormActions {
@@ -204,6 +267,14 @@ export interface IDshGitCardFace extends SettingsFormActions {
      * 「选择器钩子 / 普通回调」两种不同的东西。
      */
     readonly fontScaleValue: IPreferenceSource<number>;
+    /**
+     * 渲染层绑成 `useDshGitSnapshot` 的**实时数据面**(仓库清单 + 登录态)。
+     *
+     * 它是「卡片读得到数据」这件事的**唯一**通道:`pages.live` 给了就订阅真 store,
+     * 没给就返回 `pages.auth` / `pages.snap` 那份静态视图(同一个 observable 接口,
+     * 只是永不广播)。两种情况都**必须**有这个键 —— 组件无条件调这个钩子。
+     */
+    readonly dshGitSnapshot: IPreferenceSource<IDshGitCardLiveView>;
   };
 }
 
@@ -223,6 +294,8 @@ export type DshGitCardProps = IDshGitCardFace & {
   readonly useDshGitSettings: DshGitCardSelector;
   /** `hooks.fontScaleValue` 由渲染层绑成的选择器钩子。 */
   readonly useFontScaleValue: DshGitFontScaleSelector;
+  /** `hooks.dshGitSnapshot` 由渲染层绑成的选择器钩子(实时数据面)。 */
+  readonly useDshGitSnapshot: DshGitSnapshotSelector;
 };
 
 /** 把 `dsh-git` 命名空间的那块表单桥到本页面的暂存表单上。 */
@@ -290,13 +363,120 @@ export class DshGitSettingsCardController {
       onDeviceSignIn: startDeviceSignIn,
       onPreferencesChanged: this.onPreferencesChanged ?? (() => { /* 没有发送点:什么都不做 */ }),
       pages,
-      hooks: { dshGitSettings: this.store, fontScaleValue: fontScaleStore },
+      hooks: {
+        dshGitSettings: this.store,
+        fontScaleValue: fontScaleStore,
+        dshGitSnapshot: pages.live === undefined ? staticSource(pages) : liveSource(pages.live),
+      },
     };
     return this.face;
   }
 
   /** 释放已接受值的订阅。 */
   public dispose(): void { this.form.dispose(); }
+}
+
+/**
+ * 把宿主 `auth/state` 的原始登录态**收窄**成卡片要的那一份。
+ *
+ * ⚠️ **必须判 `signedIn`**:`auth/state` 在未登录时也回一个**对象**
+ * (`{signedIn:false, login:'', tokenTail:'', …}`,`src/host/auth.ts:263-280`),
+ * 所以「`auth !== null`」**不等于**「登录了」。只看后者会让账号页渲染出一个
+ * 登录名为空串的假账号(`accountsWithEmails` 无条件造 `Account`;
+ * `src/client/preferences-pages.tsx:1143` 只判 `identity === null`)。
+ * @param raw - 宿主登录态;`null` = 还没读到。
+ * @returns 已登录时给卡片要的形状,否则 `null`。
+ */
+export function cardAuthOf(raw: AuthStatePayload | null): IDshGitCardAuth | null {
+  if (raw === null || !raw.signedIn) {
+    return null;
+  }
+  return raw.endpoint === undefined
+    ? { login: raw.login, tokenTail: raw.tokenTail }
+    : { login: raw.login, tokenTail: raw.tokenTail, endpoint: raw.endpoint };
+}
+
+/**
+ * `pages.live` **缺席**时的静态视图(探针夹具 / 旧调用点)。
+ *
+ * 只造一次对象:`useSyncExternalStore` 的 `getSnapshot` 必须引用稳定。
+ * @param pages - 静态回退面。
+ * @returns 永不广播的 observable。
+ */
+function staticSource(pages: IDshGitCardPagesFace): IPreferenceSource<IDshGitCardLiveView> {
+  const view: IDshGitCardLiveView = { auth: pages.auth, snap: pages.snap };
+  return {
+    getSnapshot: () => view,
+    subscribe: () => () => { /* 静态面:没有变化可广播 */ },
+  };
+}
+
+/**
+ * `pages.live` **存在**时的实时视图。
+ *
+ * 两条契约,写在这里免得被「优化」掉:
+ *  1. **投影按原始快照身份缓存**(`raw !== lastRaw` 才重算)—— `useSyncExternalStore`
+ *     用 `Object.is` 比较 `getSnapshot()` 的返回值,每次现造一个新对象会
+ *     `Maximum update depth exceeded`;
+ *  2. `subscribe` 的**函数身份稳定**(闭包只造一次)—— 否则 React 每次渲染都重新订阅。
+ * @param live - 真 store 的读面。
+ * @returns 订阅真 store 的 observable。
+ */
+function liveSource(live: IDshGitCardStoreLike): IPreferenceSource<IDshGitCardLiveView> {
+  let lastRaw: IDshGitCardStoreSnapshot | undefined;
+  let lastView: IDshGitCardLiveView = { auth: null, snap: { current: '', repos: [] } };
+  return {
+    getSnapshot: () => {
+      const raw = live.snapshot();
+      if (raw !== lastRaw) {
+        lastRaw = raw;
+        lastView = { auth: cardAuthOf(raw.auth), snap: { current: raw.current, repos: raw.repos } };
+      }
+      return lastView;
+    },
+    subscribe: (listener: () => void) => live.subscribe(listener),
+  };
+}
+
+/**
+ * 把卡片读到的那颗 store **装载起来**。
+ *
+ * ## 为什么必须有这一步(2026-10 的第二个根因)
+ *
+ * `settings.plugins.tab` 席位拿到的是 `storeFor('')`(`src/client/index.ts`),
+ * 而**只有** `WorkbenchApp` 会调 `store.start()`(`workbench.tsx:163`)——
+ * 那是一颗**按 session 键**、给右侧栏用的 store。`settings.plugins.tab` 不带
+ * sessionId ⇒ 卡片那颗 `storeFor('')` **从来没有被启动过**:`ready` 恒 false、
+ * `repos` 恒 `[]`、`auth` 恒 `null`。
+ *
+ * 实测(`docs/probes/host-settings-card-live-probe.mjs`,改前):卡片自己打过的路由
+ * **只有 2 条**(`config-get` / `config-file-info`),`repos` / `auth/state` /
+ * `auth/emails` **一次都没请求过**。
+ *
+ * ## 为什么是这两步而不是 `store.start()`
+ *
+ * 卡片只读「仓库清单 + 登录态」。`start()` 还会跑 `repos/autodetect`
+ * (它会把**最近使用的工作区**自动登记进仓库清单 —— 渲染一个设置页不该改用户的仓库列表)、
+ * 以及 status / log / branches / diff 一串只有右侧栏才用得上的请求。
+ * 所以这里**只**做这两步,把副作用收在「读」的范围内。
+ *
+ * 失败**不抛**:卡片是附加能力,而 `waitForRoutes()` 已经把「host 半没起来」
+ * 折成 `ok:false`(那条路径下不发请求,免得在控制台留下一串无意义的失败日志)。
+ * @param store - 卡片读的那颗 store(真 `GitStore` 结构相容)。
+ */
+export async function bootstrapCardStore(
+  store: IDshGitCardStoreLike & {
+    refreshRepos(): Promise<void>;
+    loadAuth(): Promise<void>;
+  },
+): Promise<void> {
+  const readiness = await waitForRoutes();
+  if (!readiness.ok) {
+    console.info('[dsh-git] 宿主设置卡片:host 路由未就绪,仓库清单与登录态这次没装载');
+    return;
+  }
+  await store.refreshRepos();
+  await store.loadAuth();
 }
 
 /**

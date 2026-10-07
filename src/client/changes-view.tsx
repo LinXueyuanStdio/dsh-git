@@ -14,10 +14,11 @@ import { DesktopDiff } from './desktop-diff.tsx';
 import { getPreferredExternalEditor } from './prefs.ts';
 import { SplitPane, toCommit, useSplitWidth, SIDEBAR_WIDTH_STORAGE_KEY } from './history-view.tsx';
 import { networkActionInProgress } from './sync-state.ts';
-import { includeStateOf } from './store.ts';
+import { commitPlaceholderOf, includeStateOf, prepopulateCommitSummaryOf, summaryOrPlaceholderOf } from './store.ts';
 import type { GitStore, IncludeState, Snapshot } from './store.ts';
 import { supportsLineSelection } from './file-kind.ts';
 import type { ChangedFile } from '../core/types.ts';
+import type { LineSelectionSpec } from '../core/partial-stage.ts';
 import { conflictSummaryText } from '../core/status-porcelain.ts';
 import { isEmptyOrWhitespace } from '../core/desktop/lib/is-empty-or-whitespace.ts';
 import { createPathDisplayState } from '../core/desktop/lib/path-display.ts';
@@ -76,6 +77,43 @@ export function ChangesView(props: {
 }): ReactNode {
   const { store, snap } = props;
   const [confirmDiscard, setConfirmDiscard] = useState<ChangedFile[] | null>(null);
+  /**
+   * **行/块级丢弃**的待确认项(上游 `PopupType.ConfirmDiscardSelection`,
+   * `ui/changes/changes.tsx:84-89`)。
+   *
+   * 与整文件丢弃(`confirmDiscard`)是**两条不同的路**,刻意分开存:
+   *  - 整文件 ⇒ `store.discardFiles` ⇒ 宿主 `discard` 路由(`git checkout -- <paths>` /
+   *    未跟踪走 `git clean`);
+   *  - 行/块 ⇒ `store.discardLines` ⇒ 宿主 `discard-lines` 路由
+   *    (`git apply --reverse`,索引一个字节不动)。
+   * 两者共用一句话的措辞不行 —— 一个是「文件没了」,一个是「文件里那几行没了」。
+   */
+  const [confirmDiscardLines, setConfirmDiscardLines] = useState<{ file: string; spec: LineSelectionSpec } | null>(null);
+
+  /**
+   * 顶部那颗「全部暂存 / 取消暂存」与行尾两颗单文件按钮的**具名回调**。
+   *
+   * **为什么不能写成 JSX 内联箭头**:`react/jsx-no-bind`(`scripts/lint-baseline.json`
+   * 是**只拦上升**的棘轮)会把组件作用域里的内联箭头记成新增违规。
+   * 这几个回调的依赖只有 `store`(引用稳定),所以身份稳定,不会让下游行白白重渲染。
+   */
+  const onStageAll = useCallback(() => { void store.stageSelected(); }, [store]);
+  const onUnstageAll = useCallback(() => { void store.unstageSelected(); }, [store]);
+  /**
+   * `FileRow` 那三颗行尾按钮的**行内**回调工厂。
+   *
+   * 为什么用「工厂 + 具名引用」而不是 JSX 内联箭头:`react/jsx-no-bind` 只认
+   * `useCallback` 这类 CallExpression,不认组件作用域里的箭头 —— 而 `FileRow` 是
+   * **模块作用域**的组件,它自己那三个 `onClick` 也是同一个问题。
+   * 所以这里按「行」生成三个稳定的回调(依赖只有 store 与那个路径)。
+   */
+  const stageRow = useCallback((path: string) => { void store.stageFile(path); }, [store]);
+  const unstageRow = useCallback((path: string) => { void store.unstageFile(path); }, [store]);
+  const discardRow = useCallback((file: ChangedFile) => { setConfirmDiscard([file]); }, []);
+  const onDiscardLinesSelected = useCallback(
+    (file: string, spec: LineSelectionSpec) => { setConfirmDiscardLines({ file, spec }); },
+    [],
+  );
   /** 左栏宽度(变更列表 + 提交区 | diff),持久化到 `dsh-git.sidebar-width`。 */
   const split = useSplitWidth(SIDEBAR_WIDTH_STORAGE_KEY);
 
@@ -115,8 +153,8 @@ export function ChangesView(props: {
   /** 按文字 + 选项过滤。文字只匹配路径(不匹配状态字母),且**保持原顺序**(不做模糊重排)。 */
   const passes = (f: ChangedFile): boolean => {
     const query = filterText.trim().toLowerCase();
-    if (query !== '' && !f.path.toLowerCase().includes(query)) return false;
-    if (activeOptions.length === 0) return true;
+    if (query !== '' && !f.path.toLowerCase().includes(query)) { return false; }
+    if (activeOptions.length === 0) { return true; }
     return activeOptions.every((key) => optionPredicates[key](f)); // 选项之间是 AND
   };
   const shown = files.filter(passes);
@@ -132,7 +170,7 @@ export function ChangesView(props: {
   const checkAllRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     const el = checkAllRef.current;
-    if (el === null) return;
+    if (el === null) { return; }
     // 三态用原生 indeterminate(与 Desktop 的 Checkbox 同一套语义)
     el.indeterminate = shownIncludedCount > 0 && shownIncludedCount < shown.length;
   });
@@ -321,6 +359,37 @@ export function ChangesView(props: {
                   {status.conflictedCount} 个冲突
                 </span>
               )}
+
+              {/*
+                ⭐ **「全部暂存 / 取消暂存」入口**(2026-10 接线;审计第 4 项)。
+                在这之前 `store.stageSelected` / `store.unstageSelected` 是**外部 0 + 内部 0**
+                调用点的真死方法(`store.ts:1073/1088`)⇒ Changes 列表**没有任何「暂存」入口**,
+                用户在界面上根本没法把改动写进索引(只有提交那一步会写)。
+
+                落点与范围(两条都要说清,否则会以为它是第二份真源):
+                 · `stageSelected()` = 对 `targetedFiles()`(有选区就是选区,否则**全部变更文件**)
+                   打一条 `git add -- <paths>`;`unstageSelected()` = 有选区就是选区,
+                   否则**索引里真的有内容的那些文件**,打 `git reset -- <paths>`;
+                 · 它们**立刻写索引**,与上面那个三态勾选框(`includeState`,提交才写索引)
+                   是两条并存的语义 —— 两条都留(用户裁决「先做,不删」),差别见
+                   `store.stageSelected` 的 JSDoc 里那张表。
+                按钮的 disabled 依据是 git 事实(有没有未暂存/已暂存的文件),
+                不是勾选状态 —— 否则会出现「有文件可暂存但按钮灰着」的假禁用。
+              */}
+              <span className="gw-stagebar" style={{ display: 'inline-flex', gap: 4, marginLeft: 8 }}>
+                <button className="gw-btn ghost" style={{ padding: '0 6px', fontSize: 11 }}
+                  disabled={files.filter((f) => f.unstaged !== undefined).length === 0}
+                  title="把选中的文件(没有选中就是全部变更文件)写进索引:git add"
+                  onClick={onStageAll}>
+                  全部暂存
+                </button>
+                <button className="gw-btn ghost" style={{ padding: '0 6px', fontSize: 11 }}
+                  disabled={files.filter((f) => f.staged !== undefined).length === 0}
+                  title="把选中的文件(没有选中就是所有已暂存文件)从索引里撤出:git reset"
+                  onClick={onUnstageAll}>
+                  取消暂存
+                </button>
+              </span>
             </div>
           </div>
 
@@ -338,7 +407,10 @@ export function ChangesView(props: {
               <FileRow key={file.path} file={file} include={stateOf(file)} selected={selected.has(file.path)}
                 focused={flat[0]?.file.path === file.path}
                 store={store} onSelect={(event) => toggle(file, event)}
-                onDiscard={() => setConfirmDiscard([file])} />
+                onDiscard={discardRow}
+                onStage={stageRow}
+                onUnstage={unstageRow}
+              />
             ))}
           </div>
 
@@ -379,7 +451,20 @@ export function ChangesView(props: {
         </div>
 
         <div className="right">
-          {files.length === 0 ? <NoChanges store={store} snap={snap} /> : <DiffPane store={store} snap={snap} />}
+          {files.length === 0
+            ? <NoChanges store={store} snap={snap} />
+            : (
+              <DiffPane
+                store={store}
+                snap={snap}
+                /*
+                 * 行/块级丢弃的**确认闸门在页这一层**(上游 `ui/changes/changes.tsx:75-97`):
+                 * `DiffPane` 只把「用户右键点了拿几行」交上来,弹不弹框、弹什么框由
+                 * 这里决定 —— 与整文件丢弃(`confirmDiscard`)同一条分工。
+                 */
+                onDiscardLines={onDiscardLinesSelected}
+              />
+            )}
         </div>
       </div>
 
@@ -392,11 +477,35 @@ export function ChangesView(props: {
           onDone={(okay) => {
             const target = confirmDiscard;
             setConfirmDiscard(null);
-            if (!okay) return;
+            if (!okay) { return; }
             void store.discardFiles(
               target.map((f) => f.path),
               target.filter((f) => f.untracked === true).map((f) => f.path),
             );
+          }}
+        />
+      )}
+
+      {/*
+        行/块级丢弃的确认框(上游 `PopupType.ConfirmDiscardSelection`,
+        `ui/changes/changes.tsx:84-89` + `ui/discard-changes/confirm-discard-changes-dialog.tsx`)。
+        措辞与**整文件**那条刻意不同:那条说「扣弃这些改动」会让人以为文件没了,
+        而这一条只丢选中的那几行,**文件本身留在变更列表里**。
+      */}
+      {confirmDiscardLines !== null && (
+        <ConfirmDialog
+          title={`丢弃 ${confirmDiscardLines.file} 里选中的改动?`}
+          body={
+            '只丢你选中的那几行,文件里的其它改动都留着;索引(已暂存的内容)一个字节都不动。\n\n' +
+            '丢弃是反向应用补丁,无法从 dsh-git 恢复。'
+          }
+          confirmText="丢弃选中的行"
+          danger={true}
+          onDone={(okay) => {
+            const target = confirmDiscardLines;
+            setConfirmDiscardLines(null);
+            if (!okay || target === null) { return; }
+            void store.discardLines(target.file, target.spec);
           }}
         />
       )}
@@ -443,9 +552,49 @@ function FileRow(props: {
   focused: boolean;
   store: GitStore;
   onSelect: (event: React.MouseEvent) => void;
-  onDiscard: () => void;
+  /**
+   * 行尾三颗图标的动词。**签名收 `file` 而不是零参**:这样调用点可以不写内联箭头
+   * (`onDiscard={onDiscardRow}`),同时组件内部仍然用 `file` 去调它 ——
+   * `react/jsx-no-bind` 对「多传一个实参」这种写法会判违规,所以只能让 props
+   * 自己收参数。
+   */
+  onDiscard: (file: ChangedFile) => void;
+  /**
+   * **单文件暂存** —— `store.stageFile`(`git add -- <path>`)。
+   *
+   * ⚠️ 这与「行首那个勾选框」**不是**同一件事,两者都留(「先做,不删」):
+   *  - 勾选框改的是**客户端纳入状态**(`includeState`,提交那一刻才 materialize 索引);
+   *  - 这两条按钮**立刻写 git 索引**(`api.stage` / `api.unstage`)。
+   * 上游 Desktop 只有前者(它没有「现在就把这个文件加进索引」这个交互);
+   * 这两条是「我要现在就 `git add`」这个真实诉求的落点,也是审计第 4 项
+   * (`store.stageFile` / `store.unstageFile` 此前 0 调用点)的接线处。
+   * 两条都在时**不冲突**:索引与客户端模型本就是两个东西(见 `Snapshot.includeState`
+   * 那段注释里的那张表)。
+   */
+  onStage: (path: string) => void;
+  /** **单文件取消暂存** —— `store.unstageFile`(`git reset -- <path>`)。 */
+  onUnstage: (path: string) => void;
 }): ReactNode {
   const { file, include } = props;
+  /**
+   * 行尾三颗图标的**事件回调**。`FileRow` 是**模块作用域**的组件,但它内部仍然算
+   * 「组件作用域」给 `react/jsx-no-bind` 记账 —— 所以这里必须包 `useCallback`
+   * (JSX 上挂具名引用),不能写 `onClick={(event) => …}`。
+   * 三个回调都只是「停冒泡 + 转发给 props 上的那个动词」,没有别的逻辑。
+   */
+  const { onDiscard, onStage, onUnstage } = props;
+  const discardSelf = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    onDiscard(file);
+  }, [onDiscard, file]);
+  const stageSelf = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    onStage(file.path);
+  }, [onStage, file.path]);
+  const unstageSelf = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    onUnstage(file.path);
+  }, [onUnstage, file.path]);
   // 状态图标取**工作区**那一侧(没有就用索引侧),与 Desktop 的文件行同一口径。
   const letter = file.conflicted === true ? 'U' : (file.unstaged ?? file.staged) ?? 'M';
   const meta = STATUS_META[letter] ?? { icon: 'diff-modified', kind: 'modified', label: '已修改' };
@@ -506,9 +655,31 @@ function FileRow(props: {
       </span>
 
       <span className="gw-x" title="丢弃此文件的改动"
-        onClick={(event) => { event.stopPropagation(); props.onDiscard(); }}>
+        onClick={discardSelf}>
         <Icon name="trash" size={10} />
       </span>
+
+      {/*
+        ⭐ 单文件「暂存 / 取消暂存」(2026-10 接线;审计第 4 项)。
+        两条按钮的**出现条件**是各自的 git 事实,不是同一个开关:
+          · 「暂存」:工作区里还有未暂存的内容(`unstaged !== undefined`,含未跟踪 `?`)
+            —— 这也是「已暂存」的按钮不该出现的时候(索引已经等于工作区);
+          · 「取消暂存」:索引里真的有这个文件(`staged !== undefined`)。
+        一个文件**两边都有**(既 `staged` 又 `unstaged`,= 部分暂存)时两颗按钮同时在列 ——
+        这正是要区分两个动作的场景。用 `title` 与 aria 文案区分(图标本身很接近)。
+      */}
+      {file.conflicted !== true && file.unstaged !== undefined && (
+        <span className="gw-x" title="暂存此文件(git add -- 立刻写索引)"
+          onClick={stageSelf}>
+          <Icon name="plus" size={10} />
+        </span>
+      )}
+      {file.conflicted !== true && file.staged !== undefined && (
+        <span className="gw-x" title="取消暂存此文件(git reset -- 立刻改索引)"
+          onClick={unstageSelf}>
+          <Icon name="check" size={10} />
+        </span>
+      )}
     </div>
   );
 }
@@ -597,7 +768,7 @@ function onListKeyDown(
   store: GitStore,
   selected: ReadonlySet<string>,
 ): void {
-  if (flat.length === 0) return;
+  if (flat.length === 0) { return; }
   const rows = [...(event.currentTarget.querySelectorAll<HTMLElement>('[role="option"]'))];
   const currentIndex = rows.findIndex((row) => row === document.activeElement);
   const focusRow = (index: number): void => {
@@ -627,7 +798,7 @@ function onListKeyDown(
       event.preventDefault();
       const index = currentIndex < 0 ? 0 : currentIndex;
       const entry = flat[index];
-      if (entry === undefined) return;
+      if (entry === undefined) { return; }
       // 切换**纳入提交**(三态取反:全选→排除,其余→全选),与鼠标点复选框同一入口。
       const included = includeStateOf(store.snapshot().includeState[entry.file.path]) === 'all';
       store.setFileIncluded(entry.file.path, !included);
@@ -658,7 +829,36 @@ function onListKeyDown(
  * 全插件只有这一条渲染路径;二进制也交给它(上游 `DiffType.Binary` 分支)。
  * 这里只负责它不负责的部分:空态文案与 Diff Settings 弹层。
  */
-function DiffPane(props: { store: GitStore; snap: Snapshot }): ReactNode {
+function DiffPane(props: {
+  store: GitStore;
+  snap: Snapshot;
+  /**
+   * 行/块级丢弃:把「哪几行」交给页那一层去弹确认框(上游 `ui/changes/changes.tsx`
+   * 的 `onDiscardChanges` 同样是「先弹 `PopupType.ConfirmDiscardSelection`」)。
+   */
+  onDiscardLines: (file: string, spec: LineSelectionSpec) => void;
+}): ReactNode {
+  const { onDiscardLines } = props;
+  /**
+   * 「当前屏幕上画的是哪个文件的 diff」。
+   *
+   * ⚠️ 为什么要一个 **ref** 而不是把 `shownDiff.path` 直接写进依赖:这个 hook 必须
+   * 待在本组件**所有 `return` 之前**(Hooks 的调用顺序规则,
+   * `react-hooks/rules-of-hooks` 会拦「早退之后再调 Hook」),而 `shownDiff` 是在
+   * 那几处早退**之后**才解析出来的。ref 的回调身份因此保持稳定,而每次渲染都会把
+   * 最新的路径写进去 —— 丢弃时读到的一定是**当下这一份** diff 对应的文件,
+   * 不会错到上一个文件上(那正是「选中的行」与「被丢弃的行」错位那类静默缺陷)。
+   */
+  const shownPathRef = useRef<string>('');
+  /**
+   * 行/块级丢弃那一条回调 —— **具名**,理由同 `FileRow` 里那三个:
+   * `react/jsx-no-bind` 会把组件作用域里的内联箭头记成新增违规。
+   */
+  const onDiscardLinesForShown = useCallback((spec: LineSelectionSpec): void => {
+    const path = shownPathRef.current;
+    if (path === '') { return; }
+    onDiscardLines(path, spec);
+  }, [onDiscardLines]);
   const { snap } = props;
   /*
    * ⚠️ **这个 `useRef` 必须在任何提前 return 之前** —— 它是「换文件时不要把 diff 区清空」
@@ -730,7 +930,7 @@ function DiffPane(props: { store: GitStore; snap: Snapshot }): ReactNode {
   );
 
   // 只有**首次**加载(`shown === null`)才给空态;此后加载期间沿用上一份。
-  if (shown === null) return <>{head}<Empty icon="file" title="读取 diff…" /></>;
+  if (shown === null) { return <>{head}<Empty icon="file" title="读取 diff…" /></>; }
   const shownDiff = shown.diff;
   // binary 也走移植的 Diff(它的 BinaryFile 分支画「这个二进制文件变了」+ 外部程序打开)。
   if (shownDiff.patch.trim() === '' && shownDiff.binary !== true) {
@@ -771,6 +971,8 @@ function DiffPane(props: { store: GitStore; snap: Snapshot }): ReactNode {
    * 机器可查点),**不再**参与任何渲染判定。
    */
   const lineSelectable = entry !== undefined && supportsLineSelection(entry);
+  // 把「当下这一份 diff 是哪个文件」写进 ref(供上面那个早退之前的 hook 读)。
+  shownPathRef.current = shownDiff.path;
 
   return (
     <>
@@ -823,6 +1025,19 @@ function DiffPane(props: { store: GitStore; snap: Snapshot }): ReactNode {
         selectable={true}
         selection={snap.includeState[shownDiff.path]}
         onSelectionChanged={(spec) => props.store.setFileSelection(shownDiff.path, spec)}
+        /*
+         * ⭐ 行/块级丢弃(2026-10 接线)。以前**整个 props 面都不存在**
+         * (`desktop-diff.tsx` 的 `IDesktopDiffProps` 没有 `onDiscardChanges`)⇒ 上游
+         * `side-by-side-diff.tsx:1458` 的 `if (this.props.onDiscardChanges === undefined) return`
+         * 恒真 ⇒ **行号 gutter 右键连菜单都不弹**,选中的行只能暂存、不能丢。
+         * 宿主侧那时已经端到端验过 79 条断言(`docs/discard-lines-contract.md` §4)。
+         *
+         * 这里只**收**选区:确认框由下面的 `confirmDiscardLines` 负责渲染
+         * (上游 `ui/changes/changes.tsx:75-97` 就是「先弹 `ConfirmDiscardSelection`,
+         * 确认后才 `discardChangesFromSelection`」)。确认框里再调
+         * `store.discardLines`,补丁方向那一侧由 store 保证(见那个方法的注释)。
+         */
+        onDiscardChanges={onDiscardLinesForShown}
       />
     </>
   );
@@ -1224,9 +1439,46 @@ function CommitBox(props: {
     (f) => includeStateOf(snap.includeState[f.path]) !== 'none',
   );
   const stagedCount = includedFiles.length;
-  const summaryBlank = isEmptyOrWhitespace(form.summary);
+  /**
+   * **上游 `prepopulateCommitSummary`**(`filter-changes-list.tsx:935-936`):
+   * 纳入提交的文件**恰好 1 个** ⇒ 摘要可以是空的,提交时改用**占位摘要**。
+   *
+   * 这是用户报的那条的直接原因(「只勾选一个文件的情况下,commit msg 可以留空,
+   * 提交按钮仍然可以点击」):上游确实如此,而且它由**一条**规则管住三处 ——
+   * 输入框的 placeholder、按钮的 enablement、以及**提交载荷里的标题**。
+   */
+  const prepopulateSummary = prepopulateCommitSummaryOf(includedFiles);
+  const placeholder = commitPlaceholderOf(includedFiles);
+  /**
+   * **真正会被提交的那条摘要** —— 上游 `commit-message.tsx:587-592` 的
+   * `summaryOrPlaceholder`。注意 `!summary` 是**空串**判定:全空白的摘要
+   * (`'   '`)**不**被占位取代 ⇒ 它仍然是「空白摘要」⇒ 按钮禁用。
+   */
+  const summaryOrPlaceholder = summaryOrPlaceholderOf(form.summary, includedFiles);
+  const summaryBlank = isEmptyOrWhitespace(summaryOrPlaceholder);
   const hasPreviousCommit = snap.log.length > 0 && status?.unborn !== true;
-  const busy = snap.busy !== '';
+  /**
+   * ⚠️ 上游的闸门是 **`isCommitting`**(`commit-message.tsx:1605`),
+   * 由 `AppStore.withIsCommitting` 只在**提交**期间写真值(`app-store.ts:5395-5410`)。
+   * 我们以前用的是 `snap.busy !== ''` —— 那是**所有**后台操作的总线(fetch/pull/push/
+   * checkout/stage…),会把提交按钮在抓取期间也禁掉,而上游那时是**可以提交**的。
+   * 判据:`docs/probes/commit-form-parity-probe.mjs` 的 R15(busy=commit ⇒ 禁)与
+   * R16(busy=fetch ⇒ **可点**)。
+   */
+  const isCommitting = snap.busy === 'commit';
+  /**
+   * **rebase 进行中**。上游此时**整个提交表单都不渲染** ——
+   * `filter-changes-list.tsx:905-920`:`if (rebaseConflictState !== null) return <ContinueRebase …/>`
+   * ⇒ 按钮**不存在**。我们**还没有**移植 `ContinueRebase`(`docs/goal-port-desktop.md`
+   * §1.2 E.8 已登记为未迁移面),所以退而求其次:**把它对提交按钮的后果照做** ——
+   * 按钮禁用 + 说清原因。**残留缺口(明确记账)**:ContinueRebase 那套 UI 本身仍然是
+   * 缺失的功能面,归那条移植线,不在本文件里伪造。
+   *
+   * ⚠️ **只对 rebase** —— merge 冲突解决之后就是要用一次提交来收尾,上游同样只对
+   * rebase 换表单(`sidebar.tsx:391-397` 的 `isRebaseConflictState` 判据)。
+   * 判据:探针的 R17(rebase ⇒ 禁)/ R18(merge ⇒ 可点)。
+   */
+  const isRebaseInProgress = status?.operation === 'rebase';
   /**
    * 撤销提交条要显示的那条提交(`null` = **整条不渲染**)。判据见
    * `undoableCommitOf` 的文件头 —— 这里只做取值,不重复判。
@@ -1255,7 +1507,7 @@ function CommitBox(props: {
    *     第 2 点那个默认值带走:那是 `||`,不是 `&&`。
    */
   const requestUndo = () => {
-    if (undoCommit === null) return;
+    if (undoCommit === null) { return; }
     const isWorkingDirectoryClean = (status?.files.length ?? 0) === 0;
     if (isWorkingDirectoryClean && !undoCommit.isMergeCommit) {
       void store.undoCommit(undoCommit.sha);
@@ -1265,34 +1517,73 @@ function CommitBox(props: {
   };
   const branch = status === null || status.detached || status.unborn ? '' : status.branch;
 
-  // 单个文件的占位摘要(照 Desktop)
-  const placeholder = (() => {
-    if (includedFiles.length !== 1) return '摘要(必填)';
-    const only = includedFiles[0];
-    const name = only.path.split('/').pop() ?? only.path;
-    const letter = only.unstaged ?? only.staged ?? 'M';
-    if (letter === 'A' || only.untracked === true) return `Create ${name}`;
-    if (letter === 'D') return `Delete ${name}`;
-    return `Update ${name}`;
-  })();
-
-  const canCommit = !busy && !form.generating
-    && (!summaryBlank || (form.amend && hasPreviousCommit))
-    && (stagedCount > 0 || (form.amend && hasPreviousCommit) || form.allowEmpty)
+  /**
+   * 按钮的 enablement —— **逐项**对着上游 `ui/changes/commit-message.tsx:1600-1607`:
+   *
+   * ```ts
+   * const buttonEnabled =
+   *   (this.canCommit() || this.canAmend()) &&
+   *   !isCommitting &&
+   *   !isSummaryBlank &&
+   *   !isGeneratingCommitMessage
+   * ```
+   *
+   * 右边四项的来源(同一文件):
+   *  · `:652-659` `canCommit()` = `(((anyFilesSelected || allowEmptyCommit) && summary.length > 0) || prepopulateCommitSummary)`(&& `!hasRepoRuleFailure()`);
+   *  · `:662-669` `canAmend()` = `commitToAmend !== null && (summary.length > 0 || prepopulateCommitSummary)`;
+   *  · `:1602` `isSummaryBlank` = `isEmptyOrWhitespace(summaryOrPlaceholder)`;
+   *  · `:1607` `!isGeneratingCommitMessage`。
+   *
+   * ⚠️ **注意 `summary.length > 0` 用的是「用户输入的原始摘要」,而 `isSummaryBlank`
+   * 用的是 `summaryOrPlaceholder`** —— 上游两处故意的不同:单文件时前者可以是空
+   * (靠 `prepopulateCommitSummary` 那一支兜住),后者被占位摘要填成非空。
+   *
+   * 三处上游**没有**的项(逐条记账,不装作没有):
+   *  1. `!(form.amend && !hasPreviousCommit)`:上游的修订态是 `commitToAmend !== null`,
+   *     它**不可能**在没有 HEAD 时为真(只能从 History 右键菜单进,
+   *     `app-store.ts:5760-5800`);我们的 `form.amend` 是可以被程序化置真的布尔 ⇒
+   *     补一条**只会更严**的表征兜底(判据:探针的 R19/R20/R21 覆盖 amend 三档);
+   *  2. `!isRebaseInProgress`:上游那一条挂在**父组件**上(整表单换成 `ContinueRebase`),
+   *     见上面 `isRebaseInProgress` 的注释;
+   *  3. repo rules(上游 `:658,667` 的 `!hasRepoRuleFailure()`)我们**没有**移植
+   *     (`repoRulesEnabled` 恒 false,`hasRepoRuleFailure()` 恒 false)⇒ 与上游未启用
+   *     repo rules 时逐字等价。
+   */
+  const canCommitByFiles =
+    ((stagedCount > 0 || form.allowEmpty) && form.summary.length > 0) || prepopulateSummary;
+  const canAmendNow =
+    form.amend && hasPreviousCommit && (form.summary.length > 0 || prepopulateSummary);
+  const canCommit = (canCommitByFiles || canAmendNow)
+    && !isCommitting
+    && !summaryBlank
+    && !form.generating
+    && !isRebaseInProgress
     && !(form.amend && !hasPreviousCommit);
 
+  /**
+   * 禁用理由 —— 顺序对着上游 `getButtonTooltip`(`commit-message.tsx:1579-1598`):
+   * 摘要空白 → 没有可提交文件 → 正在提交;其余给按钮标题。**文案本地化**(goal §11.9),
+   * 上游原文留在注释里。
+   *
+   * `生成中` 与 `变基中` 两条的出处:上游 `:1610-1613` 用 `generatingCommitDetailsMessage`
+   * 直接顶掉 tooltip(`Generating commit details…`),而变基中上游根本渲染不出这个按钮
+   * ⇒ 这一条是我们**多**出来的(它只解释「为什么点不了」,不改变 enablement)。
+   */
   const disabledReason = (() => {
-    if (form.generating) return '正在生成提交信息…';
-    if (busy) return '正在处理其他操作…';
-    if (summaryBlank) return '提交前必须填写摘要';
-    if (stagedCount === 0 && !form.amend && !form.allowEmpty) return '请先勾选一个或多个文件';
-    if (form.amend && !hasPreviousCommit) return '还没有上一次提交,无法修改提交';
+    if (form.generating) { return '正在生成提交信息…'; }
+    if (isRebaseInProgress) { return '正在变基:先完成或中止变基再提交(上游此时整表单换成 ContinueRebase)'; }
+    if (summaryBlank) { return '提交前必须填写摘要'; }
+    if (stagedCount === 0 && (status?.files.length ?? 0) > 0 && !form.allowEmpty) {
+      return '请先勾选一个或多个文件';
+    }
+    if (isCommitting) { return '正在提交…'; }
+    if (form.amend && !hasPreviousCommit) { return '还没有上一次提交,无法修改提交'; }
     return branch === '' ? '提交' : `提交到 ${branch}`;
   })();
 
   const buttonText = form.amend
-    ? (busy ? '正在修改…' : '修改上一次提交')
-    : `${busy ? '正在提交' : '提交'}${stagedCount > 0 ? ` ${stagedCount} 个文件` : ''}${branch === '' ? '' : `到 ${branch}`}`;
+    ? (isCommitting ? '正在修改…' : '修改上一次提交')
+    : `${isCommitting ? '正在提交' : '提交'}${stagedCount > 0 ? ` ${stagedCount} 个文件` : ''}${branch === '' ? '' : `到 ${branch}`}`;
   // 按钮文案照 Desktop(`commit-message.tsx:1496-1577`):「提交 N 个文件到 <分支>」。
 
   /*
@@ -1424,7 +1715,7 @@ function CommitBox(props: {
             ? '请先勾选一个或多个文件(生成只依据纳入提交的变更)'
             : '用 DSH 模型列表里的模型生成提交信息'}
           onClick={() => {
-            if (form.generating || status === null || stagedCount === 0) return;
+            if (form.generating || status === null || stagedCount === 0) { return; }
             if (form.summary.trim() !== '') setConfirmGenerate(true);
             else void store.generateCommitMessage({ force: true });
           }}>

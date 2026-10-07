@@ -1,6 +1,8 @@
 /**
- * `node:fs/promises` 的浏览器替身 —— 覆盖 `lib/path.ts:2` 的 `realpath`
- * 与 `lib/path-exists.ts:1` 的 `access`。
+ * `node:fs/promises` 的浏览器替身 —— 覆盖 `lib/path.ts:2` 的 `realpath`、
+ * `lib/path-exists.ts:1` 的 `access`、`lib/large-files.ts:4` 的 `stat`,
+ * 以及 `lib/markdown-filters/emoji-filter.ts:3` 的 `readFile`(后两条的契约
+ * 各写在自己的 JSDoc 里,`readFile` 有一条会静默产出坏图的坑,动之前必读)。
  *
  * ## 为什么会有 `access`(以及它的语义边界)
  *
@@ -47,7 +49,7 @@ let warned = false
 /**
  * 宿主文件访问钩子。
  *
- * `access` 必需(有真实调用方);`stat` 可选(当前唯一调用方不可达);
+ * `access` 必需(有真实调用方);`stat` / `readFile` 可选(它们的调用方当前都不可达);
  * `realpath` 刻意留作恒等实现(见文件头)。
  */
 export interface IFsPromisesHost {
@@ -63,7 +65,37 @@ export interface IFsPromisesHost {
    * @param path - 绝对路径。
    */
   readonly stat?: (path: string) => Promise<IStats>
+  /**
+   * 对应 `fs.promises.readFile`(**不带 encoding** 的那一种重载)——
+   * **可选**,因为当前唯一调用方(`lib/markdown-filters/emoji-filter.ts`)不可达。
+   * 未提供时 `readFile()` 抛 `ENOENT`(与 `stat` 同一语义)。
+   *
+   * ⚠️ **返回值必须是 `IReadFileBuffer`(字节),不能是字符串**:上游调用点是
+   * `imageBuffer.toString('base64')`(`emoji-filter.ts:134-135`)。若这里回一个 `string`,
+   * `String.prototype.toString` 会**忽略参数**并返回原字符串 ⇒ 产出的 data URI 是
+   * `data:image/png;base64,<整份文件内容>` —— **一个静默的坏图**,正是本仓反复出现的
+   * 「替身悄悄偏离真契约」缺陷类。所以类型上就把它钉住,而不是靠注释。
+   * @param path - 绝对路径(见 `fileURLToPath` 的边界:调用方传进来的可能是 `file://` 地址)。
+   */
+  readonly readFile?: (path: string) => Promise<IReadFileBuffer>
 }
+
+/**
+ * `fs.promises.readFile`(**无 encoding** 重载)返回值的最小形状 —— 即 node `Buffer`
+ * 里上游**真正调用过**的那一个方法。
+ *
+ * 上游唯一调用点 `lib/markdown-filters/emoji-filter.ts:135` 是
+ * `imageBuffer.toString('base64')`;这就是全部契约。声明成最小形状而不是完整 `Buffer`,
+ * 是为了不假装我们提供了 `byteLength` / `subarray` / `write` 等浏览器半没有的东西。
+ */
+export interface IReadFileBuffer {
+  /**
+   * 与 `Buffer#toString` 同语义:按给定编码把字节解码成字符串。
+   * @param encoding - 当前只声明上游用到的 `'base64'`。
+   */
+  toString(encoding: 'base64'): string
+}
+
 
 /**
  * `fs.promises.stat` 返回值的**最小形状**:只声明上游真正读的字段。
@@ -151,4 +183,37 @@ export async function realpath(p: string): Promise<string> {
   return p
 }
 
-export default { realpath, access, stat }
+/**
+ * 上游 `fs/promises` 的 `readFile`(**无 encoding** 的那个重载)。
+ *
+ * ## 为什么现在才补它
+ *
+ * 镜像 `lib/markdown-filters/emoji-filter.ts:3` 是 `import { readFile } from 'fs/promises'`,
+ * 用来把 emoji 图片读成 base64 data URI;此前本文件没有这个具名导出 ⇒ 整个
+ * `lib/markdown-filters/**` 集群(14 文件,互相成环)**一条 TS2614 ×2 卡住**。
+ *
+ * ## 契约由调用点钉死(不是由我选)
+ *
+ * 调用点是 `imageBuffer.toString('base64')` ⇒ 返回**必须是字节**,不能是字符串
+ * (见 `IFsPromisesHost.readFile` 的 ⚠️)。因此签名刻意**不带 `encoding` 参数**:
+ * 上游调用点不传 encoding,而我若接受一个 `encoding` 却不按它分派,那才是真正的
+ * 静默偏离 —— 需要 utf8 文本读取时应当另加一个**显式的**重载,而不是在这里假装。
+ *
+ * ## 为什么可以是「抛错的」
+ *
+ * 唯一调用链 `emoji-filter.ts:112` → `:134` 外面包着 `catch (e) {}`(`:127`),失败
+ * 只是「这个 emoji 被跳过」。按本文件既有约定:**没接宿主时保持「不可用」并抛 ENOENT**,
+ * 而不是编一份假字节 —— 假字节会渲染出一张**坏图**,比明确的失败难查得多。
+ * (补充事实:`references/desktop/gemoji/` 在这个 checkout 里是**空的**,所以 emoji
+ * 数据集本身也拿不到;这条链在接上宿主前不可能工作。)
+ * @param path - 绝对路径(注意:上游传的是 `fileURLToPath(emoji.url)` 的结果,见那个函数的边界)。
+ * @returns 一份能 `toString('base64')` 的字节。
+ */
+export async function readFile(path: string): Promise<IReadFileBuffer> {
+  if (host === null || host.readFile === undefined) {
+    throw enoent(path, 'readFile')
+  }
+  return host.readFile(path)
+}
+
+export default { realpath, access, stat, readFile }

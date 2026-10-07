@@ -240,6 +240,38 @@ const CSS = `
   border-radius:12px;padding:14px;box-shadow:0 16px 44px rgba(0,0,0,.45)}
 .gw-dialog h4{margin:0 0 8px;font-size:13px;color:var(--dsw-alias-label-primary)}
 .gw-dialog p{margin:0 0 12px;font-size:12px;color:var(--dsw-alias-label-secondary);line-height:1.6;white-space:pre-wrap}
+/*
+ * 推送失败弹窗里的 **git 原始输出**(bits.tsx 的 PushFailureDialog 的 generic 档)。
+ * 上游对应的是 Terminal(rows=15 cols=80)那个固定宽等宽块
+ * (ui/app-error.tsx:80-83 的 isRawGitError 分支)—— 我们这里最小的等价物就是
+ * 一个限高可滚的 pre:不加它,长 stderr 会横向撑破 360px 的弹窗。
+ * 刻意**不引任何 --dsw-alias-* 令牌**:底色用中性半透明,明暗主题都能用,
+ * 也就不会因为某个宿主令牌不存在而在构建期被 checkInlineTokens 拦下。
+ *
+ * user-select:text(2026-10 加):用户要求这段原文**可选中、可复制**(能粘到搜索或
+ * issue 里)。上游这一族**没有**复制按钮(在 ui/app-error.tsx /
+ * dialog/default-dialog-footer.tsx / lib/terminal.tsx 里 grep copy 命中 0),
+ * 所以按用户的话「没有就至少保证文本可选中」。
+ * 显式写出来而不是靠继承:这条规则既是保证,也是探针
+ * docs/probes/push-failure-detail-probe.mjs 能**从级联里读出来**的那一条判据
+ * (jsdom 真的会算 class 选择器的 computed style)。
+ */
+.gw-dialog pre{margin:0 0 12px;max-height:180px;overflow:auto;padding:8px;border-radius:6px;
+  background:rgba(127,127,127,.14);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;
+  user-select:text}
+/*
+ * 「错误码:xxx」那一行(bits.tsx 的 PushFailureDialog;**每一档**都渲染)。
+ *
+ * 为什么选择器写成 .gw-dialog p.gw-dialog-code:上面那条 .gw-dialog p(0,1,1)比
+ * .gw-dialog-code(0,1,0)**更具体**,后者会被它压掉。同样刻意不引 --dsw-alias-* 令牌
+ * (理由同上);只压低透明度 —— 它是证据行,不该抢正文的注意力。
+ *
+ * ⚠️ 这一段注释里**不许出现反引号**:本文件整份 CSS 是一个模板字符串,
+ * 多一个反引号就会把字符串截断(闸门 scripts/check-template-literals.mjs 管这条)。
+ */
+.gw-dialog p.gw-dialog-code{margin:0 0 12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11px;line-height:1.5;opacity:.8}
 .gw-dialog-actions{display:flex;gap:8px;justify-content:flex-end}
 /*
  * ---------- 反馈:确认气泡 / toast / 空 / 错误 / 加载 ----------
@@ -267,6 +299,43 @@ const CSS = `
   background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}
 .gw-toast.err{border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary)}
 .gw-toast.ok{border-color:var(--dsw-alias-state-success-primary)}
+/*
+ * ---------- 通知:右下角 + 按右栏夹宽(2026-10 用户裁决)----------
+ *
+ * 通知本体仍由宿主原语渲染(见 src/client/bits.tsx 的 Toasts),但原语把自己的位置写在
+ * CSS module 里(position:fixed; top:40px; left:50%; transform:translateX(-50%)),它的
+ * anchor 只改**水平中心**,而且它把横幅 portal 到 document.body —— 所以「右下角」与
+ * 「夹宽」这两件事只能在这里覆盖。两个门控条件缺一不可:
+ *
+ *   1. html[data-gw-toast-clamp] —— bits.tsx 的 useToastBandClamp 在**量到通知带**时
+ *      才打上(右栏 .gw-split > .right 的实测矩形 → --gw-toast-* 四个变量)。属性不在
+ *      ⇒ 整条规则不生效 ⇒ 原语退回它自己的顶部居中(即改前的行为,不会更坏)。
+ *   2. :has(> span > .gw-toast-mark) —— 只命中**我们自己的**横幅:标记类在 bits.tsx 的
+ *      ToastIcon 里。宿主与别的插件走同一个原语但没有这个标记 ⇒ 命中不了这条规则
+ *      (新探针 docs/probes/toast-overlay-probe.mjs 有一条阴性对照专门量这件事)。
+ *
+ * 改的只有四类:纵向(top→bottom)、横向(left→right)、夹宽/夹高、宿主那条「居中」
+ * transform。配色、圆角、阴影、z-index、pointer-events、淡出动画**全部留给原语** ——
+ * 这不是重做外观。两个变量名与 bits.tsx 的写入方是**跨文件契约**(探针会同时读两个
+ * 源文件、断言名字一致;改一边忘另一边会让横幅静默回到顶部居中)。
+ */
+html[data-gw-toast-clamp] body > div[role="alert"]:has(> span > .gw-toast-mark){
+  top:auto;bottom:var(--gw-toast-bottom, 12px);left:auto;right:var(--gw-toast-right, 12px);
+  /* border-box:让 max-width 把原语自己的 padding(16+16)算进去,否则外框会比夹宽宽 32px */
+  box-sizing:border-box;
+  /* 夹宽 = 右栏宽 − 两侧 12(bits.tsx 里已经减过);再与原语自己的上限取小 */
+  max-width:min(var(--gw-toast-max-w, 640px), 640px, calc(100vw - 48px));
+  /* 夹高只在窄档(<420px,split 变成上下堆叠)才起作用,见 bits.tsx 的 toastBand 注释 */
+  max-height:var(--gw-toast-max-h, none);overflow-y:auto;
+  /* ⚠️ 必须 !important:入场/淡出关键帧里是 translate(-50%, …),而 CSS 动画**压过**普通
+     声明。不加它,横幅在入场那 160ms 会向左偏半个自身宽度。代价是入场那 6px 的纵向滑入
+     也一起没了(只剩不透明度)——与 prefers-reduced-motion 那一档的观感一致。淡出**没有**
+     受影响:它只动 opacity / visibility。 */
+  transform:none !important;
+}
+/* 成功档的图标色 = 原语 tone="success" 那一档自己的令牌(见 Toast.module.css 的
+   .icon.success)。标记类只是「这条是我们发的」,不是新配色。 */
+.gw-toast-ok{color:var(--dsw-alias-state-success-primary)}
 .gw-empty{flex:1;display:flex;align-items:center;justify-content:center;color:var(--dsw-alias-label-tertiary);
   padding:28px;text-align:center;line-height:1.8}
 .gw-errbox{margin:12px;padding:10px 12px;border:1px solid var(--dsw-alias-state-error-primary);

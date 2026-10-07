@@ -90,8 +90,16 @@ const noopStatsStore: IStatsStore = {
   increment: async () => { /* 遥测:本插件没有上报端点,§1.3 不沿用 lib/stats */ },
 };
 
-/** 属于某个仓库、但镜像里没有对应槽的那部分(原因逐条写在本文件头)。 */
-interface RepoExtras {
+/**
+ * 属于某个仓库、但镜像里没有对应槽的那部分(原因逐条写在本文件头)。
+ *
+ * ⚠️ 名字带 `I` 前缀是**本仓闸门的要求**,不是风格偏好:`.eslintrc.yml` 的
+ * `@typescript-eslint/naming-convention` 对 `selector: interface` 钉了
+ * `regex: '^I[A-Z]'`(逐字沿用上游 `references/desktop/.eslintrc.yml:35-104`)。
+ * 原先叫 `RepoExtras` 时 `scripts/check-lint.mjs` 会把它算成**新增**违规;
+ * 改名是让闸门变绿的正解,不是给它加豁免,也不是去改基线。
+ */
+interface IRepoExtras {
   includeState: Record<string, LineSelectionSpec>;
   diff: DiffResult | null;
   diffKey: string;
@@ -123,11 +131,23 @@ export type RepoScopedSnapshot = Pick<
   | 'commitForm'
 >;
 
-/** 首次访问某个仓库时的初值(镜像 `get()` 的未命中分支给的就是这个语义)。 */
-export interface RepoStateCacheFallback {
+/**
+ * 首次访问某个仓库时的初值(镜像 `get()` 的未命中分支给的就是这个语义)。
+ *
+ * ⚠️ 同上:`selector: interface` 要求 `I` 前缀,所以真身叫 `IRepoStateCacheFallback`。
+ * 调用方(以及本文件的构造参数)用下面的**类型别名**读它,名字与改前一致。
+ */
+export interface IRepoStateCacheFallback {
   /** `Snapshot` 那一份初值(由 `store.ts` 的 `initial()` 提供,避免第二份真源)。 */
   initial: () => RepoScopedSnapshot;
 }
+
+/**
+ * 上游风格的公开名(`RepoStateCacheFallback`)—— 与 `types/client-platform-shims.d.ts`
+ * 里 `ISettingsFormProps` → `SettingsFormProps` 是同一手法:接口真身守本仓命名约定,
+ * 再用别名把不带前缀的名字留给调用方。**别名与真身是同一个类型**,不产生第二份真源。
+ */
+export type RepoStateCacheFallback = IRepoStateCacheFallback;
 
 export class RepoStateCache {
   /** 上游那份「按 hash 一份 `IRepositoryState`」的容器,与上游一致,本模块不改它。 */
@@ -143,7 +163,7 @@ export class RepoStateCache {
   private readonly repos = new Map<string, Repository>();
 
   /** 路径 → 上游没有槽的那部分(见本文件头)。 */
-  private readonly extras = new Map<string, RepoExtras>();
+  private readonly extras = new Map<string, IRepoExtras>();
 
   public constructor(private readonly fallback: RepoStateCacheFallback) {}
 

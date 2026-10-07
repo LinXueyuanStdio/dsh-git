@@ -5,7 +5,7 @@
  */
 
 import type {
-  BranchEntry, CommitDetail, CommitEntry, DiffResult, GitError, RepoEntry, RepoStatus, SyncState,
+  BranchEntry, CommitDetail, CommitEntry, DiffResult, GitError, RepoEntry, RepoStatus, SyncProgressPayload, SyncState,
 } from '../core/types.ts';
 import { MAX_BLOB_BYTES, isTextContentType } from '../core/blob.ts';
 import { payloadError, noteNormalized, narrowed } from './payload.ts';
@@ -520,7 +520,10 @@ const SHAPES: Readonly<Record<string, Shape>> = {
   'discard': OkTrueShape,
   // `sha.slice(0,7)` / `selectedCommit: sha` 都直接用它。
   'commit': { record: { sha: 'string', subject: 'string' } },
-  'undo-commit': { record: { subject: 'string', body: 'string' } },
+  // ⚠️ 返回的是 `description`,**不是** `body`:宿主 `git-service.ts:612` 逐字是
+  // `{ subject: string; description: string }`。写错名字的后果见下面 `undoCommit` 的注释
+  // ——`record` 字段默认必填 ⇒ 真载荷会被这里拒掉(git 撤完了、界面报失败)。
+  'undo-commit': { record: { subject: 'string', description: 'string' } },
 
   // ---------- 历史 ----------
   'log': { record: { commits: { array: CommitEntryShape }, hasMore: 'boolean' } },
@@ -551,6 +554,22 @@ const SHAPES: Readonly<Record<string, Shape>> = {
   'fetch': OkTrueShape,
   'pull': OkTrueShape,
   'push': OkTrueShape,
+  /*
+   * 在飞的网络动作进度。`progress` 允许 `null`(没有动作在跑 / 不是这个仓库 ——
+   * **正常状态**),所以用 `anyOf` 而不是必填 record:写成必填会让「空闲」这一
+   * 最常见的情形被判成载荷畸形,而那条失败会被记成 `console.error`(本仓的探针
+   * 有「0 console.error」这一档,于是产品会被自己的守卫弄红)。
+   */
+  'sync-progress': {
+    record: {
+      progress: {
+        anyOf: [
+          { record: { kind: { literal: ['push', 'fetch', 'pull'] }, description: 'string', value: 'number', done: 'boolean' } },
+          { literal: [null] },
+        ],
+      },
+    },
+  },
   'clone': { record: { root: 'string', repos: RepoEntryListShape } },
 
   // ---------- 配置 ----------
@@ -814,9 +833,19 @@ export const api = {
     amend?: boolean; signoff?: boolean; noVerify?: boolean; allowEmpty?: boolean;
   }) => call<{ sha: string; subject: string }>('commit', input),
 
-  /** 撤销一次提交(reset --mixed 到父提交或删除 ref)。 */
+  /**
+   * 撤销一次提交(reset --mixed 到父提交或删除 ref)。
+   *
+   * ⚠️ **返回的是 `description`,不是 `body`** —— 宿主 `git-service.ts:612` 的返回类型
+   * 逐字是 `Promise<{ subject: string; description: string }>`。改前这里(以及上面
+   * `SHAPES['undo-commit']`)写的是 `{subject, body}`,后果**不是**「类型标注不准」:
+   * `SHAPES` 的 `record` 字段默认**必填**,于是宿主回的真载荷被 `narrowed` 拒掉
+   * (诊断逐字:`载荷形状不对:body 期望 string,实到 undefined(实到 对象{键=[subject,description]})`)
+   * ⇒ `store.undoCommit` 拿到 `ok:false` ⇒ **git 已经撤完了,界面却报失败、横幅不消失**。
+   * 真读数见 `docs/probes/undo-commit-strip-probe.mjs` 段 A(A10c/A10d 改前红)。
+   */
   undoCommit: (path: string, sha: string) =>
-    call<{ subject: string; body: string }>('undo-commit', { path, sha }),
+    call<{ subject: string; description: string }>('undo-commit', { path, sha }),
 
   // ---------- 历史 ----------
   log: (path: string, limit: number, skip?: number) => call<{ commits: CommitEntry[]; hasMore: boolean }>('log', { path, limit, ...(skip !== undefined ? { skip } : {}) }),
@@ -844,6 +873,18 @@ export const api = {
   pull: (path: string, rebase?: boolean) =>
     call<{ ok: true }>('pull', { path, ...(rebase !== undefined ? { rebase } : {}) }),
   push: (path: string, force: boolean) => call<{ ok: true }>('push', { path, force }),
+  /**
+   * **在飞的网络动作进度**（`git --progress` 的 stderr 解析结果）。
+   *
+   * 为什么是**独立**的一条路由而不是搭 `push` 的响应：推送请求**一直阻塞到推完**，
+   * 它的响应就是「推完了」——进度搭不了自己的车。所以宿主把进度放在内存里
+   * （`GitService.syncProgressByRoot`），这条路由只查一次 Map、不跑子进程，
+   * 客户端才敢按 ~250ms 轮询（见 `store.ts` 的 `startSyncProgressPolling`）。
+   *
+   * `progress === null` = 没有动作在跑 / 不是这个仓库：**正常状态，不是错误**。
+   */
+  syncProgress: (path: string) =>
+    call<{ progress: SyncProgressPayload | null }>('sync-progress', { path }),
   clone: (url: string, path: string, branch?: string) => call<{ root: string; repos: RepoEntry[] }>('clone', { url, path, ...(branch !== undefined ? { branch } : {}) }),
 
   // ---------- 配置 ----------

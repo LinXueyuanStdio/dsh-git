@@ -72,11 +72,11 @@
  * @module dsh-git/client/history-view
  */
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode, RefObject } from 'react';
 import { api } from './api.ts';
 import type { GitStore, Snapshot } from './store.ts';
-import type { ChangeStatus, CommitEntry, DiffResult } from '../core/types.ts';
+import type { ChangeStatus, CommitEntry, DiffResult, SyncState } from '../core/types.ts';
 import { DesktopDiff, desktopDiffFromPatch } from './desktop-diff.tsx';
 // 提交行右键菜单里「Create Branch from Commit」要一个名字输入框 —— 复用共享件,
 // 不为这一项新造一个对话框(形状与 Desktop 的 Create Branch 一致:标题 + 单行输入)。
@@ -164,14 +164,14 @@ async function splitRepoPath(
 ): Promise<{ root: string; relative: string } | null> {
   let best: string | null = null;
   for (const root of await repoRoots()) {
-    if (root === '') continue;
-    if (absolutePath === root) continue;
+    if (root === '') { continue; }
+    if (absolutePath === root) { continue; }
     const prefix = root.endsWith('/') ? root : `${root}/`;
     if (absolutePath.startsWith(prefix) && (best === null || root.length > best.length)) {
       best = root;
     }
   }
-  if (best === null) return null;
+  if (best === null) { return null; }
   const prefix = best.endsWith('/') ? best : `${best}/`;
   return { root: best, relative: absolutePath.slice(prefix.length) };
 }
@@ -194,9 +194,9 @@ const TREE_TTL_MS = 30_000;
 async function treeFilesFor(root: string): Promise<Set<string> | null> {
   const cached = treeCache.get(root);
   const now = Date.now();
-  if (cached !== undefined && now - cached.at < TREE_TTL_MS) return cached.files;
+  if (cached !== undefined && now - cached.at < TREE_TTL_MS) { return cached.files; }
   const result = await api.repoTree(root);
-  if (!result.ok) return null;
+  if (!result.ok) { return null; }
   const files = new Set(result.value.files);
   treeCache.set(root, { files, at: now });
   return files;
@@ -219,7 +219,7 @@ let hooksInstalled = false;
 
 /** 安装三个宿主钩子(幂等;本模块被 import 时执行一次)。 */
 function installHostFileHooks(): void {
-  if (hooksInstalled) return;
+  if (hooksInstalled) { return; }
   hooksInstalled = true;
 
   /**
@@ -230,9 +230,9 @@ function installHostFileHooks(): void {
   setGitShowHost({
     partialBlob: async (repositoryPath, commitish, path, length) => {
       const result = await api.showFile(repositoryPath, commitish, path);
-      if (!result.ok) return null;
+      if (!result.ok) { return null; }
       const value = result.value;
-      if (value.kind !== 'text') return null;
+      if (value.kind !== 'text') { return null; }
       return value.text.slice(0, Math.min(length, value.text.length));
     },
   });
@@ -241,9 +241,9 @@ function installHostFileHooks(): void {
   setFileSystemHost({
     partialFile: async (absolutePath, start, end) => {
       const split = await splitRepoPath(absolutePath);
-      if (split === null) return null;
+      if (split === null) { return null; }
       const result = await api.fileText(split.root, split.relative);
-      if (!result.ok || result.value.kind !== 'text') return null;
+      if (!result.ok || result.value.kind !== 'text') { return null; }
       // 上游给的是**字节**区间,这里按字符切:调用点 `syntax-highlighting/index.ts:94`
       // 传的是 `(0, MaxHighlightContentLength - 1)`(从文件头开始),UTF-8 多字节字符
       // 只会让「取到的前缀」比字节口径略短 —— 对「够不够做高亮」这件事没有影响。
@@ -261,7 +261,7 @@ function installHostFileHooks(): void {
       const now = Date.now();
       const cached = accessCache.get(key);
       if (cached !== undefined && now - cached.at < ACCESS_TTL_MS) {
-        if (cached.exists) return;
+        if (cached.exists) { return; }
         throw enoent(absolutePath);
       }
 
@@ -377,8 +377,32 @@ function writeStoredSplitWidth(key: string, width: number): void {
 
 /** `useSplitWidth()` 的返回值。 */
 export interface SplitController {
-  /** 挂到 `.gw-split` 容器上(量宽度 + 键盘事件的边界)。 */
+  /**
+   * 挂到 `.gw-split` 容器上(量宽度 + 键盘事件的边界)。
+   *
+   * ⚠️ **优先用 {@link SplitController.attachContainerRef}**;这个对象 ref 仍在(内部那些
+   * `containerRef.current` 读法不变),但它**自身无法通知「节点出现了」**——见下面那条
+   * 2026-10 的缺陷与修法。
+   */
   readonly containerRef: RefObject<HTMLDivElement | null>;
+  /**
+   * 挂到 `.gw-split` 容器上的**回调 ref**(替代 `ref={containerRef}` 的写法)。
+   *
+   * 为什么必须有它(2026-10 实测的缺陷):`ChangesView` 在 `status === null` 时提前渲染
+   * 「读取仓库状态…」,**那时 `.gw-split` 根本不存在**;而下面的量宽 `useLayoutEffect`
+   * 依赖表原先写的是 `[]` ⇒ 它只在**第一次挂载**量一次,`containerRef.current === null`
+   * 时直接 return 且**永不重试** ⇒ `paneWidth` 恒 0、`stacked` 恒 false:
+   *
+   * | 场景(实测) | 修前 | 应当是 |
+   * |---|---|---|
+   * | 宿主 380px **冷挂载** | 轨道 `330px 50px`(diff 栏塌成 50px、不竖排) | 竖排、左栏满宽 `380px` |
+   * | 宿主 620px + 存储 900 **冷挂载** | 轨道 `570px 50px`(按回退值 720 夹) | `470px 150px`(按真实面板夹) |
+   *
+   * 回调 ref 在**提交阶段**被调用(先于布局 effect、先于绘制)⇒ `setContainer(node)` 触发的
+   * 重渲染与量宽都在同一帧绘制之前完成,**不会先画错一帧再纠正**(见探针
+   * `docs/probes/split-measure-probe.mjs` 判据 4)。
+   */
+  readonly attachContainerRef: (node: HTMLDivElement | null) => void;
   /** 内联到 `.gw-split` 的样式:横排时钉住左栏轨道;竖排时不写,交给容器查询。 */
   readonly containerStyle: CSSProperties | undefined;
   /** 当前生效宽度(已按可用宽度夹过)。 */
@@ -399,8 +423,27 @@ export interface SplitController {
  */
 export function useSplitWidth(storageKey: string): SplitController {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * 容器节点本身也是 state:量宽 effect 必须能**在节点出现之后**重跑。
+   * 只留 `useRef` 时「节点从 null 变成非 null」这件事**不可观测**(ref 赋值不触发渲染),
+   * 效果就是上面那条 `paneWidth` 恒 0 的缺陷。
+   */
+  const [container, setContainer] = useState<HTMLDivElement | null>(null);
   const [paneWidth, setPaneWidth] = useState(0);
   const [storedWidth, setStoredWidth] = useState<number>(() => readStoredSplitWidth(storageKey));
+
+  /**
+   * 回调 ref:两个都写。
+   *
+   * `containerRef.current` 保持有效(本文件里键盘 effect 等仍按老读法取它),
+   * 而 `setContainer` 让量宽 effect 有一个**真实的依赖**。
+   * `useCallback` 保证同一个函数身份 ⇒ React 不会在每次渲染时「卸载再挂载」这个 ref
+   * (那会在 `container` 上制造抖动,进而让下面的 effect 反复重订阅 ResizeObserver)。
+   */
+  const attachContainerRef = useCallback((node: HTMLDivElement | null): void => {
+    containerRef.current = node;
+    setContainer(node);
+  }, []);
 
   // ---- 量容器 ----
   // 用 ResizeObserver:宿主侧栏本身可以被用户拖动、DSH 也能切全屏,`window.resize`
@@ -410,21 +453,24 @@ export function useSplitWidth(storageKey: string): SplitController {
   // 刻意用 `useLayoutEffect`:首帧还不知道面板宽度,`stacked` 只能是 false(会按横排画),
   // 而被动 effect 在**绘制之后**才跑 —— 320px 面板上会闪一帧错误布局。布局 effect 在
   // 浏览器绘制前跑完并同步重渲染,没有这一帧。
+  //
+  // ⚠️ 依赖是 **`[container]` 而不是 `[]`**(2026-10 修):`[]` 只量一次,而容器可能
+  // **晚于组件挂载**才出现(ChangesView 的「读取仓库状态…」那一支),于是量宽永不发生。
+  // 改成节点依赖之后,「节点出现」这一次重渲染会**重新量一次**并挂上 ResizeObserver。
   useLayoutEffect(() => {
-    const el = containerRef.current;
-    if (el === null) {
+    if (container === null) {
       return;
     }
-    const measure = (): void => { setPaneWidth(el.clientWidth); };
+    const measure = (): void => { setPaneWidth(container.clientWidth); };
     measure();
     if (typeof ResizeObserver === 'undefined') {
       window.addEventListener('resize', measure);
       return () => { window.removeEventListener('resize', measure); };
     }
     const observer = new ResizeObserver(measure);
-    observer.observe(el);
+    observer.observe(container);
     return () => { observer.disconnect(); };
-  }, []);
+  }, [container]);
 
   // 还没量到宽度时(首帧 / 探针里 clientWidth = 0)按侧栏上限算,免得用 Desktop 的
   // `DefaultMaxWidth = 350` 把用户存的宽度夹出一个假值。
@@ -501,12 +547,22 @@ export function useSplitWidth(storageKey: string): SplitController {
 
     window.addEventListener('keydown', onKeyDown);
     return () => { window.removeEventListener('keydown', onKeyDown); };
-    // 依赖 `stacked`:竖排与横排之间切换会重挂 `<Resizable>`(见下面的 SplitPane),
-    // 手柄是新的 DOM 节点,适配要跟着重做一次。
-  }, [stacked]);
+    /*
+     * 依赖 `stacked`:竖排与横排之间切换会重挂 `<Resizable>`(见下面的 SplitPane),
+     * 手柄是新的 DOM 节点,适配要跟着重做一次。
+     *
+     * ⚠️ 依赖里**必须有 `container`**(2026-10 修,与上面量宽那条同因):
+     * 容器可能**晚于组件挂载**才出现(ChangesView 的「读取仓库状态…」那一支),而
+     * 宽面板上 `stacked` 从 false 到 false **不变** ⇒ 只依赖 `stacked` 时这条 effect
+     * 在容器出现后**不会重跑**,手柄永远拿不到 `tabIndex`/`title`(键盘可达性丢了)。
+     * 实测:`docs/probes/split-measure-probe.mjs` 判据 6 —— 冷挂载档修前
+     * `tabindex="-1"` / `title=null`,修后 `tabindex="0"` + title。
+     */
+  }, [container, stacked]);
 
   return {
     containerRef,
+    attachContainerRef,
     containerStyle: stacked ? undefined : { gridTemplateColumns: `${width}px 1fr` },
     width,
     maximumWidth,
@@ -750,18 +806,51 @@ function toAbsolutePath(repositoryPath: string, relativePath: string): string {
 
 /**
  * 哪些提交**还没 push** —— 上游 `CommitList.localCommitSHAs` 的语义,用来点亮行首那个
- * `↑` 角(`commit-list-item.tsx:196-211` + `_commit-list.scss:176-183`)。
+ * `↑` 角(`commit-list-item.tsx:196-211` + `_commit-list.scss:176-183`),
+ * **并且**是提交右键菜单里 `Undo Commit…` 那一项的**出现条件**
+ * (`commit-list.tsx:730-731` 的 `isLocal = localCommitSHAs.includes(sha)`)。
  *
- * **这是近似,不是等价**(HYPOTHESIS,需要真机核对):Desktop 的
- * `localCommitSHAs` 来自 `git rev-list <upstream>..HEAD` 的**真实集合**;宿主今天只给
- * `snap.sync.ahead`(**个数**)与按时间倒序的 `snap.log`。所以这里取 `log` 里**最前面
- * `ahead` 条**。两处会不一致:
- *   · `log` 是**当前分支**的历史,而 `ahead` 是相对 upstream 的 —— 分支刚切换或
- *     upstream 刚变时,头部 N 条未必就是那 N 条;
- *   · `log` 分页加载(每批 50),`ahead > 已加载条数` 时只能标记已加载的部分。
- * 想变成精确值,需要 host 新增一条「哪些 sha 不在 upstream」的路由(记在报告里)。
+ * ## 上游是**集合**,我们只有**计数** —— 这是近似,不是等价(HYPOTHESIS)
+ *
+ * 上游 `git-store.ts:608-627` 的 `loadLocalCommits` 两条分支:
+ *
+ * | 上游分支 | 判据 | 行 |
+ * |---|---|---|
+ * | 有 upstream | `git log <upstream>..HEAD` | `:615-619` |
+ * | **没有 upstream** | `git log HEAD --not --remotes` | `:620-626` |
+ *
+ * ⇒ **一个远端都没有时,`--not --remotes` 什么都不排除 ⇒ 全部提交都是「本地提交」**
+ * (Desktop 上「撤销最近一次提交」在一个纯本地仓库里是可用的)。
+ *
+ * 我们只有 `snap.sync.ahead`(`git rev-list --count`,**个数**)与 `sync.remotes`
+ * (**远端名清单**),所以:
+ *
+ *  - `sync.remotes.length === 0` ⇒ 按上游那一支,**全部提交**算本地。
+ *    这一档 2026-10 才补上:此前一律按 `ahead` 数头部 N 条,而纯本地仓库的 `ahead`
+ *    是 0 ⇒ **一条都不算本地** ⇒ 右键菜单里的 `Undo Commit…` 在本地仓库里永不出现
+ *    (用户报的「History 右键缺 Undo」有这一层原因)。判据:
+ *    `docs/probes/history-commit-menu-probe.mjs` 的 P9。
+ *  - 有远端但**没有 upstream 分支**:上游用 `--not --remotes`,那个集合我们拿不到
+ *    ⇒ 退回按 `ahead` 数头部 N 条(可能**少报**,方向是安全的:不会把已推送的提交
+ *    说成本地)。**这是仍然存在的缺口**,要精确得让 host 加一条「哪些 sha 不在
+ *    upstream」的路由。
+ *  - 其余:按 `ahead` 从头部数。两个已知不一致点(`log` 是当前分支历史、`ahead` 是
+ *    相对 upstream;`log` 分页加载)与上面同源,一并记在这里。
+ * @param log - 当前已加载的提交(新 → 旧)。
+ * @param sync - `sync-state` 载荷;`null` = 还没拿到 ⇒ 一个都不算本地。
  */
-function localCommitSHAsFrom(log: ReadonlyArray<CommitEntry>, count: number): ReadonlyArray<string> {
+function localCommitSHAsFrom(
+  log: ReadonlyArray<CommitEntry>,
+  sync: SyncState | null,
+): ReadonlyArray<string> {
+  if (sync === null) {
+    return [];
+  }
+  if (sync.upstream === null && sync.remotes.length === 0) {
+    // 上游 `git-store.ts:620-626` 的 `--not --remotes`,而远端清单是空的。
+    return log.map((commit) => commit.sha);
+  }
+  const count = sync.ahead;
   if (count <= 0) {
     return [];
   }
@@ -830,6 +919,75 @@ export function HistoryView(props: { store: GitStore; snap: Snapshot }): ReactNo
    */
   const [branchFrom, setBranchFrom] = useState<{ sha: string; name: string } | null>(null);
 
+  /**
+   * 提交右键菜单 ▸「Amend Commit…」的**强推警告**待确认项。
+   *
+   * 上游 `_startAmendingRepository`(`lib/stores/app-store.ts:5767-5787`)的第一件事就是
+   * 这道闸门:
+   *
+   * ```ts
+   * if (askForConfirmationOnForcePush && !continueWithForcePush &&
+   *     !isLocalCommit && tip.kind === TipState.Valid) {
+   *   return this._showPopup({ type: PopupType.WarnForcePush, operation: 'Amend', … })
+   * }
+   * ```
+   *
+   * 三点必须说清:
+   *  1. **不是每次修订都弹**。只有「这条提交**已经在远端**」(`!isLocalCommit`)时才弹
+   *     —— 修订一条已发布的提交必然要强推,而那会改写远端历史。本地未推送的提交
+   *     **直接进入修订态**,没有中间那一步(判据 P4 vs P8b);
+   *  2. `askForConfirmationOnForcePush` 上游**默认就是 `true`**
+   *     (`app-store.ts:494` 的 `askForConfirmationOnForcePushDefault`),而本插件
+   *     **没有这个偏好项**(`toolbar.tsx:787` 记了同一处缺口)⇒ 按上游默认值处理。
+   *     等 Preferences ▸ Prompts 接线时把它换成真偏好;
+   *  3. `tip.kind === TipState.Valid` 的等价物是「在分支上、有提交」
+   *     (`sync-state.ts:66-67` 的映射表:`detached === false && unborn === false`)。
+   */
+  const [amendTarget, setAmendTarget] = useState<{ sha: string; summary: string } | null>(null);
+
+  /**
+   * 提交右键菜单 ▸「Undo Commit…」的**本地改动警告**待确认项。
+   *
+   * 上游 `_undoCommit`(`lib/stores/app-store.ts:5815-5853`)的判据是
+   * (真值在 `:5830-5836`;`showConfirmationDialog` 由 dispatcher 默认传 `true`,
+   * `ui/dispatcher/dispatcher.ts:951-955`):
+   *
+   * ```ts
+   * if (showConfirmationDialog &&
+   *     ((this.confirmUndoCommit && !isWorkingDirectoryClean) || commit.isMergeCommit))
+   * ```
+   *
+   * ⇒ 化简成「**工作区脏 OR 是合并提交**」才弹。`confirmUndoCommit` 上游默认 `true`
+   * (`app-store.ts:495`),我们同样没有这个偏好,按默认值处理。
+   * 这条判据与 Changes 页签底部撤销条**共用**一份语义(`changes-view.tsx` 的
+   * `requestUndo` 的文件头逐字列了同一段上游代码)—— 两个入口必须一起绿。
+   */
+  const [undoTarget, setUndoTarget] = useState<Commit | null>(null);
+
+  /**
+   * 提交右键菜单 ▸「Reset to Commit…」/「Checkout Commit」/「Create Tag…」三个待确认项。
+   *
+   * 三项都在 2026-10 之前**恒灰着** —— 不是缺管线(宿主路由 + `api.*` 包装 + argv 全在,
+   * 见 `docs/dead-code-and-missing-state-audit.md` §2.3 第 1/2/5 项),而是
+   * `history-view.tsx` **从来没给 `<CommitList>` 传过对应的 props** ⇒ `enabled` 里
+   * `onX !== undefined` 那半边恒假。它们与 Amend/Undo 的区别只是**缺的是 prop 而不是项**。
+   *
+   * 三个确认框的上游对照逐条写在下面各自的注释里;共用的形状是「上游弹一个
+   * `PopupType.X` 对话框,我们这一层没有应用层弹窗宿主,所以用 `ConfirmDialog` 等价物」。
+   */
+  const [resetTarget, setResetTarget] = useState<{ sha: string; mode: 'soft' | 'mixed' | 'hard' } | null>(null);
+  /**
+   * Reset 的**第二道**闸门(破坏性确认):
+   *  - `mode === 'hard'` ⇒ 一定会走到这里(`git reset --hard` 无条件丢工作区改动);
+   *  - 工作区**脏**且不是 hard ⇒ 也走这里(照上游 `WarningBeforeReset` 那一档,
+   *    `app-store.ts:5866-5872` 的 `showConfirmationDialog && !isWorkingDirectoryClean`)。
+   * 干净的工作区 + soft/mixed ⇒ 不弹第二道,直接执行(与上游一致)。
+   */
+  const [resetConfirm, setResetConfirm] = useState<{ sha: string; mode: 'soft' | 'mixed' | 'hard' } | null>(null);
+  const [checkoutTarget, setCheckoutTarget] = useState<Commit | null>(null);
+  /** 「Create Tag…」的名字输入框;`annotated` 那一档见对话框里的说明(不可用)。 */
+  const [tagFor, setTagFor] = useState<{ sha: string; name: string } | null>(null);
+
   const repoPath = snap.current;
   const log = snap.log;
 
@@ -842,7 +1000,7 @@ export function HistoryView(props: { store: GitStore; snap: Snapshot }): ReactNo
   );
   const commitSHAs = useMemo(() => commits.map((commit) => commit.sha), [commits]);
   const localCommitSHAs = useMemo(
-    () => localCommitSHAsFrom(log, snap.sync?.ahead ?? 0),
+    () => localCommitSHAsFrom(log, snap.sync),
     [log, snap.sync],
   );
 
@@ -1029,6 +1187,282 @@ export function HistoryView(props: { store: GitStore; snap: Snapshot }): ReactNo
     void store.createBranch(name, target.sha);
   }, [branchFrom, store]);
 
+  /*
+   * 提交行右键 ▸「Amend Commit…」/「Undo Commit…」的两个回调。
+   *
+   * 上游都挂在 `ui/history/compare.tsx` 上:
+   *   · `onAmendCommit={this.props.onAmendCommit}`(`:264`)⇒ `ui/repository.tsx:659-665`
+   *     的 `dispatcher.startAmendingRepository(repository, commit, isLocalCommit)`;
+   *   · `onUndoCommit={this.onUndoCommit}`(`:257`)⇒ `:615-617` 的
+   *     `dispatcher.undoCommit(repository, commit)`(默认 `showConfirmationDialog = true`)。
+   * 上游那两处都**只是转手**,闸门（强推警告 / 本地改动确认)在 `app-store.ts` 里 ——
+   * 我们这边弹窗只能留在视图层,所以下面两个回调各自承担自己那道闸门,
+   * 过了闸门再调 `store` 的方法。
+   */
+  const onAmendCommit = useCallback((commit: Commit, isLocalCommit: boolean) => {
+    const status = snap.status;
+    // `tip.kind === TipState.Valid` 的等价物:`sync-state.ts:66-67` 的映射表。
+    const tipValid = status !== null && !status.detached && !status.unborn;
+    if (!isLocalCommit && tipValid) {
+      // 已推送 ⇒ 先弹强推警告(`app-store.ts:5767-5787`);确认后才进修订态。
+      setAmendTarget({ sha: commit.sha, summary: commit.summary });
+      return;
+    }
+    void store.startAmendingCommit(commit.sha);
+  }, [snap.status, store]);
+
+  const onAmendDialogDone = useCallback((okay: boolean) => {
+    // 与 `onBranchDialogDone` 同一条纪律:先取值再清空,副作用不放进 setState 更新函数。
+    const target = amendTarget;
+    setAmendTarget(null);
+    if (!okay || target === null) {
+      return;
+    }
+    void store.startAmendingCommit(target.sha);
+  }, [amendTarget, store]);
+
+  const onUndoCommit = useCallback((commit: Commit) => {
+    /*
+     * 逐字对着上游 `app-store.ts:5830-5843`(与 `changes-view.tsx` 的 `requestUndo` 同一段):
+     * 工作区**干净**且**不是**合并提交 ⇒ 直接撤,没有中间那一步。
+     */
+    const isWorkingDirectoryClean = (snap.status?.files.length ?? 0) === 0;
+    if (isWorkingDirectoryClean && !commit.isMergeCommit) {
+      void store.undoCommit(commit.sha);
+      return;
+    }
+    setUndoTarget(commit);
+  }, [snap.status, store]);
+
+  const onUndoDialogDone = useCallback((okay: boolean) => {
+    const target = undoTarget;
+    setUndoTarget(null);
+    if (!okay || target === null) {
+      return;
+    }
+    void store.undoCommit(target.sha);
+  }, [store, undoTarget]);
+
+  /*
+   * 提交右键菜单 ▸「Reset to Commit…」/「Checkout Commit」/「Create Tag…」/「Revert…」/
+   * 「Cherry-pick…」/「Delete Tag」的一组回调。
+   *
+   * 上游的落点(`ui/history/compare.tsx`,逐个点名):
+   *   · `onResetToCommit`(`:619-621`)⇒ `dispatcher.resetToCommit`
+   *     —— 上游那个走 `app-store.ts:5856-5889` 的 `_resetToCommit`,**只走 mixed**;
+   *   · `onCheckoutCommit`(`:633-645`)⇒ 问 `askForConfirmationOnCheckoutCommit`
+   *     再决定弹 `PopupType.ConfirmCheckoutCommit` 还是直接 checkout;
+   *   · `onCreateTag`(`:607-613`)⇒ `dispatcher.showCreateTagDialog`;
+   *   · `onDeleteTag`(`:647-649`)⇒ `dispatcher.showDeleteTagDialog`;
+   *   · `onCherryPick`(`:651-653`)⇒ `props.onCherryPick`(由 `ui/repository.tsx` 接)。
+   * 上游的 `onRevertCommit` 由 `ableToRevertCommit`(`:749-756`)决定是否**下传**:
+   * 纯 History 模式恒为真 ⇒ 恒下传。
+   */
+
+  /**
+   * 「Reset to Commit…」→ 打开**模式选择**框(`soft` / `mixed` / `hard`)。
+   *
+   * ## 上游怎么做的(以及我们为什么多出一档)
+   *
+   * 上游那一项**不选模式**:`compare.tsx:620` 直接 `dispatcher.resetToCommit(...)`,
+   * 而 `_resetToCommit`(`app-store.ts:5884`)写死 `GitResetMode.Mixed`。
+   * 它的确认闸门是 `showConfirmationDialog && !isWorkingDirectoryClean`
+   * —— **只在工作区脏时**弹 `WarningBeforeReset`
+   * (`ui/reset/warning-before-reset.tsx`,正文「You have changes in progress.
+   * Resetting to a previous commit might result in some of these changes being lost.
+   * Do you want to continue anyway?」,`destructive` + 确认键 `Continue`)。
+   *
+   * 我们按 2026-10 的裁决额外提供 `soft` / `hard` 两档(宿主 `reset-to-commit` 路由
+   * 与 `core/git-argv.ts:566-572` 都支持),所以**两种情况下都确认**:
+   *
+   *  - 选了 `hard`:`git reset --hard` 会**无条件丢弃工作区改动**(宿主
+   *    `git-service.ts:1127` 明写「调用方必须自己确认过再调」,路由 `:792` 用
+   *    `worktreeDiscarded` 如实回执)—— 上游没有这个风险面,这一档的确认是我们加的;
+   *  - 工作区脏(不干净)且没选 `hard`:**照上游那一档**先确认
+   *    (`WarningBeforeReset` 的等价物),因为 `mixed` 也会改索引。
+   */
+  const onResetToCommit = useCallback((commit: Commit) => {
+    // 上游 `isResettableCommit = row > 0 && row <= localCommitSHAs.length` 那一半由
+    // 镜像组件负责(`commit-list.tsx:736-739`);这里只做「打开选择框」。
+    setCheckoutTarget(null);
+    setResetTarget({ sha: commit.sha, mode: 'mixed' });
+  }, []);
+
+  /**
+   * 模式选择框的确认。
+   *
+   * 两个闸门(见 `onResetToCommit` 的注释)任一成立就先弹**破坏性确认**,否则直接执行。
+   * 「先取值再清空」是同一条纪律(副作用不写进 `setState` 更新函数:
+   * StrictMode 下会跑两次,会 reset 两次)。
+   */
+  const onResetModeChosen = useCallback((okay: boolean) => {
+    const target = resetTarget;
+    setResetTarget(null);
+    if (!okay || target === null) {
+      return;
+    }
+    const dirty = (snap.status?.files.length ?? 0) > 0;
+    if (target.mode === 'hard' || dirty) {
+      setResetConfirm(target);
+      return;
+    }
+    void store.resetToCommit(target.sha, target.mode);
+  }, [resetTarget, snap.status, store]);
+
+  const onResetConfirmed = useCallback((okay: boolean) => {
+    const target = resetConfirm;
+    setResetConfirm(null);
+    if (!okay || target === null) {
+      return;
+    }
+    void store.resetToCommit(target.sha, target.mode);
+  }, [resetConfirm, store]);
+
+  /**
+   * 「Checkout Commit」→ 先确认**分离头**的后果,再执行。
+   *
+   * ⚠️ **这一档与上游不同,必须说清**:上游
+   * `compare.tsx:633-645` 的 `askForConfirmationOnCheckoutCommit` **默认是 `false`**
+   * (`app-store.ts:496` 的 `askForConfirmationOnCheckoutCommitDefault`),
+   * 也就是说桌面版默认**不弹**这个框,直接 `git checkout <sha>`。
+   * 我们这里**恒弹**:分离头是一个用户不容易自己发现的危险状态(在上面提交会变成
+   * 悬空提交,切走就找不回来),而本插件**没有** Desktop 那条「你已经不在分支上」
+   * 的常驻横幅(`ui/branches/**` 未镜像)。按 2026-10 的裁决:
+   * **代价是多一次确认,换来的是用户知道自己在哪**。
+   * 可回收条件:`ui/branches/**` 的分离头横幅落地后,把这里换成上游那条偏好门
+   * (默认不弹,偏好打开才弹)。
+   */
+  const onCheckoutCommit = useCallback((commit: CommitOneLine) => {
+    setResetTarget(null);
+    setCheckoutTarget(
+      commits.find((entry) => entry.sha === commit.sha) ?? null,
+    );
+  }, [commits]);
+
+  const onCheckoutConfirmed = useCallback((okay: boolean) => {
+    const target = checkoutTarget;
+    setCheckoutTarget(null);
+    if (!okay || target === null) {
+      return;
+    }
+    void store.checkoutCommit(target.sha);
+  }, [checkoutTarget, store]);
+
+  /**
+   * 「Create Tag…」→ 打开**名字输入**框。
+   *
+   * 上游 `ui/create-tag/create-tag-dialog.tsx:57-90` 的形状:标题 `Create a Tag`、
+   * 一个 `RefNameTextBox`(label `Name`)、确认键 **在名字为空或名字非法时禁用**
+   * (`:58` 的 `disabled = error !== null || tagName.length === 0`),
+   * 还有一个 `MaxTagNameLength = 245` 的上限。我们的 `ConfirmDialog` 的确认键
+   * **不会**自动禁用(它是通用件),所以「空名字」这一档由回调自己给出可观察反馈
+   * (与 `onBranchDialogDone` 同一条规矩,不静默)。
+   *
+   * ⚠️ **轻量 vs 附注**:上游建的是**附注标签**(`lib/git/tag.ts:13-21` 的
+   * `tag -a -m '' <name> <sha>`),而本仓库的冻结契约建**轻量标签**
+   * (`core/git-argv.ts` 的 `tagCreateArgv`,`routes.ts:903-911` 的注释逐字记了这件事)。
+   * 差别是不可逆的数据差异(轻量标签没有 tagger / 日期 / 消息,事后无法补),
+   * 所以那一档在对话框里**明确标为不可用并写出原因**,不画一个点了没反应的选项
+   * (`docs/discard-lines-contract.md` §6 是这条的契约文本)。
+   */
+  const onCreateTag = useCallback((sha: string) => {
+    setTagFor({ sha, name: '' });
+  }, []);
+
+  const onTagNameChange = useCallback((name: string) => {
+    setTagFor((prev) => (prev === null ? null : { sha: prev.sha, name }));
+  }, []);
+
+  const onTagDialogDone = useCallback((okay: boolean) => {
+    const target = tagFor;
+    setTagFor(null);
+    if (!okay || target === null) {
+      return;
+    }
+    const name = target.name.trim();
+    if (name === '') {
+      store.toast('标签名不能为空。', 'err');
+      return;
+    }
+    // 上游 `create-tag-dialog.tsx:35` 的 `MaxTagNameLength`。
+    if (name.length > 245) {
+      store.toast('标签名不能超过 245 个字符。', 'err');
+      return;
+    }
+    /*
+     * 目标提交:上游把 `targetCommitSha` 传给对话框(`compare.tsx:609-612`),
+     * 建标签时用它作 `<sha>`。**我们的 `store.createTag` 收得到它**
+     * (宿主 `tag-create` 路由的 `sha` 是可选参数),所以不退回 HEAD —— 那会把标签
+     * 打在错误的提交上,而且这是个**静默**的错误。
+     */
+    void store.createTag(name, target.sha);
+  }, [store, tagFor]);
+
+  /**
+   * 「Revert Changes in Commit」→ 直接执行(没有确认框)。
+   *
+   * 上游那一项**没有**确认:菜单 `enabled` 就是 `onRevertCommit !== undefined`
+   * (`commit-list.tsx:809`),`dispatcher.revertCommit`(`:968-970`)直通
+   * `app-store._revertCommit`。它的「回执」在**冲突**那条路上
+   * (`lib/git/revert.ts` 失败 ⇒ 上游弹错误框);我们这边同一件事由
+   * `store.revertCommit` 的 `merge-conflicts` 分支给出带 `--continue`/`--abort`
+   * 出路的 toast(见该方法的注释 —— 上游那句默认文案在 revert 场景下是不完整的)。
+   */
+  const onRevertCommit = useCallback((commit: Commit) => {
+    void store.revertCommit(commit.sha);
+  }, [store]);
+
+  /**
+   * 「Cherry-pick Commit…」→ 直接执行。
+   *
+   * 上游:菜单 `enabled = canCherryPick()`(`commit-list.tsx:867-872`:
+   * `onCherryPick !== undefined && isMultiCommitOperationInProgress === false`),
+   * `action` 把 `selectedCommits` 交给 `compare.tsx:651-653`。
+   * 本插件按冻结契约**只 pick 一个提交**(宿主路由的注释写明了理由:
+   * `core/git-argv.ts` 的 `cherryPickArgv`),所以这里只取第一个 ——
+   * 多选时上游会一次 pick 一串,我们**不做**那种部分兑现(会静默少 pick 几个)。
+   */
+  const onCherryPick = useCallback((selectedCommits: ReadonlyArray<CommitOneLine>) => {
+    const first = selectedCommits[0];
+    if (first === undefined) {
+      store.toast('没有要拣选的提交。', 'err');
+      return;
+    }
+    if (selectedCommits.length > 1) {
+      store.toast(`本插件一次只能拣选一个提交,已拣选 ${first.sha.slice(0, 7)}。`, 'err');
+    }
+    void store.cherryPickCommit(first.sha);
+  }, [store]);
+
+  /**
+   * 「Delete tag <name>」→ 直接删本地标签。
+   *
+   * ⚠️ **今天这个菜单项不会出现**,原因不是没接:`commit-list.tsx:889-899` 的
+   * `getDeleteTagsMenuItem` 要求「该提交有**未推送**的标签」,而
+   * `getUnpushedTags`(`:373-377`)比的是 `props.tagsToPush`。我们**没有**这个数据:
+   * `snap.sync.tagCount` 只是**个数**(`git-service.ts:336`),
+   * 「哪些 tag 还没推送」需要 `git log --tags --not --remotes` 那类**新的宿主路由**。
+   * 所以这里**不传一个假集合**(传 `[]` 会永远不出现、传全部会谎报「没推送」),
+   * 按「缺什么说什么」登记为缺口;回调本身照样给上 —— 数据一到就立即生效。
+   * (与 `history-view.tsx` 文件头那条「不接的部分如实记录」同一纪律。)
+   */
+  const onDeleteTag = useCallback((tagName: string) => {
+    void store.deleteTag(tagName);
+  }, [store]);
+
+  /**
+   * 顶部「加载更多」与 Reset 模式选择框的两个 `onModeChange` / 确认 / 取消 ——
+   * **具名回调**。
+   *
+   * **为什么不能写成 JSX 内联箭头**:`react/jsx-no-bind`(只拦上升的棘轮)会把
+   * 组件作用域里的内联箭头记成新增违规。`onResetModeChange` 用**函数式更新**
+   * 读取最新的 sha(而不是闭包住某一帧的 `resetTarget`),所以依赖数组是空的。
+   */
+  const onLoadMore = useCallback(() => { void store.refreshLog(false); }, [store]);
+  const onResetModeChange = useCallback((mode: 'soft' | 'mixed' | 'hard') => {
+    setResetTarget((prev) => (prev === null ? null : { sha: prev.sha, mode }));
+  }, []);
+
   const onHideWhitespaceInDiffChanged = useCallback(
     async (hide: boolean) => { await store.setHideWhitespaceHistory(hide); },
     [store],
@@ -1081,12 +1515,12 @@ export function HistoryView(props: { store: GitStore; snap: Snapshot }): ReactNo
         <span className="grow" />
         <span style={{ fontSize: 11 }}>已加载 {log.length}</span>
         <button className="gw-btn ghost" disabled={!snap.logHasMore || snap.logLoading}
-          onClick={() => { void store.refreshLog(false); }}>
+          onClick={onLoadMore}>
           {snap.logLoading ? '读取中…' : '加载更多'}
         </button>
       </div>
 
-      <div className="gw-split" ref={split.containerRef} style={split.containerStyle}>
+      <div className="gw-split" ref={split.attachContainerRef} style={split.containerStyle}>
         <div className="left">
           {/* 外层分隔线 = Desktop 的仓库侧栏宽度(见 useSplitWidth 的注释)。 */}
           <SplitPane split={split} id="dsh-git-history-sidebar" description="History 提交列表">
@@ -1102,6 +1536,105 @@ export function HistoryView(props: { store: GitStore; snap: Snapshot }): ReactNo
               accounts={[]}
               preferAbsoluteDates={false}
               onCommitsSelected={onCommitsSelected}
+              /*
+               * ⭐ `canAmendCommits` / `canUndoCommits` 上游都写成
+               * 「当前是不是 History 模式」(`ui/history/compare.tsx:251-253`:
+               * `formState.kind === HistoryTabMode.History`)。我们的 HistoryView
+               * **就是** History 模式(Compare 那条支路归 branches 线,见文件头),
+               * 所以这里恒为 `true` —— 真正的行级判据在镜像组件里:
+               * `commit-list.tsx:730-732` 的 `row === 0` 与 `isLocal`。
+               *
+               * ⚠️ 这两个 prop 以前**一个都没传** ⇒ `if (canBeAmended)` / `if (canBeUndone)`
+               * 恒假 ⇒ 上游菜单里那两项**根本不入列**(不是「灰着」,是不存在)。
+               * 这正是用户报的「History 的提交右键菜单里缺少 Amend 和 Undo」的第一层原因;
+               * 判据 `docs/probes/history-commit-menu-probe.mjs` P1/P2/P2b。
+               */
+              canAmendCommits={true}
+              canUndoCommits={true}
+              onAmendCommit={onAmendCommit}
+              onUndoCommit={onUndoCommit}
+              /*
+               * ⭐ 2026-10 第二轮:`Reset to Commit…` / `Checkout Commit` /
+               * `Revert Changes in Commit` / `Create Tag…` / `Cherry-pick Commit…` /
+               * 「Delete tag …」六项。
+               *
+               * 这六项与上面两项**缺的东西不同**:Amend/Undo 以前是**项都不入列**
+               * (条件在 `if (canBeAmended)` / `if (canBeUndone)` 里),这六项是
+               * **项在列、永远灰着** —— 因为它们的 `enabled` 判据里都有一半是
+               * `this.props.onX !== undefined`(`commit-list.tsx:780,788,809,825,845`),
+               * 而本文件以前一个都没传。管线(宿主路由 + `api.*` + argv + git-service)
+               * 在这之前就全部就绪、全仓 0 调用点:
+               * 见 `docs/dead-code-and-missing-state-audit.md` §2.3 第 1-6 项。
+               *
+               * 逐项的上游 `enabled` 判据(镜像里逐字如此,不在这里重写):
+               *  · `Reset to Commit…`      = `canResetToCommits && row>0 &&
+               *                              row<=localCommitSHAs.length && onResetToCommit`(`:780`)
+               *  · `Checkout Commit`       = `row > 0 && onCheckoutCommit !== undefined`(`:788`)
+               *  · `Revert Changes in Commit` = `onRevertCommit !== undefined`(`:809`)
+               *  · `Create Tag…`           = `onCreateTag !== undefined`(`:825`)
+               *  · `Cherry-pick Commit…`   = `canCherryPick()` = `onCherryPick &&
+               *                              isMultiCommitOperationInProgress === false`(`:845,867-872`)
+               *  · `Delete tag <name>`     = 入列要求「该提交有未推送的标签」(`:889-899`)
+               * `canResetToCommits` 上游 = `formState.kind === HistoryTabMode.History`
+               * (`compare.tsx:251`),我们就是 History 模式 ⇒ 恒 `true`(与
+               * `canAmendCommits` / `canUndoCommits` 同一条依据,见上面那段注释)。
+               *
+               * ⚠️ **`Reorder Commit` 仍然是灰的,而且必须保持灰**:
+               * 它的 `enabled = canReorder()`(`:867-872`)要求 `onKeyboardReorder`
+               * **有值**且 `disableReordering === false`。键盘重排属于「多提交操作」
+               * (rebase/reorder/squash 那一族),本插件**没有**那套界面
+               * (`Snapshot.forcePushBranches` 的注释第 2 条登记了同一处缺口)。
+               * 传一个 no-op 只会把一个「点了没反应的项」从灰变成亮 —— 更坏。
+               * 所以**不接**(审计 §2.9 第 9 行把这一族归为需要产品裁决)。
+               */
+              canResetToCommits={true}
+              onResetToCommit={onResetToCommit}
+              onCheckoutCommit={onCheckoutCommit}
+              onRevertCommit={onRevertCommit}
+              onCreateTag={onCreateTag}
+              onDeleteTag={onDeleteTag}
+              onCherryPick={onCherryPick}
+              /*
+               * ⭐ `isMultiCommitOperationInProgress` **必须显式传 `false`**(探针实测:
+               * 不传时它是 `undefined`,而 `canCherryPick()` 的判据逐字是
+               * `isMultiCommitOperationInProgress === false`(`commit-list.tsx:867-872`)
+               * —— `undefined === false` 是 **false** ⇒ **即使用 `onCherryPick` 传了,
+               * 「Cherry-pick Commit…」仍然灰着**。这正是审计那一族缺陷的同一个形状:
+               * 「props 传了、判据还有另一半没人给」。
+               *
+               * 为什么可以确定它是 `false`:上游的语义是「正在做多提交操作
+               * (rebase / squash / reorder / cherry-pick 的冲突解决阶段)」,
+               * 而本插件**没有那套界面**(同一条依据见 `Reorder Commit` 那一段),
+               * 所以「没有多提交操作在进行」是**我们确实知道**的事实,不是猜的。
+               * 它同时是 `canReorder()` 的第三个合取项 —— 那个仍因 `onKeyboardReorder`
+               * 缺席而恒灰(`disableReordering === false` 也照上游默认给上)。
+               */
+              isMultiCommitOperationInProgress={false}
+              disableReordering={false}
+              /*
+               * ⚠️ `tagsToPush` **必须保持 `undefined`(即:一个字都不传)** ——
+               * 这一条是**实测定下来的**,不是从类型上猜的:
+               *
+               * `getUnpushedTags`(`commit-list.tsx:373-377`)逐字是
+               * `if (tagsToPush === undefined) return undefined`,然后
+               * `getDeleteTagsMenuItem`(`:893-899`)在 `unpushedTags === undefined` 时
+               * **返回 null ⇒ 项根本不入列**。
+               *
+               * 而**传一个空数组**会走另一条路:`commit.tags.length === 1` 时它返回
+               * `{ enabled: unpushedTags.includes(tagName) }` ⇒ 一个**在列但恒灰**的
+               * `Delete tag v1.0.0`。本探针第一次跑就是这个读数(见
+               * `history-commit-actions-probe.mjs` 的 N1),而它**是本轮引入的**:
+               * 改前不传 `tagsToPush`,`getUnpushedTags` 回 `undefined` ⇒ 项不入列。
+               *
+               * ⇒ 结论:**不传**才是与改前一致、且不会多出一个假项的那一档。
+               * 「传全部标签」更不可接受:那会谎报「都没推送」,让一个**已推送**的标签
+               * 可以被本地删掉(与上游的守卫相反)。
+               *
+               * 缺口登记(要真正点亮这一项需要什么):一个「哪些 tag 还没推送」的数据源 ——
+               * 上游 `lib/stores/git-store.ts` 的 `loadTagsToPush` 走
+               * `git log --tags --not --remotes`;本插件**没有**这条路由,
+               * 而 `sync.tagCount` 只是**个数**(`git-service.ts:336`)。
+               */
               /*
                * ⭐ 必须传,否则上游 `commit-list.tsx:816-822` 的
                * 「Create Branch from Commit」是一个**没有 enabled 守卫、action 里却被
@@ -1262,12 +1795,236 @@ export function HistoryView(props: { store: GitStore; snap: Snapshot }): ReactNo
           onDone={onBranchDialogDone}
         />
       )}
+
+      {/*
+        提交行右键 ▸ Amend Commit… 的**强推警告**(上游 `WarnForcePushDialog`,
+        `ui/multi-commit-operation/dialog/warn-force-push-dialog.tsx:38-78`;
+        文案是那一份的中文对应:`<operation> Will Require Force Push` +
+        「Force pushing will alter the history on the remote …」)。
+
+        只在「这条提交已经在远端」时出现 —— 理由与判据见上面 `amendTarget` 的注释。
+        上游那个对话框还有一个「Do not show this message again」复选框(它写回
+        `setConfirmForcePushSetting`);本插件**没有** `askForConfirmationOnForcePush`
+        这个偏好项(`toolbar.tsx:787` 已登记的同一处缺口),所以不画一个**不落盘**的
+        复选框(那会是一个「勾了没用」的假开关),按上游默认值恒为 `true` 处理。
+      */}
+      {amendTarget !== null && (
+        <ConfirmDialog
+          title="修改提交需要强推"
+          body={`确定要修改提交 ${amendTarget.sha.slice(0, 7)} 吗?\n\n这条提交已经在远端。修改之后,你需要用「强推」把分支推上去;强推会改写远端的历史,可能给同样在这个分支上协作的人带来麻烦。`}
+          confirmText="开始修改" danger={true}
+          onDone={onAmendDialogDone}
+        />
+      )}
+
+      {/*
+        提交行右键 ▸ Undo Commit… 的**本地改动确认**(上游 `WarnLocalChangesBeforeUndo`,
+        `ui/undo/warn-local-changes-before-undo.tsx`)。文案与 Changes 页签那条撤销条
+        (`changes-view.tsx` 的 `confirmUndo` 分支)**逐字一致** —— 同一份上游对话框的
+        同一个入口,不写第二份措辞。
+      */}
+      {undoTarget !== null && (
+        <ConfirmDialog
+          title="撤销最近一次提交?"
+          body={`${undoTarget.summary}\n\n提交会被撤销,改动保留在工作区(不会丢失),但不再处于暂存状态。`}
+          confirmText="撤销提交" danger={true}
+          onDone={onUndoDialogDone}
+        />
+      )}
+
+      {/*
+        提交右键 ▸ Reset to Commit… 的**模式选择**框。
+
+        上游没有这一档(它写死 `GitResetMode.Mixed`,`app-store.ts:5884`),所以文案没有
+        直接对照物 —— 三档的解释逐字取自 git 自己的语义与 `core/git-argv.ts:543-552`
+        的注释(Hard = 索引与工作区都重置、未提交改动丢弃;Soft = 只动 HEAD,
+        改动全留在「已暂存」;Mixed = 动 HEAD 与索引,工作区保留)。
+        形状照 `WarningBeforeReset`(`ui/reset/warning-before-reset.tsx`):`destructive`
+        + 一个说得清楚「会丢什么」的正文。
+      */}
+      {resetTarget !== null && (
+        <ResetModeDialog
+          sha={resetTarget.sha}
+          mode={resetTarget.mode}
+          onModeChange={onResetModeChange}
+          onDone={onResetModeChosen}
+        />
+      )}
+
+      {/*
+        第二道闸门:`hard` 或工作区脏 ⇒ 破坏性确认。
+        正文照上游 `WarningBeforeReset` 的正文意译(它只说「可能丢改动」;
+        我们在 hard 那一档可以说得更确定,因为 `reset --hard` 是无条件的)。
+      */}
+      {resetConfirm !== null && (
+        <ConfirmDialog
+          title="重置会丢掉未提交的改动"
+          body={
+            resetConfirm.mode === 'hard'
+              ? `确定要硬重置到 ${resetConfirm.sha.slice(0, 7)} 吗?\n\n「硬重置」会把索引与工作区都退回那条提交:工作区里**所有**未提交的改动都会被丢弃,无法从 dsh-git 恢复。`
+              : `工作区里还有未提交的改动,确定要重置到 ${resetConfirm.sha.slice(0, 7)} 吗?\n\n重置会改动索引,工作区里的改动可能不再属于任何一次提交。`
+          }
+          confirmText="继续重置" danger={true}
+          onDone={onResetConfirmed}
+        />
+      )}
+
+      {/*
+        提交右键 ▸ Checkout Commit 的**分离头**确认(与上游的差别见 `onCheckoutCommit`)。
+      */}
+      {checkoutTarget !== null && (
+        <ConfirmDialog
+          title="检出这个提交?"
+          body={
+            `确定要检出 ${checkoutTarget.sha.slice(0, 7)}(${checkoutTarget.summary})吗?\n\n` +
+            '检出某一条提交会让仓库进入**分离头(detached HEAD)**状态:你不在任何分支上。' +
+            '这时新建的提交不属于任何分支,切到别的分支之后就很难再找回来。' +
+            '只是想看看这个提交的话,直接点它看 diff 就好,不需要检出。'
+          }
+          confirmText="检出(分离头)" danger={true}
+          onDone={onCheckoutConfirmed}
+        />
+      )}
+
+      {/*
+        提交右键 ▸ Create Tag… 的**名字输入**框(上游 `ui/create-tag/create-tag-dialog.tsx`)。
+        「轻量 vs 附注」这一档在本仓是**冻结契约**造成的差异,所以明确标出不可用并写原因
+        —— 不画一个点了没反应的选项(见 `onCreateTag` 的注释与
+        `docs/discard-lines-contract.md` §6)。
+      */}
+      {tagFor !== null && (
+        <ConfirmDialog
+          title="新建标签"
+          body={
+            `会在提交 ${tagFor.sha.slice(0, 7)} 上建一个标签。\n\n` +
+            '类型:**轻量标签(lightweight)** —— 本插件的宿主路由建的就是这一种,' +
+            '它没有 tagger、没有创建日期、没有消息,而且事后无法补(只能删了重打)。\n' +
+            '上游 GitHub Desktop 建的是附注标签(annotated,`git tag -a -m \'\' <name> <sha>`),' +
+            '我们这条契约还没改,所以那一档**不可选**。'
+          }
+          confirmText="创建标签"
+          input={{
+            value: tagFor.name,
+            placeholder: 'v1.0.0',
+            onChange: onTagNameChange,
+          }}
+          onDone={onTagDialogDone}
+        />
+      )}
     </div>
   );
 }
 
 /** 上游 `onDiffOptionsOpened` 是可选的 UI 通知(它只为遥测/焦点管理存在),这里照原样给空实现。 */
 function noop(): void {}
+
+/** Reset 的三种模式,以及它们在 git 里的确切含义(给对话框里的选项用)。 */
+const RESET_MODES: ReadonlyArray<{ mode: 'soft' | 'mixed' | 'hard'; label: string; detail: string }> = [
+  {
+    mode: 'soft',
+    label: 'Soft',
+    detail: '只把 HEAD 移到那条提交:所有改动都留在索引里,看起来全都「已暂存」。',
+  },
+  {
+    mode: 'mixed',
+    label: 'Mixed(默认)',
+    detail: '移动 HEAD 并清空索引,工作区里的文件一个字节都不动 —— 改动变成「未暂存」。',
+  },
+  {
+    mode: 'hard',
+    label: 'Hard(危险)',
+    detail: '索引与工作区一起退回那条提交:未提交的改动会被丢弃,无法从 dsh-git 恢复。',
+  },
+];
+
+/**
+ * **Reset to Commit 的模式选择框** —— 上游没有的等价物,所以这里逐条说明它为什么长这样。
+ *
+ * 上游那一项写死 `GitResetMode.Mixed`(`app-store.ts:5884`),所以桌面版**从不问模式**。
+ * 本插件的宿主路由按冻结契约支持三档(`core/git-argv.ts:566-572`),而「Mixed 是唯一
+ * 一档」这件事在界面上一旦不写清楚,用户点「Reset to Commit…」就无从知道自己的改动
+ * 会不会被丢 —— 那正是 `docs/discard-lines-contract.md` §5 点名的缺陷族
+ * (成功返回 + 破坏性后果 + 零反馈)的界面版。
+ *
+ * 形状**刻意与 `bits.tsx` 的 `ConfirmDialog` 一致**(同一个 `.gw-dialog-scrim` +
+ * `.gw-dialog` + `.gw-dialog-actions` 外壳、同样的中文「取消」),唯一多出来的是三个
+ * 选项 —— 因为 `ConfirmDialog` 的 props 面只有「单行输入框」这一种控件,
+ * 而这里需要的是三选一。**不给 `bits.tsx` 加一个只有这里用的 props**:那是把
+ * 一个共享件的接口为一个调用点撑大,以后别的线会以为它是通用能力。
+ */
+function ResetModeDialog(props: {
+  sha: string;
+  mode: 'soft' | 'mixed' | 'hard';
+  onModeChange: (mode: 'soft' | 'mixed' | 'hard') => void;
+  onDone: (okay: boolean) => void;
+}): ReactNode {
+  const titleId = useId();
+  /**
+   * 两个事件回调**必须包 `useCallback`**:`react/jsx-no-bind`
+   * (`scripts/lint-baseline.json` 是**只拦上升**的棘轮)会把组件作用域里的内联箭头
+   * 记成新增违规 —— 与 `branches-view.tsx` / `repo-bar.tsx` 记过的是同一条纪律。
+   */
+  const onKeyDown = useCallback((event: React.KeyboardEvent): void => {
+    // Esc 取消:与 `ConfirmDialog` 同一条(对话框必须有键盘退出路径)。
+    if (event.key === 'Escape') {
+      event.stopPropagation();
+      props.onDone(false);
+    }
+  }, [props]);
+  const onScrimMouseDown = useCallback((event: React.MouseEvent): void => {
+    if (event.target === event.currentTarget) { props.onDone(false); }
+  }, [props]);
+  /**
+   * 三个单选项的 `onChange`。上游的 `<input type="radio">` 必须有一个具体回调,
+   * 而每个选项的 `mode` 是 map 出来的 —— 所以这里按 `mode` 生成一个**具名**工厂,
+   * 而不是在 JSX 里写 `onChange={() => …}`(那会新增 `jsx-no-bind` 违规)。
+   */
+  const cancelDialog = useCallback((): void => { props.onDone(false); }, [props]);
+  const confirmDialog = useCallback((): void => { props.onDone(true); }, [props]);
+  const changeTo = useCallback(
+    (mode: 'soft' | 'mixed' | 'hard') => (): void => { props.onModeChange(mode); },
+    [props],
+  );
+  return (
+    <div
+      className="gw-dialog-scrim"
+      onKeyDown={onKeyDown}
+      onMouseDown={onScrimMouseDown}
+    >
+      <div className="gw-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId}>
+        <h4 id={titleId}>{`重置到 ${props.sha.slice(0, 7)}?`}</h4>
+        <p>选一种重置方式。三种方式的区别就在「索引和工作区动不动」这两件事上:</p>
+        {RESET_MODES.map((option) => (
+          <label
+            key={option.mode}
+            style={{ display: 'flex', gap: 8, alignItems: 'flex-start', margin: '0 0 10px', cursor: 'pointer' }}
+          >
+            <input
+              type="radio"
+              name="gw-reset-mode"
+              checked={props.mode === option.mode}
+              onChange={changeTo(option.mode)}
+              style={{ marginTop: 2 }}
+            />
+            <span style={{ fontSize: 12, lineHeight: 1.6, color: 'var(--dsw-alias-label-secondary)' }}>
+              <strong style={{ color: 'var(--dsw-alias-label-primary)' }}>{option.label}</strong>
+              {` — ${option.detail}`}
+            </span>
+          </label>
+        ))}
+        <div className="gw-dialog-actions">
+          <button className="gw-btn" onClick={cancelDialog}>取消</button>
+          <button
+            className={`gw-btn ${props.mode === 'hard' ? 'danger' : 'primary'}`}
+            onClick={confirmDialog}
+          >
+            下一步
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /**
  * 历史页签里的单文件 diff —— 走**同一个**移植过来的 Desktop `Diff`
@@ -1315,6 +2072,13 @@ function CommitDiff(props: {
   parentCommitish: string;
   onHideWhitespaceInDiffChanged: (checked: boolean) => void;
 }): ReactNode {
+  /**
+   * 两个具名回调。**必须包 `useCallback`**:`react/jsx-no-bind` 会把组件作用域里的
+   * 内联箭头记成新增违规(本文件那两条存量就是这么来的,别再新增)。
+   */
+  const onOpenBinary = useCallback((fullPath: string): void => {
+    void props.store.openInExternalEditor(fullPath);
+  }, [props]);
   return (
     <DesktopDiff
       input={{
@@ -1330,7 +2094,7 @@ function CommitDiff(props: {
       showSideBySideDiff={props.sideBySide}
       hideWhitespaceInDiff={props.hideWhitespace}
       onHideWhitespaceInDiffChanged={props.onHideWhitespaceInDiffChanged}
-      onOpenBinaryFile={(fullPath) => { void props.store.openInExternalEditor(fullPath); }}
+      onOpenBinaryFile={onOpenBinary}
     />
   );
 }

@@ -87,7 +87,7 @@ function isInsideConfirmDialog(target: Node): boolean {
  * `.missing` 与 `.gitHubRepository`,不需要稳定身份。
  */
 export function iconForRepoEntry(entry: RepoEntry | undefined, index: number): OcticonSymbol {
-  if (entry === undefined) return octicons.repo;
+  if (entry === undefined) { return octicons.repo; }
   return iconForRepository(repositoryForEntry(entry, index)) as OcticonSymbol;
 }
 
@@ -189,7 +189,7 @@ export function syncPresentation(snap: Snapshot): SyncPresentation {
     items: [],
   };
 
-  if (snap.current === '') return empty;
+  if (snap.current === '') { return empty; }
 
   const sync = snap.sync;
   const status = snap.status;
@@ -365,7 +365,7 @@ const RECENT_REPOS_KEY = 'dsh-git:recent-repositories';
 function readRecentRepoPaths(): string[] {
   try {
     const raw = window.localStorage.getItem(RECENT_REPOS_KEY);
-    if (raw === null) return [];
+    if (raw === null) { return []; }
     const parsed: unknown = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
   } catch {
@@ -431,7 +431,7 @@ export function useLeftPaneWidth(): number {
 
     /** 找到 `.gw-split` 与它的左栏,接上 ResizeObserver;找不到就等它出现。 */
     const attach = (): void => {
-      if (disposed) return;
+      if (disposed) { return; }
       const split = document.querySelector<HTMLElement>('.gw-split');
       const left = split?.querySelector<HTMLElement>(':scope > .left') ?? null;
       if (split === null || left === null) {
@@ -503,7 +503,7 @@ function toDesktopRepositories(
 
   return repos.map((entry, index) => {
     const cached = cache.get(entry.path);
-    if (cached !== undefined && isRepositoryCacheFresh(cached, entry)) return cached;
+    if (cached !== undefined && isRepositoryCacheFresh(cached, entry)) { return cached; }
 
     const repository = new Repository(
       entry.path,
@@ -667,7 +667,17 @@ function buildGitHubRepository(entry: RepoEntry, index: number): GitHubRepositor
 class RepoListDispatcher extends Dispatcher {
   private readonly onClone: () => void
 
-  private readonly onAdd: () => void
+  /**
+   * 「手动输入路径」那条入口(`RepositoryPanel` 的 `addingPath`)。
+   *
+   * ⚠️ 与 `onAdd` **不是**同一件事,虽然上游把两者都归在 `Add ▾` 下:
+   * `onAdd` 是宿主目录选择器(`store.addRepoViaDialog`,拿到路径后走
+   * `repos/add`,对非 git 仓库只会报错);这一条是**能填路径 + 能 offer `git init`**
+   * 的那条路(审计第 3 项)。两个入口都留,由 `showPopup` 的 `PopupType.AddRepository`
+   * 分派到 `onEnterPath`(上游那一项的名字就是「Add **Existing** Repository…」,
+   * 而「已存在」正是这一条要处理的情形:目录在,仓库还不一定在)。
+   */
+  private readonly onEnterPath: () => void
 
   private readonly notifyUnsupported: (message: string) => void
 
@@ -677,14 +687,14 @@ class RepoListDispatcher extends Dispatcher {
 
   public constructor(
     onClone: () => void,
-    onAdd: () => void,
+    onEnterPath: () => void,
     notifyUnsupported: (message: string) => void,
     onChangeAlias: (path: string) => void,
     onSetAlias: (path: string, alias: string | null) => void,
   ) {
     super()
     this.onClone = onClone
-    this.onAdd = onAdd
+    this.onEnterPath = onEnterPath
     this.notifyUnsupported = notifyUnsupported
     this.onChangeAlias = onChangeAlias
     this.onSetAlias = onSetAlias
@@ -700,7 +710,15 @@ class RepoListDispatcher extends Dispatcher {
         this.onClone()
         return Promise.resolve()
       case PopupType.AddRepository:
-        this.onAdd()
+        /*
+         * 上游那一项叫 `Add Existing Repository…`(`repositories-list.tsx:448-450`,
+         * 落点 `dispatcher.showPopup({ type: PopupType.AddRepository })`)。
+         * 我们把它接到**能填路径**的那条入口 —— 因为它是唯一能处理
+         * 「目录存在、但还不是 git 仓库」的入口(宿主 `repos/add` 对那种目录
+         * 只会抛 `not-a-repository`)。面板上另有一颗「选择目录」按钮走
+         * 宿主选择器(`this.onAdd`),两条并列,不互相取代。
+         */
+        this.onEnterPath()
         return Promise.resolve()
       case PopupType.CreateRepository:
         this.notifyUnsupported(
@@ -780,25 +798,33 @@ function DesktopRepositoriesList(props: {
   onFilterTextChanged: (text: string) => void;
   onClose: () => void;
   onOpenClone: () => void;
-  onOpenAdd: () => void;
   /** 右键 `Create/Change alias…` → 打开别名弹窗(`RepositoryPanel` 持有那个 `ConfirmDialog`)。 */
   onChangeAlias: (path: string) => void;
   /** 右键 `Remove alias` / `dispatcher.changeRepositoryAlias(…, null)` → 落库(空串 = 删别名)。 */
   onSetAlias: (path: string, alias: string | null) => void;
   /** 右键 `Remove…` → 打开移除确认框(上游 `askForConfirmationOnRemoveRepository` 的真意)。 */
   onConfirmRemove: (path: string) => void;
+  /**
+   * 「手动输入路径」→ 打开输入框(`RepositoryPanel` 的 `addingPath`)。
+   *
+   * 这是审计第 3 项那条路的入口:宿主 `repos/add` 对非 git 仓库只会抛
+   * `not-a-repository`,而 `repos/add-existing` 的 `init:true` 分支
+   * (`api.addExisting`)此前 0 调用点 —— 用户挑了一个还没 `git init` 的目录,
+   * 只得到一句「不是 git 仓库」然后无处可去。
+   */
+  onEnterPath: () => void;
 }): ReactNode {
   const { store, snap, indicators } = props;
   const dispatcher = useMemo(
     () =>
       new RepoListDispatcher(
         props.onOpenClone,
-        props.onOpenAdd,
+        props.onEnterPath,
         (message) => store.toast(message, 'err'),
         props.onChangeAlias,
         props.onSetAlias,
       ),
-    [props.onOpenClone, props.onOpenAdd, props.onChangeAlias, props.onSetAlias, store],
+    [props.onOpenClone, props.onEnterPath, props.onChangeAlias, props.onSetAlias, store],
   );
   const cache = useRef(new Map<string, Repository>());
 
@@ -808,9 +834,9 @@ function DesktopRepositoriesList(props: {
     const map = new Map<number, ILocalRepositoryState>();
     for (const repository of repositories) {
       const entry = snap.repos[repository.id];
-      if (entry === undefined) continue;
+      if (entry === undefined) { continue; }
       const indicator = indicators[entry.path];
-      if (indicator === undefined) continue;
+      if (indicator === undefined) { continue; }
       map.set(repository.id, {
         aheadBehind: { ahead: indicator.ahead, behind: indicator.behind },
         changedFilesCount: indicator.changedFiles,
@@ -884,7 +910,7 @@ function DesktopRepositoriesList(props: {
   const onViewOnGitHub = useCallback(
     (repository: Repositoryish): void => {
       const gitHub = repository instanceof Repository ? repository.gitHubRepository : null;
-      if (gitHub === null) return;
+      if (gitHub === null) { return; }
       window.open(gitHub.htmlURL ?? `https://github.com/${gitHub.fullName}`, '_blank', 'noopener');
     },
     [],
@@ -963,8 +989,8 @@ export function RepositoryPanel(props: {
    */
   useEffect(() => {
     const close = (event: MouseEvent): void => {
-      if (!(event.target instanceof Node)) return props.onClose();
-      if (panelRef.current?.contains(event.target) === true) return;
+      if (!(event.target instanceof Node)) { return props.onClose(); }
+      if (panelRef.current?.contains(event.target) === true) { return; }
       if (isInsideConfirmDialog(event.target)) {
         return;
       }
@@ -980,9 +1006,9 @@ export function RepositoryPanel(props: {
     void (async () => {
       const next: Record<string, RepoIndicators> = {};
       for (const repo of props.snap.repos.slice(0, 20)) {
-        if (repo.missing === true) continue;
+        if (repo.missing === true) { continue; }
         const [status, sync] = await Promise.all([api.status(repo.path), api.syncState(repo.path)]);
-        if (dead) return;
+        if (dead) { return; }
         if (status.ok) {
           next[repo.path] = {
             ahead: sync.ok ? sync.value.ahead : 0,
@@ -1053,6 +1079,127 @@ export function RepositoryPanel(props: {
     },
     [snap.repos, store],
   );
+
+  /*
+   * 「添加仓库」那条路(2026-10 补 **init 分支**)。
+   *
+   * ## 缺口是什么(逐条,不假装)
+   *
+   * 上游 `Add ▾` 的两个 entry 是**两件事**:
+   *   · `Add Existing Repository…`(`ui/repositories-list/repositories-list.tsx:448-450`,
+   *     发 `PopupType.AddRepository`)—— 加入一个**已经是** git 仓库的目录;
+   *   · `Create New Repository…`(`:452-454`,发 `PopupType.CreateRepository`)
+   *     —— 上游那是一个**完整向导**(`ui/add-repository/create-repository.tsx`:
+   *     目录、名字、README/.gitignore/License 选项、创建后立即提交)。
+   *
+   * 本插件此前只有第一条的前半段(挑目录),而宿主对**不是 git 仓库**的目录只有
+   * 一句 `not-a-repository`(「<path> 不是 git 仓库(**可以先初始化**)。」,
+   * `src/host/routes.ts:490`)。那句「可以先初始化」在界面上**没有任何入口** ——
+   * 因为 `repos/add-existing` 的 `init:true` 分支(`routes.ts:508-512`,
+   * 内部就是 `deps.git.init({ path, defaultBranch: 'main' })`)与
+   * `api.addExisting`(`api.ts:794`)**都已经写好、全仓 0 调用点**
+   * (审计 `docs/dead-code-and-missing-state-audit.md` §2.3 第 8 项)。
+   *
+   * ## 这里接的是哪一半(以及为什么不接整份向导)
+   *
+   * 接的是「**已经有一个目录,想把它变成受管理的仓库**」这一半:
+   * 输入/粘贴一个绝对路径 ⇒ 先按「已存在的仓库」加(`init=false`,
+   * 等价于原来的 `api.addRepo`,但**不吞错误**)⇒ 宿主回 `not-a-repository` 时
+   * 弹一次确认「要在这里 `git init` 吗」⇒ 确认后才用 `init=true` 重调。
+   *
+   * **不接**的是上游那个向导的另外三样(README / .gitignore / License 模板 +
+   * 创建后立即提交):它们需要逐份模板文件与那套表单,画一个只有一半的向导就是
+   * 用户这次报的同一类缺陷(「看着能点、实际少一半」)。所以这里**不画**那三样,
+   * 也不假装能选;`PopupType.CreateRepository` 那一条仍然给一句实话(见
+   * `RepoListDispatcher.showPopup` 的 `case`)。
+   *
+   * ## 为什么用「输入路径」而不是直接弹宿主目录选择器
+   *
+   * 两条路都留着,刻意**不取代**:
+   *   · `store.addRepoViaDialog()`(原生/host 目录选择器)仍是工具栏那个 `+` 的行为
+   *     —— 它快,而且拿到的是绝对路径;
+   *   · `ConfirmDialog` 的单行输入框是给「我要填/粘一个路径」以及
+   *     **「选择器不可用」**(远端/SSH 部署下 native 选择器会抛,
+   *     见 `store.addRepoViaDialog` 的 catch)那两种情形的。
+   *     `addRepo` 原来那句兜底提示就是让人「用『手动输入路径』直接填写」——
+   *     而那个入口**从来不存在**,这句话也一直在指一个没有的按钮。
+   *     ⇒ 这就是它。
+   */
+  const [addingPath, setAddingPath] = useState<string | null>(null);
+  /** 已经试过一次、宿主说是「不是 git 仓库」的那个路径 ⇒ 弹 init 确认。 */
+  const [initOffer, setInitOffer] = useState<{ path: string; reason: string } | null>(null);
+
+  const onAddingPathChange = useCallback((value: string) => {
+    setAddingPath(value);
+  }, []);
+
+  /**
+   * 「打开输入路径框」的具名引用。
+   *
+   * **为什么不能写成 JSX 内联箭头**:`react/jsx-no-bind`(`scripts/lint-baseline.json`
+   * 是**只拦上升**的棘轮)会把组件作用域里的内联箭头记成新增违规 ——
+   * 与 `history-view.tsx` 记过的是同一条纪律。`setAddingPath` 本身引用稳定,
+   * 所以这个 `useCallback` 的依赖数组是空的。
+   */
+  const openPathEntry = useCallback(() => {
+    setAddingPath('');
+  }, []);
+
+  /**
+   * 第一步:按「已存在的仓库」加(`init = false`)。
+   *
+   * 失败时**不吞**:`not-a-repository` 且路径是具体的(不是 `@pick`)⇒ 换成
+   * `initOffer` 那一档;其余错误原话回显(不在这一层重写措辞)。
+   */
+  const onAddingPathDone = useCallback((okay: boolean) => {
+    const target = addingPath;
+    setAddingPath(null);
+    /*
+     * ⚠️ **同时收掉上一次的 init 提议**。不收的话会留下一个**过期对话框**:
+     * 用户上一次被问「要在这里 `git init` 吗」之后按了取消(或又开了一次输入框),
+     * 那个 `initOffer` 仍在 state 里 ⇒ 对话框还画着,而它指向的是**上一个路径**。
+     * 下一次尝试失败时会被**换掉**(setInitOffer),但「取消之后它还在」这一段时间里
+     * 用户点它就会对一个已经不打算处理的目录执行 `git init`。
+     * 探针实测(`add-existing-repo-probe.mjs` 第一次跑 D2):`bad-request` 那一档
+     * 读到 `dialogs=这个目录还不是 git 仓库` —— 那是**上一个夹具**留下的。
+     */
+    setInitOffer(null);
+    if (!okay || target === null) {
+      return;
+    }
+    const path = target.trim();
+    if (path === '') {
+      store.toast('请填写一个目录的绝对路径。', 'err');
+      return;
+    }
+    void store.addRepoWithInit(path, false).then((error) => {
+      if (error === null) {
+        props.onClose();
+        return;
+      }
+      if (error.code === 'not-a-repository') {
+        setInitOffer({ path, reason: error.message });
+        return;
+      }
+      store.toast(error.message, 'err');
+    });
+  }, [addingPath, props, store]);
+
+  /** 第二步:`git init` 那一档的确认 / 取消(与 `onConfirmRemove` 同一条纪律:先取值再清空)。 */
+  const onInitOfferDone = useCallback((okay: boolean) => {
+    const target = initOffer;
+    setInitOffer(null);
+    if (!okay || target === null) {
+      return;
+    }
+    void store.addRepoWithInit(target.path, true).then((error) => {
+      if (error !== null) {
+        store.toast(error.message, 'err');
+        return;
+      }
+      props.onClose();
+    });
+  }, [initOffer, props, store]);
 
   const query = filter.trim().toLowerCase();
   const linkedRemotes = new Set(
@@ -1203,6 +1350,30 @@ export function RepositoryPanel(props: {
           '.gw-remote-section[data-gw-remote-section]{flex:0 0 auto;min-height:0;border-top:1px solid var(--dsw-alias-border-l1);margin-top:4px}',
         ].join('')}</style>
         <div className="gw-repo-local" data-gw-repo-local>
+          {/*
+            上游没有这一行(`Add ▾` 只有三个菜单项),所以这里**如实标注**它是我们补的:
+            审计第 3 项那条路(「目录还不是 git 仓库」)需要一个**能填路径**的入口 ——
+            `store.addRepo` 原有的兜底提示一直在指「用『手动输入路径』直接填写」,
+            而那个入口从来不存在。位置放在列表上方(与工具栏 `+` 那条目录选择器并列),
+            因为它做的是**同一件事的另一种输入方式**,不是列表的一部分。
+          */}
+          <div className="gw-repo-addbar" style={{ display: 'flex', gap: 6, padding: '0 8px 6px' }}>
+            <button
+              className="gw-btn ghost"
+              style={{ flex: 1, minWidth: 0 }}
+              title="填写/粘贴一个目录的绝对路径;如果它还不是 git 仓库,可以在这里 git init"
+              onClick={openPathEntry}
+            >
+              输入路径添加仓库…
+            </button>
+            <button
+              className="gw-btn ghost"
+              title="用系统的目录选择器挑一个已经在 git 里的仓库"
+              onClick={props.onOpenAdd}
+            >
+              选择目录
+            </button>
+          </div>
           <DesktopRepositoriesList
             store={store}
             snap={snap}
@@ -1211,7 +1382,14 @@ export function RepositoryPanel(props: {
             onFilterTextChanged={setFilter}
             onClose={props.onClose}
             onOpenClone={props.onOpenClone}
-            onOpenAdd={props.onOpenAdd}
+            /*
+             * ⭐ 手动输入路径(以及「不是 git 仓库 ⇒ 要不要 `git init`」那条路)。
+             * 上游那一项是 `Add Existing Repository…`(`repositories-list.tsx:448-450`),
+             * 我们在这里补的是它**缺的另一半**:见上面那段长注释。
+             * 与面板上那颗「选择目录」(⇒ `props.onOpenAdd` ⇒ 宿主目录选择器)是
+             * **两条并列入口**,后者不删(「先做,不删」)。
+             */
+            onEnterPath={openPathEntry}
             onChangeAlias={onChangeAlias}
             onSetAlias={onSetAlias}
             onConfirmRemove={onConfirmRemove}
@@ -1401,6 +1579,51 @@ export function RepositoryPanel(props: {
           }}
         />
       )}
+
+      {/*
+        第 1 步:**输入目录的绝对路径**(审计第 3 项的入口)。
+        形状与 `aliasFor` 那条一致(`ConfirmDialog` 的单行输入框),
+        措辞里点明「已经是 git 仓库就加进来,不是的话下一步会问你要不要 init」——
+        否则用户填一个空目录、被问「要不要 git init」时会不知道为什么。
+      */}
+      {addingPath !== null && (
+        <ConfirmDialog
+          title="用路径添加仓库"
+          body={
+            '填写(或粘贴)一个目录的**绝对路径**。\n\n' +
+            '如果这个目录已经是 git 仓库,会直接加进清单;' +
+            '如果它还不是,下一步会问你**要不要在这里执行 `git init`**。'
+          }
+          confirmText="添加"
+          input={{ value: addingPath, placeholder: '/home/me/project', onChange: onAddingPathChange }}
+          onDone={onAddingPathDone}
+        />
+      )}
+
+      {/*
+        第 2 步:**`git init` 的确认**。
+        上游那一半在上游是 `Create New Repository…` 的**完整向导**
+        (`ui/add-repository/create-repository.tsx`:目录 / 名字 / README / .gitignore /
+        License / 首个提交)—— 我们**没有**那套模板与表单,所以这里只做**承诺得住**的
+        那一件事:在这个目录里 `git init`(宿主 `routes.ts:508-512` →
+        `git-service.ts` 的 `init({ path, defaultBranch: 'main' })`),
+        并**明确写出默认分支是 `main`**、以及「不会替你写 README/.gitignore/LICENSE、
+        也不会替你提交」这三件事 —— 不画一个点了没反应的选项。
+      */}
+      {initOffer !== null && (
+        <ConfirmDialog
+          title="这个目录还不是 git 仓库"
+          body={
+            `${initOffer.reason}\n\n` +
+            `要在 ${initOffer.path} 里执行 \`git init\` 吗?\n` +
+            '初始分支名用 `main`。\n\n' +
+            '⚠️ 这个流程只做 `git init` 这一件事:不会替你创建 README / .gitignore / LICENSE,' +
+            '也不会替你提交(上游那个「新建仓库」向导有那几项,本插件还没有接)。'
+          }
+          confirmText="在这里 git init"
+          onDone={onInitOfferDone}
+        />
+      )}
     </>
   );
 }
@@ -1435,7 +1658,7 @@ function RemoteRow(props: { repo: RemoteRepo; linked: boolean; onHide: () => voi
 
 /** 仓库条目 → 展示名。 */
 export function repoLabel(entry: RepoEntry | undefined, fallbackPath: string): string {
-  if (entry === undefined) return fallbackPath === '' ? '选择仓库' : basename(fallbackPath);
+  if (entry === undefined) { return fallbackPath === '' ? '选择仓库' : basename(fallbackPath); }
   return entry.alias ?? entry.name;
 }
 

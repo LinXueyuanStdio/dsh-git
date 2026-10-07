@@ -5,9 +5,17 @@
  */
 
 import { api, unwrap, waitForRoutes, type AuthStatePayload, type HealthPayload, type RemoteRepo } from './api.ts';
-import { fileStatusKindOf } from './file-kind.ts';
+import { fileStatusKindOf, supportsLineSelection } from './file-kind.ts';
 import { RepoStateCache, type RepoScopedSnapshot } from './repo-state-cache.ts';
-import type { LineSelectionSpec } from '../core/partial-stage.ts';
+import { buildPartialPatchFromRaw, type LineSelectionSpec } from '../core/partial-stage.ts';
+/*
+ * `parsePatch` 是**客户端**那份解析器(`src/client/diff-rows.ts`,内部就是镜像的
+ * `DiffParser`)—— 行级丢弃的补丁必须由与屏幕上**同一份**解析结果构造,因为
+ * `buildPartialPatchFromRaw` 吃的 hunk 下标就是 DiffSelection 的行号空间
+ * (`hunk.unifiedDiffStart + 行内下标`)。用另一份解析器会让「屏幕上选的那几行」与
+ * 「补丁里的那几行」错位,而 `git apply` **不会报错**。
+ */
+import { parsePatch } from './diff-rows.ts';
 /*
  * 上游 `models/progress.ts`（与上游一致，140 行，零 import）。**只作类型**使用 ——
  * `import type` 不产生运行期边，所以它不会把镜像的任何东西拉进客户端包。
@@ -32,6 +40,19 @@ import {
   getHideWhitespaceInChangesDiff, getHideWhitespaceInHistoryDiff, getShowSideBySideDiff,
   setHideWhitespaceInChangesDiff, setHideWhitespaceInHistoryDiff, setShowSideBySideDiff,
 } from './diff-mode.ts';
+
+/**
+ * 网络动作在飞期间**轮询宿主进度**的间隔(ms)。
+ *
+ * 为什么是轮询而不是流:我们的 host 是请求/响应路由,而 `push` 那条请求
+ * **一直阻塞到推完**(它的响应就是「推完了」),进度搭不了自己的车 ⇒ 走一条
+ * 便宜的旁路路由(`api.syncProgress`,只查宿主内存里一张 Map、不跑子进程)。
+ *
+ * 250ms 的依据:git 自己把进度行节流到「每秒最多几条」(`progress.c` 的
+ * `progress_update`),所以比这更密不会多拿到信息,只会白发请求;
+ * 而 ~3s 的一次推送能拿到 ~10 个采样点,足够让进度条看起来在动。
+ */
+const SYNC_PROGRESS_POLL_MS = 250;
 
 /** 页签。 */
 export type TabId = 'changes' | 'history' | 'code' | 'issues' | 'pulls' | 'actions';
@@ -127,6 +148,99 @@ function clearPartialAfterCommit(
 }
 
 /**
+ * **单文件提交时用「占位摘要」代替空摘要** —— 上游 `prepopulateCommitSummary`。
+ *
+ * 逐字对上游(`ui/changes/filter-changes-list.tsx:935-936`):
+ * ```ts
+ * const prepopulateCommitSummary =
+ *   filesSelected.length === 1 && !repository.isTutorialRepository
+ * ```
+ * `filesSelected` 是**纳入提交**的那些文件(`:925-928` 的
+ * `f.selection.getSelectionType() !== DiffSelectionType.None`),在我们的模型里就是
+ * `includedFiles()`(`includeState !== 'none'`,含 `partial`)。
+ *
+ * **唯一不复现的一项**是 `!repository.isTutorialRepository`:那是 Desktop 的
+ * onboarding 教程仓库(我们产品里没有教程仓库这个概念)⇒ 这一项恒为真,与上游
+ * 默认(非教程仓库)完全一致。这是**有意的**、写在 `docs/changes-commit-parity.md` 的差异。
+ * @param files - **纳入提交**的文件清单(不是工作区全部文件)。
+ * @returns true = 摘要可以为空,提交时改用占位摘要。
+ */
+export function prepopulateCommitSummaryOf(files: readonly ChangedFile[]): boolean {
+  return files.length === 1;
+}
+
+/**
+ * 提交摘要输入框的占位文本 —— 上游 `getPlaceholderMessage`
+ * (`ui/changes/filter-changes-list.tsx:859-883` 逐行):
+ *
+ * ```ts
+ * if (!prepopulateCommitSummary) return 'Summary (required)'
+ * const fileName = basename(firstFile.path)
+ * switch (firstFile.status.kind) {
+ *   case New: case Untracked: return `Create ${fileName}`
+ *   case Deleted:             return `Delete ${fileName}`
+ *   default:                  return `Update ${fileName}`
+ * }
+ * ```
+ *
+ * 两处**已登记**的取舍:
+ *  1. 非单文件时的文案按仓库既有约定(goal §11.9「用户可见文案本地化」)写成
+ *     `摘要(必填)`,对应上游的 `Summary (required)`;单文件那三种是
+ *     `Create/Delete/Update <basename>` 的**逐字**上游文案(它们是拼出来的标题,不是 UI 文案)。
+ *  2. 上游按解析后的 `AppFileStatusKind` 分流,我们按 porcelain 字母分流
+ *     (`A`/`untracked` → Create、`D` → Delete、其余 → Update)。两边的分流在
+ *     `New|Untracked / Deleted / Modified / Renamed / Copied / Conflicted` 六档上
+ *     **逐例实测等价**(判据:`docs/probes/commit-form-parity-probe.mjs` 的
+ *     R23(未跟踪 ⇒ Create)、R24(删除 ⇒ Delete)、R27–R29(重命名 / 复制 / 冲突 ⇒ Update),夹具形状逐字照
+ *     `src/core/parse.ts:68-90` 的产出)。**没有**实测的只有「上游把 New 与 Untracked
+ *     分成两个 kind」这一点 —— 我们的模型用**一个** `untracked` 标志表示它们,两档都归 Create。
+ * @param files - **纳入提交**的文件清单。
+ * @returns 占位文本(它**不是**装饰:见 `summaryOrPlaceholderOf`)。
+ */
+export function commitPlaceholderOf(files: readonly ChangedFile[]): string {
+  if (!prepopulateCommitSummaryOf(files)) {
+    return '摘要(必填)';
+  }
+  const only = files[0];
+  const name = only.path.split('/').pop() ?? only.path;
+  const letter = only.unstaged ?? only.staged ?? 'M';
+  if (letter === 'A' || only.untracked === true) {
+    return `Create ${name}`;
+  }
+  if (letter === 'D') {
+    return `Delete ${name}`;
+  }
+  return `Update ${name}`;
+}
+
+/**
+ * **真正会被提交的摘要** —— 上游 `commit-message.tsx:587-592` 的 `summaryOrPlaceholder`:
+ *
+ * ```ts
+ * get summaryOrPlaceholder() {
+ *   return this.props.prepopulateCommitSummary && !this.state.commitMessage.summary
+ *     ? this.props.placeholder
+ *     : this.state.commitMessage.summary
+ * }
+ * ```
+ *
+ * 三个必须逐字保留的细节(少一个就会与上游分叉,判据都在
+ * `docs/probes/commit-form-parity-probe.mjs`):
+ *  1. `!summary` 是**空串判定**,不是 `isEmptyOrWhitespace` ⇒ **全空白**的摘要
+ *     (`'   '`)**不会**被占位取代 ⇒ 它算「空白摘要」⇒ 按钮**禁用**(R02);
+ *  2. 这条替换既喂 `buttonEnabled` 里的 `!isSummaryBlank`(`:1602`),**也喂提交载荷**
+ *     (`:620` 的 `summary: this.summaryOrPlaceholder`)⇒ 单文件 + 空摘要点下去,
+ *     提交标题就是 `Update <文件名>`,**不是空字符串**(R01/R10/R20/R23/R24);
+ *  3. 它按**纳入提交的文件数**算(1 个才算单文件),与工作区文件总数无关(R10)。
+ * @param summary - 表单里用户实际输入的摘要(可能是空串)。
+ * @param files - **纳入提交**的文件清单。
+ * @returns 界面判定与提交载荷共用的那条摘要。
+ */
+export function summaryOrPlaceholderOf(summary: string, files: readonly ChangedFile[]): string {
+  return prepopulateCommitSummaryOf(files) && !summary ? commitPlaceholderOf(files) : summary;
+}
+
+/**
  * 「当前这份 diff 对应哪个目标」的**唯一**一处定义 —— 请求序号与陈旧判定都靠它。
  *
  * 为什么必须抽出来(而不是留在 `loadDiff()` 里):这个 key 有两个消费方 ——
@@ -150,6 +264,18 @@ export interface Snapshot {
   ready: boolean;
   /** 服务端返回的错误(仓库清单等全局错误)。 */
   globalError: GitError | null;
+  /**
+   * 最近一次**推送失败**的原始错误;`null` = 没有尚未关闭的失败弹窗。
+   *
+   * 为什么原样放 `GitError` 而不在这里折成「弹窗种类」:种类是**表现层**的判断
+   * (`bits.tsx` 的 `pushFailureKindOf`,判据照上游
+   * `ui/dispatcher/error-handlers.ts`),放两份必然分叉。这里只搬运宿主的机器可读错误
+   * (`code` + `message` + `detail`)。
+   *
+   * 上游对应物:`app-store.ts:5005-5010` 的 `_pushError` → `PopupManager.addErrorPopup`
+   * (`lib/popup-manager.ts:131`)把错误推进**弹窗队列**;关闭 = 把队首 pop 掉。
+   */
+  pushFailure: GitError | null;
   repos: RepoEntry[];
   hidden: string[];
   canPickDirectory: boolean;
@@ -263,6 +389,7 @@ function initial(): Snapshot {
   return {
     ready: false,
     globalError: null,
+    pushFailure: null,
     repos: [],
     hidden: [],
     canPickDirectory: false,
@@ -356,6 +483,18 @@ export class GitStore {
    * 否则「默认值」就有了第二份真源。
    */
   private readonly repoStates = new RepoStateCache({ initial: () => repoScopedOf(initial()) });
+
+  /**
+   * 定时器:**网络动作在飞期间**的进度轮询(见 {@link startSyncProgressPolling})。
+   *
+   * 与 `pollTimer`(`:503`,每 5s 一次完整 `refreshStatus`)刻意**分开**:
+   * 这个每 250ms 只查一张宿主内存表,合成一个会让工作区刷新变成 4 次/秒。
+   *
+   * ⚠️ 声明位置上为什么在这里而不挨着 `pollTimer`:那一带的几个字段都在
+   * **constructor 之后**(存量 `member-ordering` 违规 4 条),再往那儿加一个就是
+   * 第 5 条新增违规(`check-lint` 会红)。本字段放在 constructor 之前。
+   */
+  private syncProgressTimer: ReturnType<typeof setInterval> | undefined;
 
   /**
    * @param sessionId - 当前会话 id;用于问宿主「这个会话在哪个工作区」,
@@ -485,7 +624,8 @@ export class GitStore {
         workspacePath = detected.value.path;
         autoAdded = detected.value.added === true;
         detectReason = detected.value.reason ?? '';
-        if (detected.value.repos.length > 0) list = detected.value.repos;
+        // `curly` 是硬闸门(见 `.eslintrc.yml` 的 BUILTIN 段):单行 if 也必须带花括号。
+        if (detected.value.repos.length > 0) { list = detected.value.repos; }
       }
 
       // 2) 选中优先级:当前工作区项目 → 宿主持久化的上次选中 → 清单第一个。
@@ -514,7 +654,7 @@ export class GitStore {
         this.toast(`已自动加入当前项目:${current.split('/').pop() ?? current}`);
       }
       if (current !== '') {
-        if (current !== repos.value.lastSelected) void api.selectRepo(current);
+        if (current !== repos.value.lastSelected) { void api.selectRepo(current); }
         await this.refreshAll();
       }
     } else {
@@ -536,8 +676,13 @@ export class GitStore {
    * @param preferred - 宿主记住的上次选中路径(可选)。
    */
   private pickInitial(repos: readonly RepoEntry[], preferred?: string): string {
-    if (this.state.current !== '' && repos.some((r) => r.path === this.state.current)) return this.state.current;
-    if (preferred !== undefined && preferred !== '' && repos.some((r) => r.path === preferred)) return preferred;
+    // `curly` 是硬闸门:三个提前 return 都带花括号(见 `.eslintrc.yml` 的 BUILTIN 段)。
+    if (this.state.current !== '' && repos.some((r) => r.path === this.state.current)) {
+      return this.state.current;
+    }
+    if (preferred !== undefined && preferred !== '' && repos.some((r) => r.path === preferred)) {
+      return preferred;
+    }
     return repos[0]?.path ?? '';
   }
 
@@ -553,7 +698,7 @@ export class GitStore {
   startPolling(intervalMs = 5000): () => void {
     this.stopPolling();
     this.pollTimer = setInterval(() => {
-      if (this.state.current === '' || this.state.busy !== '') return;
+      if (this.state.current === '' || this.state.busy !== '') { return; }
       void this.refreshStatus();
     }, intervalMs);
     return () => this.stopPolling();
@@ -604,6 +749,54 @@ export class GitStore {
   }
 
   /**
+   * **添加一个仓库,并在它不是 git 仓库时允许显式 `git init`** ——
+   * 上游 `PopupType.AddRepository` / `CreateRepository` 两条路的**共同落点**。
+   *
+   * ## 为什么需要它(缺口逐条)
+   *
+   * 在这条之前,「添加仓库」只有 `store.addRepo`(`:698`)一条路,而它打的
+   * `repos/add`(`src/host/routes.ts:475-505`)对**不是 git 仓库的目录**只有一个结局:
+   * `throw new GitServiceError('not-a-repository', '<path> 不是 git 仓库(可以先初始化)。')`。
+   * 宿主那句话里的「可以先初始化」在本插件里**没有对应入口** ——
+   * `repos/add-existing`(`routes.ts:503`)带 `init: true` 的分支**已经实现**、
+   * `api.addExisting`(`api.ts:794`)**已经导出**,全仓 **0 个调用点**(审计
+   * `docs/dead-code-and-missing-state-audit.md` §2.3 第 8 项)。于是用户挑了一个
+   * 还没 `git init` 的目录,只得到一句「不是 git 仓库」,然后无处可去。
+   *
+   * ## 为什么**先试不 init、失败才提示**(而不是无条件 init)
+   *
+   * `git init` 会在用户挑的目录里**写东西**(`.git/`)。对已经存在的仓库它是无害的,
+   * 但对一个用户只是「想加进来」的普通目录,静默初始化就是替用户做了一个他没要求的
+   * 决定。所以:
+   *
+   *  1. `init = false` 先走一遍(等价于 `addRepo`,但**不吞错误**,把 `GitError` 原样
+   *     交回调用方);
+   *  2. 只有调用方**显式**带着 `init = true` 再调一次时,才让宿主执行 `git init`
+   *     (`routes.ts:508-512` 的 `deps.git.init({ path, defaultBranch: 'main' })`)。
+   *
+   * ## 调用方是谁(必须自己先确认过)
+   *
+   * `repo-bar.tsx` 的 `RepositoryPanel`:`not-a-repository` 时弹一次确认框
+   * (「这里还没有 git 仓库,要在这里 `git init` 吗?」),确认后才用 `init = true`
+   * 重调。**本方法自己从不问用户** —— 与宿主 `git-service.ts:1127` 那条
+   * 「调用方必须自己确认过再调」是同一条纪律。
+   * @param path - 用户给的**绝对路径**(宿主会自行 `repoRoot()` 归一化)。
+   * @param init - true ⇒ 目录不是 git 仓库时允许 `git init` 建一个。
+   * @returns `null` = 成功(仓库已加入清单并已刷新);否则是宿主的原始 `GitError`,
+   *   **由调用方决定怎么呈现**(本方法不 toast,因为它没法区分「先试」与「确认后重试」)。
+   */
+  public async addRepoWithInit(path: string, init: boolean): Promise<GitError | null> {
+    const result = await api.addExisting(path, init);
+    if (!result.ok) {
+      return result.error;
+    }
+    this.emit({ repos: result.value.repos, current: this.pickInitial(result.value.repos) });
+    this.toast(init ? '已在此目录初始化 git 仓库并加入清单' : '已添加仓库');
+    await this.refreshAll();
+    return null;
+  }
+
+  /**
    * 点「Add / + 添加」时选目录。
    *
    * 优先用**客户端**的原生弹窗(`uiWorkspace.pickDirectory`),它拿到的是绝对路径;
@@ -614,7 +807,7 @@ export class GitStore {
     if (this.pickDirectory !== undefined) {
       const attempt = this.pickDirectory();
       // null = 这个客户端没有选择器 → 回退到 host 侧弹窗
-      if (attempt === null) return this.addRepo('@pick');
+      if (attempt === null) { return this.addRepo('@pick'); }
       let chosen: string | null;
       try {
         chosen = await attempt;
@@ -626,7 +819,7 @@ export class GitStore {
         );
         return false;
       }
-      if (chosen !== null && chosen !== '') return this.addRepo(chosen);
+      if (chosen !== null && chosen !== '') { return this.addRepo(chosen); }
       return false; // 用户取消:静默(取消不是错误)
     }
     return this.addRepo('@pick');
@@ -653,7 +846,7 @@ export class GitStore {
   }
 
   async selectRepo(path: string): Promise<void> {
-    if (path === this.state.current) return;
+    if (path === this.state.current) { return; }
     // 宿主侧持久化,重开页签/重启后恢复
     void api.selectRepo(path);
     /*
@@ -701,7 +894,7 @@ export class GitStore {
 
   async refreshStatus(): Promise<void> {
     const path = this.state.current;
-    if (path === '') return;
+    if (path === '') { return; }
     const [status, sync] = await Promise.all([api.status(path), api.syncState(path)]);
     if (status.ok && sync.ok) {
       // 纳入状态按**路径**存:文件不再是变更文件(提交掉了 / 被丢弃 / 被撤销)时
@@ -768,15 +961,15 @@ export class GitStore {
 
   async refreshBranches(): Promise<void> {
     const path = this.state.current;
-    if (path === '') return;
+    if (path === '') { return; }
     const result = await api.branches(path);
     if (result.ok) this.emit({ branches: result.value });
   }
 
   async refreshLog(reset: boolean): Promise<void> {
     const path = this.state.current;
-    if (path === '') return;
-    if (this.state.logLoading) return;
+    if (path === '') { return; }
+    if (this.state.logLoading) { return; }
     this.emit({ logLoading: true });
     const skip = reset ? 0 : this.state.log.length;
     const result = await api.log(path, 50, skip);
@@ -816,7 +1009,7 @@ export class GitStore {
 
   /** 远端页签回填角标计数。 */
   setCount(tab: TabId, value: number): void {
-    if (this.state.counts[tab] === value) return;
+    if (this.state.counts[tab] === value) { return; }
     this.emit({ counts: { ...this.state.counts, [tab]: value } });
   }
 
@@ -952,19 +1145,36 @@ export class GitStore {
 
   // ---------- 暂存动作 ----------
 
+  /**
+   * 「暂存/取消暂存」的目标文件集合 —— **选区优先,空则全量**。
+   *
+   * `selectedFiles` 来自左栏文件行的点选/多选(`store.selectFiles`),它是**用户意图**;
+   * 没有选区时退回「当前全部变更文件」,这正是 Desktop 上「没有选中任何文件时
+   * 暂存全部」的行为。
+   */
   private targetedFiles(): string[] {
     const selected = this.state.selectedFiles;
-    if (selected.length > 0) return selected;
+    if (selected.length > 0) { return selected; }
     return (this.state.status?.files ?? []).map((f) => f.path);
   }
 
-  async stageSelected(): Promise<void> {
+  /**
+   * 「暂存 / 取消暂存」两条方向的**共用落点**。
+   *
+   * 为什么单开一个私有辅助:`stageSelected` / `unstageSelected` / `stageFile` /
+   * `unstageFile` 四个公开入口的**差别只有「文件集合」与「方向」**,
+   * 而 `busy` 标签、失败呈现、`afterIndexChange()` 三件事必须完全一致
+   * (否则一条路刷状态、另一条不刷 ⇒ 界面残留旧文件列表,这正是本仓反复出现的缺陷类)。
+   * @param files - 目标文件(仓库内相对路径);空集 = 直接返回,不发请求。
+   * @param direction - `'stage'` 走 `api.stage`;`'unstage'` 走 `api.unstage`。
+   */
+  private async applyIndexAction(files: readonly string[], direction: 'stage' | 'unstage'): Promise<void> {
     const path = this.state.current;
-    if (path === '') return;
-    const files = this.targetedFiles();
-    if (files.length === 0) return;
-    this.emit({ busy: 'stage' });
-    const result = await api.stage(path, files);
+    if (path === '' || files.length === 0) { return; }
+    this.emit({ busy: direction });
+    const result = direction === 'stage'
+      ? await api.stage(path, [...files])
+      : await api.unstage(path, [...files]);
     this.emit({ busy: '' });
     if (!result.ok) {
       this.fail(result.error);
@@ -973,44 +1183,73 @@ export class GitStore {
     await this.afterIndexChange();
   }
 
+  /**
+   * **暂存**选中的文件(`git add`)—— 对应 Desktop 的「全部暂存」入口。
+   *
+   * 上游对应物:`lib/git/update-index.ts:109-175` 的 `stageFiles`(由
+   * `app-store.ts` 的 `_stageFiles` 驱动,UI 是 Changes 列表的
+   * `ChangesListFilterOptions` / 文件行右键 **Stage file**)。上游没有把
+   * `stageSelected` 这个名字给某个导出的 store 方法,但语义是同一个:
+   * **把选区里的文件整份写进索引**。
+   *
+   * ⚠️ **与本仓的「勾选 ≠ 暂存」模型的关系(必须说清,否则会以为它是第二份真源)**:
+   *
+   * 本仓的提交模型是「勾选是客户端模型、索引只在 `commit()` 那一刻 materialize」
+   * (`includeState` + `setFileIncluded`,见 `Snapshot.includeState` 的注释)。
+   * `stageSelected` 走的是**另一条**路:它**立刻写索引**(`api.stage`),
+   * 与「勾选」互不取代 ——
+   *
+   * | 入口 | 写索引的时机 | 载体 |
+   * |---|---|---|
+   * | 文件行勾选框 / 头部三态 | **提交那一刻**(`commit()` 的 materialize 段) | `includeState` |
+   * | `stageSelected` / `stageFile` | **点击那一刻** | git 索引本身 |
+   *
+   * 两条都保留(用户 2026-10 裁决:「先做,不删」):前者是 Desktop 的模型,
+   * 后者是「我想现在就 `git add`」这个真实诉求。落点见
+   * `changes-view.tsx` 的 Changes 工具条(两个按钮)与
+   * `branches-view`/文件行的右键。
+   */
+  async stageSelected(): Promise<void> {
+    await this.applyIndexAction(this.targetedFiles(), 'stage');
+  }
+
+  /**
+   * **取消暂存**选中的文件(`git reset`)—— 上游 `lib/git/reset.ts` 的 `unstageAll`
+   * 一族(`app-store.ts` 的 `_unstageFiles`)。
+   *
+   * 与 {@link stageSelected} 的差别不只是方向:没有选区时,它只取**索引里真的有内容**
+   * 的文件(`staged !== undefined`),而不是全部变更文件 —— 否则会对一堆未暂存文件
+   * 白跑一次 `git reset`,而且 `afterIndexChange()` 会白刷一次状态。
+   * 两条路共用 {@link applyIndexAction},所以 `busy` 标签、失败呈现、刷新时机一致。
+   */
   async unstageSelected(): Promise<void> {
-    const path = this.state.current;
-    if (path === '') return;
     const selected = this.state.selectedFiles;
     const files = selected.length > 0
       ? selected
       : (this.state.status?.files ?? []).filter((f) => f.staged !== undefined).map((f) => f.path);
-    if (files.length === 0) return;
-    this.emit({ busy: 'unstage' });
-    const result = await api.unstage(path, files);
-    this.emit({ busy: '' });
-    if (!result.ok) {
-      this.fail(result.error);
-      return;
-    }
-    await this.afterIndexChange();
+    await this.applyIndexAction(files, 'unstage');
   }
 
+  /**
+   * **单文件暂存**。上游的调用点是文件行右键菜单的 **Stage file**
+   * (`ui/changes/changed-file.tsx` 那条),与 {@link stageSelected} 同一个落点
+   * (`api.stage`),只是文件集合固定成一个。
+   *
+   * 与 {@link stageSelected} 走同一个私有辅助:以前这里是**第二份实现**(自己 emit busy、
+   * 自己 fail、自己 refresh),与 `stageSelected` 三处细节不一致 ——
+   * 现在两处只有「文件集合」这一个差别。
+   */
   async stageFile(file: string): Promise<void> {
-    const path = this.state.current;
-    if (path === '') return;
-    const result = await api.stage(path, [file]);
-    if (!result.ok) {
-      this.fail(result.error);
-      return;
-    }
-    await this.afterIndexChange();
+    await this.applyIndexAction([file], 'stage');
   }
 
+  /**
+   * **单文件取消暂存**。上游对应 `lib/git/reset.ts` 的 `resetPaths(repository, Mixed,
+   * 'HEAD', [path])`(`app-store.ts` 的 `_unstageFiles` 对单文件走这一支)——
+   * 我们落点是宿主既有的 `unstage` 路由(它内部就是 `git reset -- <paths>`)。
+   */
   async unstageFile(file: string): Promise<void> {
-    const path = this.state.current;
-    if (path === '') return;
-    const result = await api.unstage(path, [file]);
-    if (!result.ok) {
-      this.fail(result.error);
-      return;
-    }
-    await this.afterIndexChange();
+    await this.applyIndexAction([file], 'unstage');
   }
 
   /**
@@ -1020,7 +1259,7 @@ export class GitStore {
    */
   async discardFiles(files: string[], untrackedPaths: string[]): Promise<void> {
     const path = this.state.current;
-    if (path === '' || files.length === 0) return;
+    if (path === '' || files.length === 0) { return; }
     this.emit({ busy: 'discard' });
     const result = await api.discard(path, files, untrackedPaths);
     this.emit({ busy: '' });
@@ -1056,7 +1295,7 @@ export class GitStore {
    */
   async generateCommitMessage(opts: { force?: boolean } = {}): Promise<void> {
     const path = this.state.current;
-    if (path === '') return;
+    if (path === '') { return; }
     if (opts.force !== true && this.state.commitForm.summary.trim() !== '') {
       // 交给界面弹确认;这里只标记「待确认」,不发起请求。
       this.emit({ pendingGenerateConfirm: true });
@@ -1064,7 +1303,7 @@ export class GitStore {
     }
     this.emit({ pendingGenerateConfirm: false });
     const status = this.state.status;
-    if (status === null) return;
+    if (status === null) { return; }
     // 生成依据的真源 = **纳入提交的文件/行选区**(`includedFiles()` / `includeState`),
     // 不是「索引里有什么」(那是两行制时代的模型,已下线)。
     //
@@ -1119,7 +1358,7 @@ export class GitStore {
    */
   async undoCommit(sha: string): Promise<void> {
     const path = this.state.current;
-    if (path === '') return;
+    if (path === '') { return; }
     this.emit({ busy: 'undo' });
     const result = await api.undoCommit(path, sha);
     this.emit({ busy: '' });
@@ -1127,15 +1366,465 @@ export class GitStore {
       this.fail(result.error);
       return;
     }
+    /*
+     * ⚠️ **宿主这条路由回的是 `{ subject, description }`**(`src/host/git-service.ts:612`
+     * 的返回类型逐字如此),而 `api.ts:818` 把它声明成了 `{ subject, body }`
+     * —— **声明与宿主不一致**(`api.ts` 由另一条线持有,本次只上报、不改)。
+     *
+     * 以前这里只读 `.body` ⇒ 描述恒 `undefined`(上游 `git-store.ts:734-738` 回填的是
+     * `commit.body`,即**描述**)。后果不只是「描述丢了」:`commitForm.description`
+     * 变成 `undefined` 之后,下一次 `commit()` 里的 `form.description.trim()`
+     * (`store.ts` 的 `...(form.description.trim() !== '' ? …)`)会直接抛 TypeError。
+     * 所以按**宿主真实载荷**取,并对两个名字都兜底、再兜一次空串 ——
+     * `docs/probes/undo-commit-strip-probe.mjs` 的段 A 桩回的是 `body`(与旧声明一致),
+     * 段 B 走真 host 回 `description`,两段都必须绿。
+     */
+    const undone = result.value as { subject?: string; description?: string; body?: string };
     this.emit({
       commitForm: {
         ...initial().commitForm,
-        summary: result.value.subject,
-        description: result.value.body,
+        summary: undone.subject ?? '',
+        description: undone.description ?? undone.body ?? '',
       },
     });
     this.toast('已撤销提交,改动保留在工作区');
     await this.refreshAll();
+  }
+
+  /**
+   * 进入**修订(amend)态** —— 上游 History 提交右键菜单的第一项。
+   *
+   * 上游链路:`ui/history/commit-list.tsx:731,752-758` 的菜单项 ⇒
+   * `ui/history/compare.tsx:258,615` 的 `onAmendCommit` ⇒ `ui/repository.tsx:659-665`
+   * 的 `dispatcher.startAmendingRepository(repository, commit, isLocalCommit)` ⇒
+   * `lib/stores/app-store.ts:5760-5797` 的 `_startAmendingRepository`,它按顺序做四件事:
+   *
+   *  1. **强推警告闸门**(`:5767-5787`):`askForConfirmationOnForcePush && !isLocalCommit &&
+   *     tip.kind === Valid` ⇒ 先弹 `WarnForcePush`(`operation: 'Amend'`)。
+   *     那一层留在**视图层**(它要弹窗),本方法只管「闸门已放行」之后的三步;
+   *  2. `await this._changeRepositorySection(repository, RepositorySectionTab.Changes)`
+   *     (`:5788-5791`)⇒ 切到 Changes 页签;
+   *  3. `await gitStore.prepareToAmendCommit(commit)`(`:5793` →
+   *     `lib/stores/git-store.ts:744-758`):**无条件**把该提交的 summary/body 写进提交表单
+   *     (覆盖草稿);带 GitHub 远端时还会试图恢复 co-author —— 我们没有
+   *     `interpret-trailers`(见 `history-view.tsx` 的 `toCommit` 注释),这一半不伪造;
+   *  4. `setRepositoryCommitToAmend(repository, commit)`(`:5795` → `:5801-5811`):
+   *     置上「正在修订」这份仓库级状态。我们的等价物是 `commitForm.amend`
+   *     (`repo-state-cache.ts` 的文件头记了为什么它不进镜像的槽:上游的载体是
+   *     `commitToAmend: Commit | null`,而我们只有布尔)。
+   *
+   * **为什么必须校验 `sha === status.headSha`**:宿主的 amend 语义就是
+   * `git commit --amend`,改的必然是本仓库的当前 HEAD;上游把这一项只挂在
+   * **第 0 行**(`commit-list.tsx:732` 的 `row === 0`),而我们的 `log` 与 `status`
+   * 在极端时序下可能不同步(`changes-view.tsx` 的 `undoableCommitOf` 为此专门比过
+   * `entry.sha !== status.headSha`)。不是 HEAD 就拒绝并**明说**,不静默改写别的提交。
+   *
+   * **退役条件**:等我们把 `commitToAmend` 真的放进镜像的槽
+   * (`repository-state-cache.ts:60-71` 那条不变量会接管「HEAD 变了就退出修订态」),
+   * 本方法的第 4 步改写成 `setRepositoryCommitToAmend`,并删掉 `checkout()` 里那条补偿。
+   * @param sha - 要修订的提交(**必须是当前 HEAD**)。
+   * @returns 是否真的进入了修订态。
+   */
+  public startAmendingCommit(sha: string): boolean {
+    const status = this.state.status;
+    if (status === null) {
+      return false;
+    }
+    const entry = this.state.log.find((commit) => commit.sha === sha);
+    if (entry === undefined) {
+      this.toast('这条提交不在已加载的历史里,无法修改。', 'err');
+      return false;
+    }
+    if (status.headSha !== sha) {
+      // 见方法头注释:只有 HEAD 能被 amend,别改写别的提交。
+      this.toast('只能修改最近一次提交(HEAD)。', 'err');
+      return false;
+    }
+    this.emit({
+      commitForm: {
+        ...this.state.commitForm,
+        amend: true,
+        // 上游 `git-store.ts:744-758` 无条件覆盖表单。
+        summary: entry.subject,
+        description: entry.body,
+      },
+    });
+    // 上游 `app-store.ts:5788-5791` 的 `_changeRepositorySection(…, Changes)`。
+    this.setTab('changes');
+    return true;
+  }
+
+  /** 退出修订态(上游 `_stopAmendingRepository`,`app-store.ts:5798-5800`)。 */
+  public stopAmendingCommit(): void {
+    if (!this.state.commitForm.amend) {
+      return;
+    }
+    this.setCommitField('amend', false);
+  }
+
+  /* ==========================================================================
+   * 历史动作:Reset to Commit / Checkout Commit / Revert / Cherry-pick / Tag
+   *
+   * 这一族在 2026-10 之前**宿主路由 + api 包装全在、客户端 0 调用点**,于是
+   * `ui/history/commit-list.tsx:773-847` 那六个菜单项**永远灰着**(审计
+   * `docs/dead-code-and-missing-state-audit.md` §2.3 第 1-6 项)。
+   *
+   * 三条纪律,整个族共用:
+   *
+   *  1. **确认留在视图层**(`history-view.tsx`),与上游一致 ——
+   *     `ui/dispatcher/dispatcher.ts:960-967` 只是转发,真正的闸门在
+   *     `ui/history/compare.tsx` 的 `onCheckoutCommit` 与 `WarningBeforeReset`。
+   *     本文件的方法只管「闸门已放行」之后的动作;
+   *  2. **`worktreeDiscarded` 必须读**(`resetToCommit`):`hard` 会丢工作区改动,
+   *     宿主如实回了这个字段(`routes.ts:792`),契约与可回收条件见
+   *     `docs/discard-lines-contract.md` §5。不读它就是「成功返回 + 破坏性后果 + 零反馈」;
+   *  3. **`merge-conflicts` 必须被翻译成人话**(`revertCommit` / `cherryPickCommit`):
+   *     宿主的 `must()` 把冲突折成 `code: 'merge-conflicts'`
+   *     (`git-service.ts:87`),仓库会**留在** `REVERT_HEAD` / `CHERRY_PICK_HEAD`,
+   *     而且本插件**没有** `--continue` / `--abort` 路由(`git-service.ts:1213-1237`
+   *     明写「要在命令行里做」)⇒ 界面必须把这件事说清楚,不能只回显一句
+   *     「遇到冲突,请在 Changes 里解决后重试」(那句在 revert/cherry-pick 场景下
+   *     **是错的**:Changes 页签没有 continue/abort)。
+   * ========================================================================== */
+
+  /**
+   * reset 到某个提交(上游 History 右键「Reset to Commit…」)。
+   *
+   * 上游链路:`ui/history/commit-list.tsx:773-781` 的菜单项 ⇒
+   * `ui/history/compare.tsx:619-621` 的 `onResetToCommit` ⇒
+   * `ui/dispatcher/dispatcher.ts:959-967` ⇒ `app-store.ts:5856-5889` 的
+   * `_resetToCommit`。上游那一版**只走 mixed**(`:5884` 的
+   * `reset(repository, GitResetMode.Mixed, commit.sha)`),三个模式是我们的扩展
+   * (宿主 `reset-to-commit` 路由按冻结契约支持 soft/mixed/hard),
+   * 模式 → argv 的映射在 `core/git-argv.ts:566-572`。
+   *
+   * 上游的确认闸门与本插件不同,如实记下来**不假装**:
+   * `_resetToCommit` 的条件是 `showConfirmationDialog && !isWorkingDirectoryClean`
+   * —— 也就是「**只在工作区脏时**弹」,而 `WarningBeforeReset`
+   * (`ui/reset/warning-before-reset.tsx`)的正文只说「可能丢改动」。
+   * 我们这里改成**每次 reset 都确认**(理由:我们额外提供了 `hard` 这一档,
+   * 而 `hard` 会**无条件**丢弃工作区改动 —— 上游那一版没有这个风险面),
+   * 按钮文案与危险色照上游那个对话框的 `destructive` 形状。
+   * @param sha - 目标提交。
+   * @param mode - `'soft' | 'mixed' | 'hard'`;界面上由用户选,缺省 `'mixed'`(= 上游)。
+   */
+  public async resetToCommit(sha: string, mode: 'soft' | 'mixed' | 'hard' = 'mixed'): Promise<void> {
+    const path = this.state.current;
+    if (path === '') { return; }
+    this.emit({ busy: 'reset' });
+    const result = await api.resetToCommit(path, sha, mode);
+    this.emit({ busy: '' });
+    if (!result.ok) {
+      this.fail(result.error);
+      return;
+    }
+    /*
+     * ⚠️ 这一句就是 `docs/discard-lines-contract.md` §5 要求的「明确反馈」:
+     * `hard` 会丢掉工作区里**未提交**的改动,而 git 会安静地成功。不说出来,
+     * 用户看到的就是「点了一下,改动没了,界面说成功」。
+     */
+    if (result.value.worktreeDiscarded === true) {
+      this.toast('已硬重置:工作区里未提交的改动已被丢弃,无法恢复。', 'err');
+    } else {
+      this.toast(`已重置到 ${sha.slice(0, 7)}(${mode})`);
+    }
+    /*
+     * HEAD 变了 ⇒ 修订态必须退出。这条补偿的**来源与退役条件**写在
+     * `startAmendingCommit` 的文件头:镜像 `repository-state-cache.ts:59-71` 的
+     * amend 不变量在我们这里恒算 false(`branchesState.tip` 停在 `TipState.Unknown`),
+     * 所以「HEAD 变了就退出修订态」得我们自己补。
+     * `checkout()`(`:1892` 那一版)对切分支做了同一件事,这里对 reset 补上。
+     */
+    this.stopAmendingCommit();
+    await this.refreshAll();
+  }
+
+  /**
+   * 检出某个提交 —— **分离头**(上游 History 右键「Checkout Commit」)。
+   *
+   * 上游链路:`commit-list.tsx:783-789` ⇒ `compare.tsx:633-645` 的
+   * `onCheckoutCommit` ⇒ `dispatcher.checkoutCommit`(`dispatcher.ts:736-741`)⇒
+   * `app-store.ts:4808-4838` ⇒ `lib/git/checkout.ts:165-187`。
+   *
+   * 上游那半有一个偏好门:`askForConfirmationOnCheckoutCommit`
+   * (`compare.tsx:635`,为真才弹 `PopupType.ConfirmCheckoutCommit`)。
+   * **本插件没有这个偏好项** —— 与 `askForConfirmationOnForcePush` /
+   * `confirmUndoCommit` 是同一处已登记的缺口(`history-view.tsx:939-944` 记过同族)。
+   * 这里按上游**默认值**(`false`)处理:不弹框,但**必须**有一条说得清楚的 toast,
+   * 否则用户不知道自己已经不在任何分支上了(分离头,提交会「丢掉」)。
+   *
+   * 落点是 `checkout --detach`(`core/git-argv.ts:582-584` 显式加 `--detach`,
+   * 理由写在那里:上游靠「参数是 sha ⇒ git 自己分离头」,那条性质对非 sha 输入不成立)。
+   * @param sha - 目标提交。
+   */
+  public async checkoutCommit(sha: string): Promise<void> {
+    const path = this.state.current;
+    if (path === '') { return; }
+    this.emit({ busy: 'checkout' });
+    const result = await api.checkoutCommit(path, sha);
+    this.emit({ busy: '' });
+    if (!result.ok) {
+      this.fail(result.error);
+      return;
+    }
+    this.toast(
+      `已检出 ${sha.slice(0, 7)},现在是分离头状态(不在任何分支上)。要回到分支,请切一个分支。`,
+      'err',
+    );
+    // HEAD 变了 ⇒ 退出修订态(理由同 `resetToCommit`)。
+    this.stopAmendingCommit();
+    await this.refreshAll();
+  }
+
+  /**
+   * revert 一个提交(生成一个新的反向提交)。
+   *
+   * 上游:`commit-list.tsx:799-811` 的菜单项(`onRevertCommit` 由
+   * `compare.tsx:259-263` 的 `ableToRevertCommit` 决定是否**下传**,见
+   * `compare.tsx:745-756`;我们在纯 History 模式下恒满足那一条)⇒
+   * `lib/git/revert.ts:22-55`。
+   *
+   * **冲突回执是本方法的重点**(用户裁决点名):宿主 `revertCommit` 冲突时
+   * `git revert` 退出码非 0、**不建提交**,仓库留在 `REVERT_HEAD`
+   * (`git-service.ts:1198-1218`),`must()` 抛 `merge-conflicts`。宿主那句默认文案
+   * 「请在 Changes 里解决后重试」在这里**不完整**:解决完冲突之后还需要
+   * `git revert --continue`,而本插件**没有**这条路由 ⇒ 必须点名「去命令行」。
+   * @param sha - 要还原的提交。
+   */
+  public async revertCommit(sha: string): Promise<void> {
+    const path = this.state.current;
+    if (path === '') { return; }
+    this.emit({ busy: 'revert' });
+    const result = await api.revertCommit(path, sha);
+    this.emit({ busy: '' });
+    if (!result.ok) {
+      if (result.error.code === 'merge-conflicts') {
+        this.toast(
+          `还原 ${sha.slice(0, 7)} 遇到冲突:改动没有撤销,仓库停在 REVERT_HEAD。` +
+            '本插件没有「继续/放弃还原」的命令,请在终端里解决冲突后用 `git revert --continue`(或 `git revert --abort`)。',
+          'err',
+        );
+      } else {
+        this.fail(result.error);
+      }
+      /*
+       * 冲突时索引与工作区**已经变了**(冲突标记写进了文件),所以状态必须重取 ——
+       * 否则 Changes 页签还画着冲突之前那份文件列表,用户会以为什么都没发生。
+       */
+      await this.refreshAll();
+      return;
+    }
+    this.toast(`已还原 ${sha.slice(0, 7)},改动保留在工作区`);
+    await this.refreshAll();
+  }
+
+  /**
+   * cherry-pick 一个提交(把它的改动搬到当前分支)。
+   *
+   * 上游:`commit-list.tsx:843-847`(enabled 判据 = `canCherryPick()`,
+   * `commit-list.tsx:867-872`:`onCherryPick !== undefined &&
+   * isMultiCommitOperationInProgress === false`)⇒ `lib/git/cherry-pick.ts:141-182`。
+   *
+   * 该做的与 {@link revertCommit} 逐条同构(理由那里写全了):成功一条 toast,
+   * `merge-conflicts` 时报**带 `--continue`/`--abort` 出路的**回执,两种结局都重取状态。
+   * 唯一的差别是宿主留在 `CHERRY_PICK_HEAD`(还可能带 `.git/sequencer/`)。
+   * @param sha - 要拣选的提交。
+   */
+  public async cherryPickCommit(sha: string): Promise<void> {
+    const path = this.state.current;
+    if (path === '') { return; }
+    this.emit({ busy: 'cherry-pick' });
+    const result = await api.cherryPickCommit(path, sha);
+    this.emit({ busy: '' });
+    if (!result.ok) {
+      if (result.error.code === 'merge-conflicts') {
+        this.toast(
+          `拣选 ${sha.slice(0, 7)} 遇到冲突:改动没有落地,仓库停在 CHERRY_PICK_HEAD。` +
+            '本插件没有「继续/放弃拣选」的命令,请在终端里解决冲突后用 `git cherry-pick --continue`(或 `--abort`)。',
+          'err',
+        );
+      } else {
+        this.fail(result.error);
+      }
+      await this.refreshAll();
+      return;
+    }
+    this.toast(`已拣选 ${sha.slice(0, 7)}`);
+    await this.refreshAll();
+  }
+
+  /**
+   * 建标签(上游 History 右键「Create Tag…」)。
+   *
+   * 上游:`commit-list.tsx:823-827`(enabled = `onCreateTag !== undefined`)⇒
+   * `compare.tsx:607-613` 的 `onCreateTag` ⇒ `dispatcher.showCreateTagDialog` ⇒
+   * `ui/create-tag/create-tag-dialog.tsx`。上游那个对话框有两个要点,我们**沿用一半、如实报一半**:
+   *
+   *  - **名字输入**:`RefNameTextBox`,`okButtonDisabled = error !== null || tagName.length === 0`,
+   *    还有 `MaxTagNameLength = 245` 的上限。这两条我们在视图层照做
+   *    (`history-view.tsx` 的 `tagFor` 对话框);
+   *  - ⚠️ **上游建的是附注标签**(`lib/git/tag.ts:13-21` 的 `tag -a -m '' <name> <sha>`),
+   *    而本仓库的冻结契约建**轻量标签**(`git tag <name> [<sha>]`,
+   *    `core/git-argv.ts` 的 `tagCreateArgv`)。差别是**不可逆的数据差异**:
+   *    轻量标签没有 tagger / 日期 / 消息,事后无法补(`docs/discard-lines-contract.md` §6)。
+   *    所以对话框里那一档必须**明确不可用**,不能画一个点了没反应的选项。
+   * @param name - 标签名(宿主会过 `assertValidRefName`)。
+   * @param sha - 目标提交;缺省 = 当前 HEAD。
+   */
+  public async createTag(name: string, sha?: string): Promise<void> {
+    const path = this.state.current;
+    if (path === '') { return; }
+    this.emit({ busy: 'tag' });
+    const result = await api.tagCreate(path, name, sha);
+    this.emit({ busy: '' });
+    if (!result.ok) {
+      this.fail(result.error);
+      return;
+    }
+    this.toast(`已创建标签 ${name}(轻量标签:没有 tagger / 日期 / 消息)`);
+    await this.refreshAll();
+  }
+
+  /**
+   * 删标签(上游 History 右键菜单的 `Delete tag <name>` / `Delete tag…` 子菜单)。
+   *
+   * 上游:`commit-list.tsx:889-924` 的 `getDeleteTagsMenuItem` —— 项**只有在
+   * `onDeleteTag !== undefined` 且该提交有**未推送**的标签时才入列
+   * (`:893-899`),而且每条 tag 自己还有一个 `enabled: unpushedTags.includes(tagName)`。
+   * 落点是 `lib/git/tag.ts:29-36` 的 `git tag -d <name>`(仅本地,远端标签不动)。
+   * @param name - 标签名。
+   */
+  public async deleteTag(name: string): Promise<void> {
+    const path = this.state.current;
+    if (path === '') { return; }
+    this.emit({ busy: 'tag' });
+    const result = await api.tagDelete(path, name);
+    this.emit({ busy: '' });
+    if (!result.ok) {
+      this.fail(result.error);
+      return;
+    }
+    this.toast(`已删除本地标签 ${name}(远端上的同名标签没有被删除)`);
+    await this.refreshAll();
+  }
+
+  /**
+   * 删**远端**分支(上游 `lib/git/branch.ts:119-143`,argv 等价于
+   * `git push <remote> --delete <branch>`)。
+   *
+   * 在这条之前,`api.deleteRemoteBranch`(`api.ts:944`)与宿主路由
+   * `remote-branch-delete`(`routes.ts:977`)双双存在而**全仓 0 调用点**,
+   * 而 `branches-view.tsx:249` 的 toast 却告诉用户「删远端分支要 host 的
+   * deleteRemoteBranch 路由,**今天还没有**」—— 那句话是**假的**(路由早就有了)。
+   * 视图层那句已改;这里补上它指向的能力。
+   *
+   * 失败一律回显宿主原话:宿主把「远端 ref 已经不在了」按上游折成**成功**
+   * (顺手清掉本地过期的 remote-tracking ref),所以真的走到 `fail()` 的都是
+   * 有意义的原因(远端不存在、没权限、非快进保护…)。
+   * @param remote - 远端名(必须是 `git remote` 里存在的名字)。
+   * @param branch - 远端上的分支短名(**不带** `<remote>/` 前缀)。
+   */
+  public async deleteRemoteBranch(remote: string, branch: string): Promise<void> {
+    const path = this.state.current;
+    if (path === '') { return; }
+    this.emit({ busy: 'branch-delete' });
+    const result = await api.deleteRemoteBranch(path, remote, branch);
+    this.emit({ busy: '' });
+    if (!result.ok) {
+      this.fail(result.error);
+      return;
+    }
+    this.toast(`已删除远端分支 ${remote}/${branch}`);
+    await this.refreshAll();
+  }
+
+  /**
+   * **行级/块级丢弃**:把 diff 里选中的那几行从**工作区**撤掉(索引不动)。
+   *
+   * 上游:`app-store.ts:5748-5757` 的 `_discardChangesFromSelection` ⇒
+   * `git-store.discardChangesFromSelection` ⇒ `lib/git/apply.ts:102-120`。
+   *
+   * ## 方向契约(**这条缺陷类是静默的,必须写死在代码旁边**)
+   *
+   * 送出去的补丁必须是 `git diff` **正向**的那份(新内容在 `+` 侧):
+   *
+   * ```
+   * 客户端:  git diff 正向   →  buildPartialPatch(与 stageLines 同一族)
+   * host:    git apply --reverse --unidiff-zero --whitespace=nowarn -   (git-argv.ts)
+   * 净效果:  选中的 hunk 从工作区消失,index 一个字节不动
+   * ```
+   *
+   * ⚠️ **绝不要用镜像里的 `formatPatchToDiscardChanges()`
+   * (`desktop/lib/patch-formatter.ts:251`)** —— 它已经把 `+`/`-` 两侧交换过
+   * (上游那么写是因为它的调用点**不带** `--reverse`)。把它的产物喂给我们这条
+   * `--reverse` 路由,两侧会被翻两次 ⇒ **改动被写回工作区**,而 `git apply`
+   * 不会报错。完整裁决见 `docs/discard-lines-contract.md` §2/§3。
+   *
+   * ## 与「整文件丢弃」的分工
+   *
+   * `discardFiles`(`:1133`)走 `api.discard`(整文件 + `git clean` 未跟踪);
+   * 本方法只处理**行级选区**,落点是 `api.discardLines`。两者都在,不互相取代。
+   * @param file - 仓库内相对路径。
+   * @param spec - 要丢弃的选区(`desktop-diff.tsx` 的 `selectionToSpec()` 输出)。
+   */
+  public async discardLines(file: string, spec: LineSelectionSpec): Promise<void> {
+    const path = this.state.current;
+    if (path === '') { return; }
+    const diff = this.state.diff;
+    /*
+     * 基准守卫:补丁必须由**屏幕上这一份 diff** 解析而来,否则行号与 host 重新
+     * 取的那份对不上(与 `stageLines` 的陈旧选区守卫同族,见 `desktop-diff.tsx`
+     * 文件头「陈旧选区守卫」)。这里能拿到的是 store 当前那份 diff,而调用方
+     * (`changes-view.tsx` 的 `DiffPanel`)渲染的正是它。
+     */
+    if (diff === null || diff.path !== file || diff.patch.trim() === '') {
+      this.toast('这份 diff 不是当前文件的,已取消丢弃(请重试)。', 'err');
+      return;
+    }
+    const entry = (this.state.status?.files ?? []).find((f) => f.path === file);
+    if (entry === undefined) {
+      this.toast('这个文件已经不在变更列表里了,丢弃没有执行。', 'err');
+      return;
+    }
+    /*
+     * 行级丢弃的**能力边界**比行级暂存更硬:
+     *  - 未跟踪文件在 `git diff` 下没有输出(宿主 `discard-lines` 会以 bad-request 失败),
+     *    而且它的「丢弃」语义是**删文件**,那是 `discardFiles`(走 `git clean`)的事;
+     *  - 已暂存文件(索引里已有内容)显示的可能是 HEAD→索引 的 diff,下标空间不同。
+     * 两者都**明确拒绝并说清去哪儿**,不静默失败。
+     * (`supportsLineSelection` 是这两条的既有判据,与行级暂存共用一处定义。)
+     */
+    if (!supportsLineSelection(entry)) {
+      this.toast(
+        entry.untracked === true
+          ? '未跟踪文件没有行级补丁:整文件丢弃请用文件行上的「丢弃」按钮。'
+          : '这个文件在索引里已经有内容,行级丢弃的行号无法对齐:请用整文件丢弃。',
+        'err',
+      );
+      return;
+    }
+    let patch: string;
+    try {
+      patch = buildPartialPatchFromRaw(
+        file,
+        fileStatusKindOf(entry.unstaged !== undefined ? { status: entry.unstaged } : {}),
+        parsePatch(diff.patch),
+        spec,
+      );
+    } catch (error) {
+      // `formatPatch` 在选区为空时抛错(上游同)—— 这不是故障,是「没什么可丢的」。
+      this.toast(`没有可丢弃的行:${error instanceof Error ? error.message : String(error)}`, 'err');
+      return;
+    }
+    this.emit({ busy: 'discard' });
+    const result = await api.discardLines(path, file, patch);
+    this.emit({ busy: '' });
+    if (!result.ok) {
+      this.fail(result.error);
+      return;
+    }
+    this.toast(`已丢弃 ${file} 里选中的改动`);
+    await this.afterIndexChange();
   }
 
   /**
@@ -1188,9 +1877,9 @@ async setHideWhitespaceHistory(value: boolean): Promise<void> {
    */
   async loadRepoFiles(force = false): Promise<void> {
     const path = this.state.current;
-    if (path === '') return;
+    if (path === '') { return; }
     const cached = this.state.repoFiles;
-    if (force !== true && cached !== null && cached.path === path) return;
+    if (force !== true && cached !== null && cached.path === path) { return; }
     const result = await api.repoTree(path);
     if (!result.ok) { this.fail(result.error); return; }
     this.emit({ repoFiles: { path, files: result.value.files, truncated: result.value.truncated } });
@@ -1198,7 +1887,7 @@ async setHideWhitespaceHistory(value: boolean): Promise<void> {
 
   /** 拉取本机可用的外部编辑器清单(只在需要时请求一次)。 */
   async loadExternalApps(): Promise<void> {
-    if (this.state.externalApps.length > 0) return;
+    if (this.state.externalApps.length > 0) { return; }
     const result = await api.systemApps();
     if (result.ok) this.emit({ externalApps: result.value.apps });
   }
@@ -1227,9 +1916,32 @@ async setHideWhitespaceHistory(value: boolean): Promise<void> {
   async commit(): Promise<void> {
     const path = this.state.current;
     const status = this.state.status;
-    if (path === '' || status === null) return;
+    if (path === '' || status === null) { return; }
     const form = this.state.commitForm;
-    if (form.summary.trim() === '' && !form.amend) {
+    /*
+     * 提交哪些文件由**客户端的纳入状态**决定(上游 `app-store.ts:3702-3705`:
+     * `file.selection.getSelectionType() !== DiffSelectionType.None`)。
+     *
+     * ⚠️ `included` 必须在**下面这条摘要守卫之前**算出来:摘要本身要用它
+     * (单文件提交时,空摘要会被**占位摘要**取代 —— 见 `summaryOrPlaceholderOf`)。
+     */
+    const included = this.includedFiles();
+    /*
+     * **摘要的真实取值** —— 上游 `commit-message.tsx:620` 的
+     * `summary: this.summaryOrPlaceholder`(定义在 `:587-592`)。
+     *
+     * 以前这里判的是 `form.summary.trim() === ''`,而且载荷发的是 `form.summary`
+     * ⇒ 单文件 + 空摘要被**两道**都挡住:按钮 `aria-disabled`(changes-view 的旧条件)
+     * 与这条守卫。上游两条都不是这样:单文件时摘要用 `Create/Delete/Update <文件名>`,
+     * 而且它**真的**被提交上去。判据:`docs/probes/commit-form-parity-probe.mjs`
+     * 的 R01/R10/R20/R23/R24(改前 message 是 `null`/`''`,改后是占位摘要)。
+     *
+     * 守卫改成「解析后的摘要为空」:这样 amend + 多文件 + 空摘要(界面上已经禁用,
+     * 但 `commit()` 是公开 API)也走同一条早退,而不是把一条空消息交给 git
+     * (那会以 `Aborting commit due to empty commit message` 失败)。
+     */
+    const message = summaryOrPlaceholderOf(form.summary, included);
+    if (message.trim() === '') {
       this.toast('请填写提交摘要', 'err');
       return;
     }
@@ -1237,9 +1949,6 @@ async setHideWhitespaceHistory(value: boolean): Promise<void> {
       this.toast('还有未解决的冲突,解决后再提交', 'err');
       return;
     }
-    // 提交哪些文件由**客户端的纳入状态**决定(上游 `app-store.ts:3702-3705`:
-    // `file.selection.getSelectionType() !== DiffSelectionType.None`)。
-    const included = this.includedFiles();
     const files = included.map((f) => f.path);
     if (files.length === 0 && !form.amend && !form.allowEmpty) {
       this.toast('请先勾选一个或多个文件', 'err');
@@ -1277,7 +1986,7 @@ async setHideWhitespaceHistory(value: boolean): Promise<void> {
     );
     for (const file of partialFiles) {
       const spec = this.state.includeState[file.path];
-      if (spec === undefined) continue;
+      if (spec === undefined) { continue; }
       // 兜底:`stageLines` 的补丁基准是**索引→工作区**,而索引刚被清空成 HEAD。
       // 对「未跟踪/新增」文件那条命令输出为空(host 会以 bad-request 失败),
       // 对索引里原本就有内容的文件则下标空间可能对不上。这两种情况退回整文件纳入,
@@ -1306,7 +2015,7 @@ async setHideWhitespaceHistory(value: boolean): Promise<void> {
 
     const result = await api.commit({
       path,
-      message: form.summary,
+      message,
       ...(form.description.trim() !== '' ? { description: form.description } : {}),
       files,
       amend: form.amend,
@@ -1364,7 +2073,7 @@ async setHideWhitespaceHistory(value: boolean): Promise<void> {
 
   async loadCommitDetail(sha: string): Promise<void> {
     const path = this.state.current;
-    if (path === '' || sha === '') return;
+    if (path === '' || sha === '') { return; }
     const result = await api.commitDetail(path, sha);
     if (result.ok) {
       this.emit({ commitDetailFiles: result.value.files });
@@ -1407,6 +2116,75 @@ async setHideWhitespaceHistory(value: boolean): Promise<void> {
       return;
     }
     this.emit({ progress });
+  }
+
+  /**
+   * **开始按 ~250ms 轮询宿主侧的 git 进度** —— 上游那半边「百分比」的接法。
+   *
+   * ## 上游在这里是什么形状(以及我们为什么不能沿用那三行)
+   *
+   * 上游是 Electron 的主进程 + 渲染进程:`lib/git/push.ts:82-99` 把
+   * `PushProgressParser` 挂在子进程的 stderr 上,解析出的 `percent` 经
+   * `app-store.ts:5323-5329` 乘上本动作的权重,直接写进
+   * `IRepositoryState.pushPullFetchProgress`;渲染进程**订阅**那个状态。
+   * 也就是说上游**没有轮询** —— 进程内回调。
+   *
+   * 我们是 HTTP 两半,而且 `push` 那条请求**一直阻塞到推完**:它的响应就是
+   * 「推完了」,进度**搭不了自己的车**。所以宿主把进度留在内存里
+   * (`GitService.syncProgressByRoot`,就是上游那份状态的宿主等价物),
+   * 客户端在动作在飞期间轮询一条只查 Map 的旁路路由。
+   *
+   * ## 三条纪律(每条都有理由)
+   *
+   * 1. **只在 `progress !== null` 的窗口里跑**:`syncProgressTimer` 由
+   *    fetch/pull/push 各自在 `finally` 里停掉;`updateSyncProgress(null)` 之后
+   *    任何一条迟到的响应都会被下面第 2 条挡掉。
+   * 2. **跨动作不合并**:宿主那一份带 `kind`。若它与我当前这一条不是同一个
+   *    `kind`(动作已经结束、或进到了 `generic` 刷新阶段),就**丢弃** ——
+   *    否则一次推送的百分比会盖到下一次拉取上(最坏的表现是进度倒退)。
+   * 3. **拿不到就当没有**:路由失败(老 host 没有这条路由 / 传输错)一律静默返回。
+   *    「没有进度」是正常状态,不是错误;把 4 次/秒的失败写进诊断/日志会淹没真正的问题。
+   *
+   * @param actionWeight - 本动作的**权重**。宿主给的是解析器自己的 `percent`(0..1),
+   *   上限是「网络阶段」在整条动作里占的比例(三支都是 0.9,给刷新阶段留 0.1)——
+   *   与上游 `app-store.ts:5324-5328` 的 `value: pushWeight * progress.value` 同一处乘法。
+   *   调用方传的就是它自己稍后交给 `refreshAfterNetworkAction()` 的那个起点,
+   *   所以「进度最高到 0.9、然后跳到刷新阶段」在两边是同一个数。
+   */
+  private startSyncProgressPolling(actionWeight: number): void {
+    this.stopSyncProgressPolling();
+    const tick = async (): Promise<void> => {
+      const path = this.state.current;
+      if (path === '') {
+        return;
+      }
+      const result = await api.syncProgress(path);
+      if (!result.ok) {
+        return;
+      }
+      const next = result.value.progress;
+      if (next === null) {
+        return;
+      }
+      const current = this.state.progress;
+      if (current === null || current.kind !== next.kind) {
+        return;
+      }
+      this.updateSyncProgress({
+        ...current,
+        description: next.description,
+        value: actionWeight * next.value,
+      });
+    };
+    this.syncProgressTimer = setInterval(() => { void tick(); }, SYNC_PROGRESS_POLL_MS);
+  }
+
+  /** 停掉进度轮询(三个网络动作的 `finally` 里各一次;可重复调用)。 */
+  private stopSyncProgressPolling(): void {
+    if (this.syncProgressTimer !== undefined) {
+      clearInterval(this.syncProgressTimer);
+      this.syncProgressTimer = undefined;
+    }
   }
 
   /**
@@ -1528,17 +2306,19 @@ async setHideWhitespaceHistory(value: boolean): Promise<void> {
      * 标题是 `` `Fetching ${remote.name}` ``(`:52`),我们这层按 §11.9 用中文。
      */
     this.updateSyncProgress({ kind: 'fetch', title: `正在抓取 ${remoteName}`, value: 0, remote: remoteName });
+    // 上游 `:5968-5971` 的权重:fetchWeight 0.9 / refreshWeight 0.1(**不做两次重标定**)。
+    const fetchWeight = 0.9;
+    this.startSyncProgressPolling(fetchWeight);
     try {
       const result = await api.fetch(path, remote);
       if (!result.ok) {
         this.fail(result.error);
         return;
       }
-      // 上游 `:5968-5971` 的权重:fetchWeight 0.9 / refreshWeight 0.1(**不做两次重标定**)。
-      const fetchWeight = 0.9;
       await this.refreshAfterNetworkAction('正在刷新仓库', fetchWeight);
       this.toast('已抓取远端');
     } finally {
+      this.stopSyncProgressPolling();
       this.updateSyncProgress(null);
       this.emit({ busy: '' });
     }
@@ -1569,20 +2349,29 @@ async setHideWhitespaceHistory(value: boolean): Promise<void> {
     this.emit({ busy: 'pull' });
     /* 上游 `lib/git/pull.ts:99-100` 的初始进度(标题在 `:67`)。 */
     this.updateSyncProgress({ kind: 'pull', title: `正在拉取 ${remoteName}`, value: 0, remote: remoteName });
+    /*
+     * 上游 `:5535-5547` 的权重重标定,逐字:
+     *   let pullWeight = 2; let fetchWeight = 1; const refreshWeight = 0.1
+     *   const scale = (1 / (pullWeight + fetchWeight)) * (1 - refreshWeight)
+     *   pullWeight *= scale; fetchWeight *= scale   ⇒ 起点 = (2+1)*scale = 0.9
+     *
+     * ⚠️ 这段**必须在 `try` 之前**:同一个 `pullWeight` 有两个消费点 ——
+     * 进度轮询的乘法(`startSyncProgressPolling`)与刷新阶段的起点
+     * (`refreshAfterNetworkAction`)。分两处各算一遍就是两份真源。
+     */
+    const scale = (1 / (2 + 1)) * (1 - 0.1);
+    const pullWeight = 2 * scale;
+    this.startSyncProgressPolling(pullWeight);
     try {
       const result = await api.pull(path, rebase);
       if (!result.ok) {
         this.fail(result.error);
         return;
       }
-      // 上游 `:5535-5547` 的权重重标定,逐字:
-      //   let pullWeight = 2; let fetchWeight = 1; const refreshWeight = 0.1
-      //   const scale = (1 / (pullWeight + fetchWeight)) * (1 - refreshWeight)
-      //   pullWeight *= scale; fetchWeight *= scale   ⇒ 起点 = (2+1)*scale = 0.9
-      const scale = (1 / (2 + 1)) * (1 - 0.1);
       await this.refreshAfterNetworkAction('正在刷新仓库', (2 + 1) * scale);
       this.toast('已拉取');
     } finally {
+      this.stopSyncProgressPolling();
       this.updateSyncProgress(null);
       this.emit({ busy: '' });
     }
@@ -1622,28 +2411,46 @@ async setHideWhitespaceHistory(value: boolean): Promise<void> {
       remote: remoteName,
       branch,
     });
+    /*
+     * 上游 `:5246-5248` + `:5255-2575` 的权重重标定,逐字:
+     *   let pushWeight = 2.5; let fetchWeight = 1; const refreshWeight = 0.1
+     *   const scale = (1 / (pushWeight + fetchWeight)) * (1 - refreshWeight)
+     *   pushWeight *= scale; fetchWeight *= scale   ⇒ 起点 = (2.5+1)*scale = 0.9
+     *
+     * `pushWeight` 的两个消费点与 pull 那支同理(进度轮询的乘法 + 刷新阶段起点),
+     * 所以提到 `try` 之前 —— 只算一次。
+     */
+    const scale = (1 / (2.5 + 1)) * (1 - 0.1);
+    const pushWeight = 2.5 * scale;
+    this.startSyncProgressPolling(pushWeight);
     try {
       const result = await api.push(path, force);
       if (!result.ok) {
-        // 推送被拒(远端有新提交)→ 给出可操作提示而不是干巴巴报错。
-        if (result.error.code === 'not-fast-forward') {
-          this.toast('推送被拒:远端有新提交,请先拉取(同步按钮会变成「拉取」)。', 'err');
-        } else {
-          this.fail(result.error);
-        }
+        // 推送失败 ⇒ **弹窗**,不是 toast。上游从不用 toast 报推送失败:
+        // `performPush`(`app-store.ts:5310-5372`)把错误交给
+        // `performFailableOperation` → `emitError` → `Dispatcher.postError`
+        // (`ui/dispatcher/dispatcher.ts:797-813`)→ 处理器链 → 三种弹窗
+        // (判据表见 `bits.tsx` 的 `pushFailureKindOf`)。
+        this.emit({ pushFailure: result.error });
         return;
       }
-      // 上游 `:5246-5248` + `:5255-2575` 的权重重标定,逐字:
-      //   let pushWeight = 2.5; let fetchWeight = 1; const refreshWeight = 0.1
-      //   const scale = (1 / (pushWeight + fetchWeight)) * (1 - refreshWeight)
-      //   pushWeight *= scale; fetchWeight *= scale   ⇒ 起点 = (2.5+1)*scale = 0.9
-      const scale = (1 / (2.5 + 1)) * (1 - 0.1);
       await this.refreshAfterNetworkAction('正在刷新仓库', (2.5 + 1) * scale);
       this.toast(force ? '已强推(--force-with-lease)' : '已推送');
     } finally {
+      this.stopSyncProgressPolling();
       this.updateSyncProgress(null);
       this.emit({ busy: '' });
     }
+  }
+
+  /**
+   * 关闭推送失败弹窗 —— 上游 `app.tsx` 的 `onPopupDismissedFn` 把弹窗队列队首 pop 掉。
+   */
+  public clearPushFailure(): void {
+    if (this.state.pushFailure === null) {
+      return;
+    }
+    this.emit({ pushFailure: null });
   }
 
   /**
@@ -1664,7 +2471,7 @@ async setHideWhitespaceHistory(value: boolean): Promise<void> {
 
   async checkout(branch: string, createFromRemote?: string): Promise<void> {
     const path = this.state.current;
-    if (path === '') return;
+    if (path === '') { return; }
     this.emit({ busy: 'checkout' });
     const result = await api.checkout(path, branch, createFromRemote);
     this.emit({ busy: '' });
@@ -1673,12 +2480,32 @@ async setHideWhitespaceHistory(value: boolean): Promise<void> {
       return;
     }
     this.toast(`已切到 ${branch}`);
+    /*
+     * 切分支 ⇒ **退出修订态**。
+     *
+     * 上游把这件事写成 `RepositoryStateCache.update()` 里的一条**不变量**
+     * (`src/core/desktop/lib/stores/repository-state-cache.ts:59-71`):
+     * `commitToAmend` 只在「HEAD 未变、且等于被修订的那个 sha、且没有冲突态」时保留,
+     * 否则强制置 `null`。理由是硬的:amend 改的是 HEAD,HEAD 换了之后那个「正在修订」
+     * 的意图已经指向**另一个提交**,带着它去提交就会用旧提交的信息改写新 HEAD。
+     *
+     * ⚠️ **那条不变量在本仓库是失效的**(2026-10 逐行核过):它读
+     * `branchesState.tip`,`newTip.kind === TipState.Valid` 是它成立的前提;而
+     * `src/client/repo-state-cache.ts` 从不写 `tip`(只写 `forcePushBranches`),
+     * 镜像初值是 `{ kind: TipState.Unknown }`(`repository-state-cache.ts:399`)
+     * ⇒ 前提恒假 ⇒ 一旦有人把 amend 放进镜像的槽,它会被**每一轮** `update()` 清掉。
+     * 这就是我们今天把 amend 放在 `extras` 里的代价,所以这条补偿必须**显式**写在这里。
+     *
+     * 退役条件:与 `startAmendingCommit` 的头注释同一条 —— 等 `commitToAmend` 真的
+     * 进镜像的槽(并且 `tip` 被写),本句删除、由那条不变量接管。
+     */
+    this.stopAmendingCommit();
     await this.refreshAll();
   }
 
   async createBranch(name: string, startPoint?: string): Promise<void> {
     const path = this.state.current;
-    if (path === '') return;
+    if (path === '') { return; }
     const result = await api.createBranch(path, name, startPoint);
     if (!result.ok) {
       this.fail(result.error);
@@ -1769,7 +2596,7 @@ async setHideWhitespaceHistory(value: boolean): Promise<void> {
    */
   async loadPrefs(): Promise<void> {
     const result = await api.prefs();
-    if (!result.ok) return;
+    if (!result.ok) { return; }
     const patch: Partial<Snapshot> = {};
     const { model, stagedOnly } = result.value;
     if (model !== undefined && model !== '') patch.model = model;
@@ -1779,7 +2606,7 @@ async setHideWhitespaceHistory(value: boolean): Promise<void> {
 
   async loadModels(): Promise<void> {
     const result = await api.models();
-    if (!result.ok) return;
+    if (!result.ok) { return; }
     const models = result.value.models;
     const current = this.state.model !== '' && models.some((m) => `${m.provider}/${m.id}` === this.state.model)
       ? this.state.model
@@ -1816,7 +2643,7 @@ async setHideWhitespaceHistory(value: boolean): Promise<void> {
     if (!signedIn) {
       // 还没拿到登录态:先读一次 auth,再决定要不要发请求。
       await this.loadAuth();
-      if (this.state.auth?.signedIn !== true) return;
+      if (this.state.auth?.signedIn !== true) { return; }
     }
     this.emit({ remoteReposLoading: true });
     const result = await api.remoteRepos(force);
