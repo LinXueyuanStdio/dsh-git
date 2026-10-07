@@ -466,11 +466,17 @@ function spawnWith(
     const out = read(handle, 'stdout');
     const err = read(handle, 'stderr');
     const binary = opts.binary === true ? readBinary(handle) : undefined;
+    // 管道模式:用我们缓存的那一份(收集器此时没有 stderr)。
+    const stderrText = pipedStderr ?? err.text;
+    if (gitDebugEnabled() && result.exitCode !== 0) {
+      console.warn(`[dsh-git:debug] git ${argv.slice(1).join(' ')} cwd=${cwd} exit=${String(result.exitCode)}`
+        + `\n  stderr: ${stderrText.trim().slice(0, 500) === '' ? '(空)' : stderrText.trim().slice(0, 500)}`
+        + `\n  stdout: ${out.text.trim().slice(0, 200) === '' ? '(空)' : out.text.trim().slice(0, 200)}`);
+    }
     return {
       exitCode: result.exitCode,
       stdout: out.text,
-      // 管道模式:用我们缓存的那一份(收集器此时没有 stderr)。
-      stderr: pipedStderr ?? err.text,
+      stderr: stderrText,
       stdoutTotalBytes: out.totalBytes,
       // 只有本模块的定时器到点才置 true(见 `GitRunResult.timedOut` 的三条成因)。
       ...(timedOut ? { timedOut: true } : {}),
@@ -515,6 +521,24 @@ function spawnOnce(
 /** 有界等待(只给「等 stderr 排空」那一处用;不引真定时器语义)。 */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+
+/**
+ * 诊断开关:宿主进程设了 `DSH_GIT_DEBUG=1` 时,把每次**失败**的 git 调用
+ * (argv / cwd / 退出码 / stderr / stdout)打到宿主 stderr。
+ *
+ * 为什么需要它:`repoRoot` 这类只回答「这里是不是仓库」的调用**只看退出码**,
+ * 会把 stderr 丢掉 —— 于是「受管子进程里的 git 为什么失败」在界面和日志里都
+ * 无从查起(2026-10 在 Linux CI 上为此白跑了好几轮:同一路径本机 git 说是仓库,
+ * 受管路径说不是,而现场一个字节的线索都没有)。
+ *
+ * 默认关,而且**只记失败**:失败在正常使用里很常见(对非仓库目录跑 `rev-parse`
+ * 就是非 0),默认打开会把日志变成噪音。
+ * @returns 开关是否打开。
+ */
+function gitDebugEnabled(): boolean {
+  const raw = process.env.DSH_GIT_DEBUG;
+  return raw === '1' || raw === 'true';
 }
 
 /**

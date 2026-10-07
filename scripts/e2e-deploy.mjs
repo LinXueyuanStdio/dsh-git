@@ -487,13 +487,18 @@ step('无头启动并等它就绪');
  * 「不是 git 仓库」—— Linux 的沙箱比 macOS 严,本地因此一直是绿的。
  * 这条测试判的是**插件**,不是沙箱策略(沙箱是宿主的事,有它自己的测试),
  * 所以这里把策略显式放开,让判据跨平台一致。
+ *
+ * `DSH_GIT_DEBUG=1` 打开插件自己的诊断开关(见 `src/host/git-runner.ts`):把每次
+ * **失败**的 git 调用的 argv/cwd/退出码/stderr 打到宿主 stderr,而那些行会被下面的
+ * 启动日志原样转发出来。默认关(失败在正常使用里很常见),CI 里必须开 ——
+ * 否则「受管路径里的 git 为什么失败」在日志里查不到。
  * @returns 服务端进程与 URL。
  */
 async function boot() {
   const child = spawn('dsh', ['--profile', PROFILE, '--no-open', '--port', '0'], {
     cwd: REPO,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, DSH_PERMISSION_MODE: 'danger-full-access' },
+    env: { ...process.env, DSH_PERMISSION_MODE: 'danger-full-access', DSH_GIT_DEBUG: '1' },
   });
   let out = '';
   const url = await new Promise((resolveUrl, reject) => {
