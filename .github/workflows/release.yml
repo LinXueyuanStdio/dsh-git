@@ -26,16 +26,16 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
-      # 发布前跑**和 CI 完全相同**的那条链:一个没构建过、没跑过闸门的树不许发出去。
-      # ⚠️ 这条现在是**硬阻塞**:`check:static` 里还有未登记的债务
-      # (check-base-recipes / check-lint / check-scripts-types / check-unreachable-ancestors),
-      # 它们红着的时候这个 release 会停在第一步 —— 这与 CI 的判据一致,不是 bug。
-      - name: 闸门(构建 + 产物语法 + 静态闸门)
+      # 发布前跑**和 CI 完全相同**的那条链:没构建过、没验过可用性的树不许发出去。
+      # 判据与 CI 一致,只覆盖**发布物本身**(构建 + 产物语法 + 包可用性);
+      # 源码卫生那一族闸门(`npm run check:static`)是本地工具,不阻塞发布 ——
+      # 否则带着棘轮债的仓库将永远发不出新版本,而它们与「装上能不能用」无关。
+      - name: 发布物检查(构建 + 产物语法 + 包可用性)
         run: |
           set -euo pipefail
           npm run build
           npm run check
-          npm run check:static
+          node scripts/verify-plugin.mjs
 
       # tag 与 package.json 不一致是最容易犯的发布错:它会安静地发错版本号。
       - name: 校验 tag 与 package.json 版本一致

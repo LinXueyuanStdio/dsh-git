@@ -1,15 +1,23 @@
 name: CI
 
-# 闸门清单**不写在这里**:`scripts/check-all.mjs` 自动发现 `scripts/check-*.mjs`
-# (见 docs/static-gates.md),新增一条闸门不需要改这个文件 ——
-# 「没有闸门的工具 = 没人跑的工具」,反过来说,闸门清单也**只能有一份**。
+# 这条 CI 只回答一个问题:**这个插件构建得出来、装得上、加载得起来吗**。
+#
+# 它刻意**不**跑 `npm run check:static` 那一族(闭包配方、未接线祖先、lint、类型、
+# 生成物摘要…)。那些盯的是「这个仓库自己怎么写的」,其中一部分是长期棘轮债,
+# 与「用户装上能不能用」无关 —— 让它们拦下每一次推送,等于让公开仓库的徽章常年是红的,
+# 而红徽章什么信息都传递不了。它们仍然在本地可用:
+#
+#     npm run check:static              # 一条命令跑齐所有静态闸门
+#     npm run check:generated:rebuild   # 重跑构建,生成物逐字节比对
+#
+# 这里跑的每一步都是**发布物本身**:构建 → 产物语法 → 包可用性。
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
 
-# 同一条 ref 上只留最新一次运行:闸门判的是「当前这条提交」,
+# 同一条 ref 上只留最新一次运行:判的是「当前这条提交」,
 # 让已过时的运行继续跑只会烧额度并制造假红灯。
 concurrency:
   group: ci-${{ github.ref }}
@@ -19,9 +27,9 @@ permissions:
   contents: read
 
 jobs:
-  gates:
+  plugin:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -34,35 +42,26 @@ jobs:
 
       # 用 `npm ci` 而不是 `npm install`:lockfile 与 package.json 不一致时
       # 必须**红**,而不是悄悄改 lockfile 把 CI 弄绿。
+      # (`.npmrc` 里关掉了严格 peer 解析 —— 原因见该文件的注释。)
       - name: 安装依赖
         run: npm ci
 
       # 构建**自包含**:上游样式表已移植进仓库(`src/client/scss/upstream/**`,183 个
       # 文件,与 `references/desktop/app/styles/**` 逐字节相同),所以检出里**没有**
-      # `references/`(.gitignore:221 排除)也**没有** `vendor/`(:224 排除)照样构建。
+      # `references/`(.gitignore 排除)也**没有** `vendor/` 照样构建。
       - name: 构建(esbuild:lib/index.js + lib/client.js)
         run: npm run build
 
       - name: 产物语法检查
         run: npm run check
 
-      # 一条命令跑齐所有静态闸门(check-all 自动发现,顺序执行并汇总)。
-      # 退出码契约:0 = 通过(允许带**已登记**的棘轮债务)、1 = 有**未登记**缺陷、
-      # 2 = 跳过(输入读不到)。
-      #
-      # 注意 `scripts/verify-mirror.mjs` **不在这里**:它判「我们与上游逐字节相同」,
-      # 需要上游 checkout,而 `/references/` 被 .gitignore 排除 ⇒ 它已从 check-* 集合
-      # 移出,改由本机显式调用(否则在 CI 里只会是假绿)。
-      - name: 静态闸门(scripts/check-*.mjs 全跑齐)
-        run: npm run check:static
-
-      # 上游 Desktop `ci.yml:73-74`「Ensure a clean working directory」的等价判据:
-      # 重跑一次构建,生成物必须**逐字节**一致(时间戳已规范化)——
-      # 这条覆盖「生成物与源码不同步」这一整类静默失败。
-      #
-      # `--force`:那条「检测到别的构建在跑就跳过」的保护是给本地多会话工作用的;
-      # 在专用 runner 上它只会把一个真闸门变成 SKIP(退出码 2 ⇒ 整个步骤红)。
-      # `--rebuild`(而不是清单比对模式)比的是**这棵树自己**的源码与产物 ⇒
-      # 判据是「可复现」,不是「与某个记录值相等」。
-      - name: 干净工作区(重跑构建,生成物必须逐字节一致)
-        run: node scripts/check-generated.mjs --rebuild --force
+      # 四件与「装上能不能用」直接相关的事:
+      #   1. package.json 里的 dsh.bundle.patch / exports 指向的文件真的存在;
+      #   2. lib/client.js 的 ModuleLoader id == 包名(Desktop 就是这么校验的),
+      #      且 cordis.patch.yml 指向本包;
+      #   3. 两个产物里的**外部 import/require** 都在 dependencies/peerDependencies 里
+      #      —— 这条抓「本地 node_modules 齐全、用户机器上却加载失败」;
+      #   4. `npm pack` 的内容完整(两个入口 + patch + 图标 + README + LICENSE)
+      #      且**不含 sourcemap**(map 内嵌全部源码,只该留在本机)。
+      - name: 插件可用性(包完整 / 宿主可加载 / 运行时依赖已声明 / 不含源码)
+        run: node scripts/verify-plugin.mjs

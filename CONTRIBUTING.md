@@ -96,10 +96,12 @@ npm run check:generated:rebuild  # 重跑构建，逐字节比对生成物（改
 - 提 PR 前请跑：
 
   ```bash
-  npm run build && npm run check && npm run check:static
+  npm run build && npm run check && node scripts/verify-plugin.mjs
   ```
 
-  如果某条闸门红着且**不是你引入的**，在 PR 描述里点名即可。
+  这三步就是 CI 的全部（判的是发布物：构建、产物语法、包可用性）。**源码卫生闸门
+  `npm run check:static` 不在 CI 里** —— 它盯的是这个仓库自己怎么写的，其中一部分是
+  长期棘轮债，红着也不该拦下 PR；你想跑就跑，跑红了且不是你引入的，在描述里点名即可。
 - 不要提交任何令牌、`.credentials.yaml`、个人路径；`GITHUB_TOKEN` 只作为环境变量出现。
 
 ## 报告问题

@@ -104,7 +104,13 @@ npm run typecheck     # type gate
 npm run check:static  # every static gate in one command (check-all discovers and summarises)
 ```
 
-Gates (local and CI run the same command):
+**CI only checks the published artifact** (build → artifact syntax → package usability: manifest self-consistency, the host can load it, every runtime dependency is declared, and the tarball is complete and carries no source):
+
+```bash
+npm run build && npm run check && node scripts/verify-plugin.mjs
+```
+
+The gates below are **local source-hygiene tools, not CI** — they look at how this repository is written rather than at whether an install works, and some of them carry long-standing ratchet debt:
 
 | Gate | Silent failure it catches |
 |---|---|
