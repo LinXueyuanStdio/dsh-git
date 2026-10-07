@@ -9,7 +9,40 @@ import { DialogContent } from '../dialog'
 import { RadioGroup } from '../lib/radio-group'
 import { Select } from '../lib/select'
 import { Checkbox, CheckboxValue } from '../lib/checkbox'
-import { encodePathAsUrl } from '../../lib/path'
+/*
+ * --- 有意偏离(本轮唯一一处;登记在 `scripts/verify-mirror.mjs` 的 EXPECTED)---
+ *
+ * **上游原文**:
+ *   import { encodePathAsUrl } from '../../lib/path'
+ *   const darkThemeImage = encodePathAsUrl(__dirname, 'static/ghd_dark.svg')
+ *   const lightThemeImage = encodePathAsUrl(__dirname, 'static/ghd_light.svg')
+ *
+ * **这里**:两张图改成**静态 import**,由 `scripts/build.mjs` 的
+ * `loader: { '.svg': 'dataurl' }` 在构建期内联成 data URL。
+ *
+ * **为什么上游那条路在我们这儿必然裂图**(实测,不是推断):
+ * `lib/path.ts:10` 是 `pathToFileURL(Path.resolve(...))`,而浏览器半的
+ * `src/client/shim-node-url.ts:36-38` 的 `pathToFileURL` **返回原串** ⇒ 产出的
+ * `src` 是**根相对 HTTP 路径** `/dsh-git-diff/static/ghd_light.svg`
+ * (`__dirname` = `/dsh-git-diff`,同上目录的 `desktop-globals.ts:45`);
+ * 宿主只注册了 `/dsh-git` 前缀(`src/host/routes.ts:22`)⇒ 那个请求必然 403/404 ⇒
+ * 三张 `<img>` 的 `naturalWidth` 恒为 **0**(用户看到的裂图)。
+ * ⚠️ 注意:它**不是** `file://`;`file://` 只是探针页的 base 把那个相对路径解析出来的
+ * 结果。判据见 `docs/probes/appearance-theme-swatch-probe.mjs`。
+ *
+ * **为什么不改 `lib/path.ts` 的 `encodePathAsUrl`**(评估过,结论是**不该**):
+ * ① 那条 `src` 是**运行期拼出来的字符串**,任何构建期 loader 都碰不到它 ——
+ *    全局改法只能让 `shim-node-url.pathToFileURL` 返回一个**猜出来**的路径
+ *    (`/dsh-git/static/...`),那还需要**新增一条宿主静态路由**,而宿主改动要重启应用;
+ * ② 更关键:`encodePathAsUrl` 还有 6 个**同类但不同结论**的调用点
+ *    (`ui/diff/index.tsx:38` 的 `NoDiffImage`、`ui/changes/no-changes.tsx:54`、
+ *    `ui/repositories-list/repositories-list.tsx:31` 等),它们是 goal 文档 §5
+ *    已登记的「**不是**缺陷」现象,全局改动会把这 7 处**一起**换掉 ——
+ *    修一处用户可见的裂图,顺手改掉 6 处已裁定的现状 = 越权。
+ * ⇒ 偏离落在**调用点**,范围恰好 = 用户报的那 5 个 `<img>`。
+ */
+import ghdDarkThemeImage from '../../static/common/ghd_dark.svg'
+import ghdLightThemeImage from '../../static/common/ghd_light.svg'
 import { tabSizeDefault } from '../../lib/stores/app-store'
 import { enableFormattingPreferences } from '../../lib/feature-flag'
 import {
@@ -140,8 +173,8 @@ export class Appearance extends React.Component<
   }
 
   public renderThemeSwatch = (theme: ApplicationTheme) => {
-    const darkThemeImage = encodePathAsUrl(__dirname, 'static/ghd_dark.svg')
-    const lightThemeImage = encodePathAsUrl(__dirname, 'static/ghd_light.svg')
+    const darkThemeImage = ghdDarkThemeImage
+    const lightThemeImage = ghdLightThemeImage
 
     switch (theme) {
       case ApplicationTheme.Light:
