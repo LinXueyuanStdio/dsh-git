@@ -1088,8 +1088,15 @@ if (!(await addWorkspaceButton.isVisible().catch(() => false))) {
    * 这条已经在 CI 上证明有用 —— 它当场抓住了「静默落到 $HOME」,没让失败漂到
    * 「变更列表里没有 e2e-marker.txt」那种离真因很远的报错。
    */
-  const expectedTitle = basename(scratch);
-  if (!(await page.getByText(expectedTitle, { exact: true }).first().isVisible().catch(() => false))) {
+  /*
+   * ⚠️ 断言必须**容忍 harness 对名字做的 title-case 与分词**:CI 上把目录名
+   * `default-workspace` 显示成 **`Default workspace`**(首字母大写 + 空格)。
+   * 用 `basename` 做 exact 比较会得到**假失败** —— 2026-10-08 实测:
+   * artifact 里 08-workspace-added.png 的工作区 chip 明明是 `Default workspace`,
+   * 断言却说「没加上」。与 `New session` / `Add existing repository…` 同一类坑。
+   */
+  const expectedTitle = new RegExp(basename(scratch).replace(/[-_]+/g, '[\\s_-]?'), 'i');
+  if (!(await page.getByText(expectedTitle).first().isVisible().catch(() => false))) {
     await dumpControls('工作区加完之后');
     throw new Error(`工作区没加到 ${scratch}:界面上的标题不是 ${expectedTitle}(实测会静默落到 $HOME)`);
   }
