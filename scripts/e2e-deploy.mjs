@@ -1086,7 +1086,14 @@ if (!(await addWorkspaceButton.isVisible().catch(() => false))) {
  * `detected:false`(2026-10-08 实测:点了「添加本地仓库」之后面板里始终没有仓库,等到超时)。
  * 真实用户的第一步也是点 `New Session`,所以这里就点它。
  */
-const newSessionButton = page.getByRole('button', { name: /^(New Session|新会话)/ }).first();
+/*
+ * ⚠️ 正则必须带 `i`:CI 上这颗按钮的可访问名是 **`New session`**(小写 s),而
+ * Playwright 对**字符串**匹配默认忽略大小写、对**正则**却按原文匹配 —— 少了 `i`
+ * 就会 `isVisible()===false`,于是误判成「界面已有会话」、一步都没点
+ * (2026-10-08 实测:日志里写着「界面已有会话」,同一份日志里页面文本却是 `No sessions yet`)。
+ * 这与前面 `Add Existing Repository…` / `Add existing repository…` 是同一类坑。
+ */
+const newSessionButton = page.getByRole('button', { name: /^(new session|新会话)/i }).first();
 if (await newSessionButton.isVisible().catch(() => false)) {
   await newSessionButton.click({ timeout: 8000 }).catch(() => { /* 下面照旧 */ });
   await page.waitForTimeout(3000);
