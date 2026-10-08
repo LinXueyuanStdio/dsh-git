@@ -1126,6 +1126,19 @@ await shot('git-panel');
  */
 /** 提交按钮是「仓库已选中且有待提交内容」的判据(文案:`提交 N 个文件到 <branch>`)。 */
 const commitButton = page.getByRole('button', { name: /^(提交|Commit)/ }).first();
+/*
+ * ⚠️ **先展开「当前仓库」下拉** —— 空态那两颗按钮(`+ 添加本地仓库` / `Clone a repository`)
+ * 在这个下拉**里面**,不在顶栏。2026-10-08 CI 实测:下拉收起时它们在 DOM 里存在但
+ * **不可见**,于是 `button:visible` 匹配不到、`getByRole(...)` 又能匹配到却点不动(等可操作超时)。
+ * 本地那次能过是因为早先版本恰好把下拉点开过;切到 autodetect 路线时我把这一步删掉了 —— 回归。
+ */
+await clickFirst([
+  () => page.getByText(/还没有仓库|No repository yet/).first(),
+  () => page.locator('button:visible').filter({ hasText: /当前仓库|Current repository/ }).first(),
+], 8000);
+await page.waitForTimeout(1500);
+await shot('repo-dropdown');
+
 const clickedAddLocal = await clickFirst([
   /*
    * ⚠️ 只在**可见**按钮里按文字找。2026-10-08 CI 实测:那一刻的控件清单里明明有
