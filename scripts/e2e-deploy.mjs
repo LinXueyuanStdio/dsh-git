@@ -733,8 +733,12 @@ async function passModalGates(rounds = 4) {
      * 误判成「启动时没有模态门」,而弹窗其实还在把后面的点击全吃掉(2026-10-07 CI 实测)。
      * 锚定是必须的:`Save and continue` 也含 "continue",不锚定会点到它。
      */
-    for (const pattern of [/^(继续|Continue)$/, /^(稍后配置|Configure later)$/]) {
-      const button = page.getByRole('button', { name: pattern }).first();
+    const gates = [
+      { title: '继续 / Continue', pattern: /^(继续|Continue)$/, slug: 'continue' },
+      { title: '稍后配置 / Configure later', pattern: /^(稍后配置|Configure later)$/, slug: 'configure-later' },
+    ];
+    for (const gate of gates) {
+      const button = page.getByRole('button', { name: gate.pattern }).first();
       if (!(await button.isVisible().catch(() => false))) {
         continue;
       }
@@ -742,7 +746,7 @@ async function passModalGates(rounds = 4) {
       clickedAnyone = true;
       // 写入要落盘(文件锁 + 重放 patch),给足时间再判断,别把慢当成失败。
       await page.waitForTimeout(3000);
-      await shot(`modal-${label}`);
+      await shot(`modal-${gate.slug}`);
     }
     if (!clickedAnyone) {
       ok(round === 1 ? '启动时没有模态门' : `模态门已全部点过(${round - 1} 轮)`);
