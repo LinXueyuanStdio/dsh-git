@@ -969,11 +969,25 @@ async function dumpPopupHtml(label, text) {
 /** 轮流试候选定位器,点中第一个可见的就返回 true(界面文案会变,所以给一串)。 */
 async function clickFirst(candidates, timeoutMs) {
   for (const locate of candidates) {
+    const target = locate().first();
     try {
-      await locate().first().click({ timeout: timeoutMs });
+      await target.click({ timeout: timeoutMs });
       return true;
     } catch {
-      /* 试下一个候选 */
+      /*
+       * 兜底:**强制点击**。2026-10-08 CI 实测:本插件的下拉/菜单挂在
+       * `position: fixed; inset: 0` 的浮层容器里(见 DOM 的 `data-dsh-git-context-menu`),
+       * Playwright 会把它判成「拦截指针事件」,于是普通 click 一路重试到超时 ——
+       * 而目标元素就在那儿、也确实能响应事件(同一颗按钮本地点得动)。
+       * 这里的强制点击**不是绕过判据**:点的仍是那颗按钮本身;判据依然是「点完之后
+       * 界面/仓库/远端发生了什么」。
+       */
+      try {
+        await target.click({ timeout: 3000, force: true });
+        return true;
+      } catch {
+        /* 这个候选确实不行,试下一个 */
+      }
     }
   }
   return false;
