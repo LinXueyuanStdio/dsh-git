@@ -812,6 +812,16 @@ if (degraded !== undefined) {
   warn('控制台里仍有「没有 sidebarRightTabs」的降级记录 ⇒ tab 注册链断在采样那一步');
 }
 
+/*
+ * ⭐ **启动后的页面文本**:CI 上界面的自述是「Choose a workspace to start」——
+ * 工作区列表为空时,主 frame(含右侧栏)根本不渲染,`git` tab 自然不存在。
+ * 所以这条判据要在最前面就留下,免得后面把「没有 tab」误当成「tab 没注册」。
+ */
+const earlyText = await page.evaluate(() => (document.body.innerText ?? '').replace(/\s+/g, ' ').slice(0, 300));
+info(`启动后页面文本:${earlyText}`);
+if (/Choose a workspace|选择一个工作区/i.test(earlyText)) {
+  warn('界面处于「没有工作区」空态 ⇒ 主 frame 与右侧栏都不会渲染,后面的 tab 判据必然失败');
+}
 const shotButtons = seen.buttons;
 info(`首屏按钮数 = ${shotButtons}`);
 
