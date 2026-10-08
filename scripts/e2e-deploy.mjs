@@ -1127,9 +1127,15 @@ await shot('git-panel');
 /** 提交按钮是「仓库已选中且有待提交内容」的判据(文案:`提交 N 个文件到 <branch>`)。 */
 const commitButton = page.getByRole('button', { name: /^(提交|Commit)/ }).first();
 const clickedAddLocal = await clickFirst([
-  () => page.getByRole('button', { name: /^(添加本地仓库|Add local repository)$/ }),
-  () => page.getByRole('button', { name: /(添加本地仓库|Add local repository)/ }),
-], 6000);
+  /*
+   * ⚠️ 只在**可见**按钮里按文字找。2026-10-08 CI 实测:那一刻的控件清单里明明有
+   * `button{添加本地仓库}`,但 `getByRole('button', { name: /^添加本地仓库$/ })` 点不动 ——
+   * 按钮名里带 `+`(图标)会破坏锚定匹配,而 `.first()` 又可能先撞上不可见节点。
+   * 可见性过滤 + 文字包含,两个问题一起解决。
+   */
+  () => page.locator('button:visible').filter({ hasText: /添加本地仓库|Add local repository/ }).first(),
+  () => page.getByRole('button', { name: /添加本地仓库|Add local repository/ }),
+], 8000);
 if (clickedAddLocal) {
   ok('已点击「添加本地仓库」(宿主 repos/autodetect:取当前工作区)');
   await page.waitForTimeout(2500);
