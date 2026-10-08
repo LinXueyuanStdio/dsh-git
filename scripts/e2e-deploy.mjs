@@ -680,6 +680,19 @@ if (health === undefined) {
 }
 ok(`插件路由已就绪:build=${health.build} repos=${health.repos}`);
 
+/*
+ * ⭐ **工作区登记表**:CI 上界面自述「Choose a workspace to start」、左栏「No sessions yet」
+ * (artifact 截图 artifacts/e2e/ci-no-workspace.png)—— 一个工作区都没有 ⇒ 主 frame 与
+ * 右侧栏都不渲染 ⇒ 「点不到 git tab」只是症状。这张表是宿主的真源:它在哪、登记了谁,
+ * 一看便知(本地那张表里有 `.../deepseek-harness/default-workspace`)。
+ */
+const workspaceStore = join(DSH_HOME, 'storages', 'workspace.json');
+if (existsSync(workspaceStore)) {
+  info(`工作区登记表:${readFileSync(workspaceStore, 'utf8').replace(/\s+/g, ' ').slice(0, 400)}`);
+} else {
+  warn(`没有工作区登记表(${workspaceStore})⇒ 宿主一个工作区都没登记,主 frame 与右侧栏都不会渲染`);
+}
+
 // ---------------------------------------------------------------------------
 // 6. 浏览器验证(截图 = CI artifact)
 // ---------------------------------------------------------------------------
