@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **普通 `dsh web` profile 里右侧栏不再缺 `git` 页签**。`sidebarRightTabs` 在浏览器半
+  `apply` 时**还没挂载**（它随后才到），此前用 `ctx.get()` 只采样一次，于是**所有**环境里
+  都跳过注册、只有控制台的一句 warning —— 表现为「右侧栏在、官方页签都在、就是没有 git」。
+  改为动态 `ctx.inject(['sidebarRightTabs'], …)` 懒等待：服务到了就注册，不来就什么都不做，
+  且不阻塞插件激活（静态 `inject` 会把整条客户端启动链卡成 pending，整个 Web UI 一起不可用）。
+
 ## [1.0.0] - 2026-10-07
 
 首个版本。
