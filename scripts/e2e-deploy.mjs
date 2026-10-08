@@ -727,8 +727,14 @@ await page.waitForTimeout(12_000);
 async function passModalGates(rounds = 4) {
   for (let round = 1; round <= rounds; round += 1) {
     let clickedAnyone = false;
-    for (const label of ['继续', '稍后配置']) {
-      const button = page.getByRole('button', { name: label }).first();
+    /*
+     * ⚠️ 文案**按语言变**(CI 的 runner 是 en-US):中文 `继续`/`稍后配置`,
+     * 英文 `Continue`/`Configure later`。用锚定正则覆盖两种,否则在英文界面上会
+     * 误判成「启动时没有模态门」,而弹窗其实还在把后面的点击全吃掉(2026-10-07 CI 实测)。
+     * 锚定是必须的:`Save and continue` 也含 "continue",不锚定会点到它。
+     */
+    for (const pattern of [/^(继续|Continue)$/, /^(稍后配置|Configure later)$/]) {
+      const button = page.getByRole('button', { name: pattern }).first();
       if (!(await button.isVisible().catch(() => false))) {
         continue;
       }
@@ -983,7 +989,7 @@ await passModalGates();
  * 所以必须先展开,再谈「tab 注册上了没有」。
  */
 const openedSidebar = await clickFirst([
-  () => page.getByRole('button', { name: '打开右侧边栏' }),
+  () => page.getByRole('button', { name: /^(打开右侧边栏|Open right sidebar)$/ }),
 ], 6000);
 if (openedSidebar) {
   await page.waitForTimeout(2000);
@@ -1030,10 +1036,10 @@ await shot('git-panel');
  * 于是工作区本身是 git 仓库,这一下点击就能真的登记成功。
  */
 /** 提交按钮是「仓库已选中且有待提交内容」的判据(文案:`提交 N 个文件到 <branch>`)。 */
-const commitButton = page.getByRole('button', { name: /^提交/ }).first();
+const commitButton = page.getByRole('button', { name: /^(提交|Commit)/ }).first();
 const clickedAddLocal = await clickFirst([
-  () => page.getByRole('button', { name: /^添加本地仓库$/ }),
-  () => page.getByRole('button', { name: /添加本地仓库/ }),
+  () => page.getByRole('button', { name: /^(添加本地仓库|Add local repository)$/ }),
+  () => page.getByRole('button', { name: /(添加本地仓库|Add local repository)/ }),
 ], 6000);
 if (clickedAddLocal) {
   ok('已点击「添加本地仓库」(宿主 repos/autodetect:取当前工作区)');
@@ -1113,8 +1119,8 @@ await shot('commit-message');
 await page.keyboard.press('Escape').catch(() => { /* 没有菜单 */ });
 await page.waitForTimeout(400);
 const clickedCommit = await clickFirst([
-  () => page.getByRole('button', { name: /^提交 \d+ 个文件到 / }),
-  () => page.getByText(/^提交 \d+ 个文件到 /).first(),
+  () => page.getByRole('button', { name: /^(提交 \d+ 个文件到 |Commit \d+ files? to )/ }),
+  () => page.getByText(/^(提交 \d+ 个文件到 |Commit \d+ files? to )/).first(),
 ], 10_000);
 if (!clickedCommit) {
   await dumpControls('点不到提交按钮时');
@@ -1159,8 +1165,8 @@ if (SKIP_PUSH) {
   step(`点推送,并断言远端 ${BRANCH} 前进`);
 
   const clickedPush = await clickFirst([
-    () => page.getByRole('button', { name: /推送/ }),
-    () => page.locator('button').filter({ hasText: /推送/ }),
+    () => page.getByRole('button', { name: /(推送|Push)/ }),
+    () => page.locator('button').filter({ hasText: /(推送|Push)/ }),
     () => page.locator('.gw-sync-segment button').first(),
   ], 10_000);
   if (!clickedPush) {
