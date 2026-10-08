@@ -1035,17 +1035,32 @@ if (!(await addWorkspaceButton.isVisible().catch(() => false))) {
   await page.waitForTimeout(1500);
   await shot('add-workspace-clicked');
   await dumpControls('点过「添加工作区」之后');
-  const workspaceInput = page.locator(
-    '[role="dialog"] input[type="text"], .gw-dialog-scrim input[type="text"], .gw-pop input[type="text"]',
-  ).last();
-  if (await workspaceInput.isVisible().catch(() => false)) {
-    await workspaceInput.fill(scratch);
-    await page.waitForTimeout(400);
-    await workspaceInput.press('Enter').catch(() => { /* 忽略 */ });
-    await page.waitForTimeout(3000);
-    await shot('workspace-added');
+  /*
+   * 这个选择器是**网页内的浏览式**(可自动化 ✓),没有现成文本框。CI 上的控件清单逐字是:
+   *   Home | Edit path | actions-runner | Documents | work | New folder | Show hidden files | Cancel | Open
+   * 页面文本是 `Select Workspace Directory`。所以:点 `Edit path` 切到路径输入 →
+   * 填目录 → 点 `Open`。
+   */
+  const clickedEditPath = await clickFirst([
+    () => page.getByRole('button', { name: /^(Edit path|编辑路径)$/ }),
+  ], 8000);
+  if (!clickedEditPath) {
+    await dumpControls('「添加工作区」对话框里没有 Edit path 时');
+    warn('浏览式选择器里没有 Edit path 按钮,无法输入路径');
   } else {
-    warn('「添加工作区」之后没有出现路径输入框(可能是浏览式/原生选择器)');
+    await page.waitForTimeout(800);
+    const workspaceInput = page.locator('input[type="text"]:visible').last();
+    if (!(await workspaceInput.isVisible().catch(() => false))) {
+      await dumpControls('点了 Edit path 仍没有路径输入框时');
+      warn('点了 Edit path 但仍没有可见的路径输入框');
+    } else {
+      await workspaceInput.fill(scratch);
+      await page.waitForTimeout(400);
+      await shot('workspace-path-typed');
+      await clickFirst([() => page.getByRole('button', { name: /^(Open|打开|确定|OK)$/ })], 8000);
+      await page.waitForTimeout(3000);
+      await shot('workspace-added');
+    }
   }
 }
 
