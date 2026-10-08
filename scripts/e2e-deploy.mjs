@@ -1015,6 +1015,40 @@ await passModalGates();
  * 拿不到 tab 不代表没注册上。控件清单里只有 `button[打开右侧边栏]`,一个 tab 都没有,
  * 所以必须先展开,再谈「tab 注册上了没有」。
  */
+/*
+ * ⓪ ⭐ **先让界面有工作区**(CI 上必须,本地因为早就登记过所以看不出)。
+ *
+ * 宿主账本 `$DSH_HOME/storages/workspace.json` 在 CI 上逐字是:
+ *   { initialized: true, workspaceIds: [], tables: { workspaces: {} } }  —— **零个工作区**。
+ * 没有工作区,主 frame(含右侧栏)根本不渲染,`git` tab 自然不存在 ——
+ * 「点不到 tab」只是症状(artifact 截图:ci-no-workspace.png 就是那个空态)。
+ *
+ * 所以按**界面自己的入口**点 `Add workspace`,把工作区指到我们那份克隆目录上:
+ * 这也是真实用户在全新机器上的第一步。找不到路径输入框(例如是原生选择器)就如实 warn,
+ * 并把那一刻的控件清单打出来。
+ */
+const addWorkspaceButton = page.getByRole('button', { name: /^(Add workspace|添加工作区)$/ }).first();
+if (!(await addWorkspaceButton.isVisible().catch(() => false))) {
+  info('界面已有工作区,跳过「添加工作区」');
+} else {
+  await addWorkspaceButton.click({ timeout: 8000 }).catch(() => { /* 下面统一判定 */ });
+  await page.waitForTimeout(1500);
+  await shot('add-workspace-clicked');
+  await dumpControls('点过「添加工作区」之后');
+  const workspaceInput = page.locator(
+    '[role="dialog"] input[type="text"], .gw-dialog-scrim input[type="text"], .gw-pop input[type="text"]',
+  ).last();
+  if (await workspaceInput.isVisible().catch(() => false)) {
+    await workspaceInput.fill(scratch);
+    await page.waitForTimeout(400);
+    await workspaceInput.press('Enter').catch(() => { /* 忽略 */ });
+    await page.waitForTimeout(3000);
+    await shot('workspace-added');
+  } else {
+    warn('「添加工作区」之后没有出现路径输入框(可能是浏览式/原生选择器)');
+  }
+}
+
 const openedSidebar = await clickFirst([
   () => page.getByRole('button', { name: /^(打开右侧边栏|Open right sidebar)$/ }),
 ], 6000);
