@@ -1070,10 +1070,30 @@ if (!(await addWorkspaceButton.isVisible().catch(() => false))) {
     } else {
       await workspaceInput.fill(scratch);
       await page.waitForTimeout(400);
+      /*
+       * ⚠️ **必须回车把路径提交进浏览态**,光 `fill` 再点 `Open` 不够:
+       * 2026-10-08 CI 实测 —— 只 fill + Open 的结果是工作区落到了 `$HOME`(标题 `runner`),
+       * 于是 `repos/autodetect` 拿到一个非仓库目录、一个仓库都登记不上
+       * (现场见 artifact 的 05-workspace-path-typed.png / 06-workspace-added.png)。
+       */
+      await workspaceInput.press('Enter').catch(() => { /* 忽略 */ });
+      await page.waitForTimeout(800);
       await shot('workspace-path-typed');
       await clickFirst([() => page.getByRole('button', { name: /^(Open|打开|确定|OK)$/ })], 8000);
       await page.waitForTimeout(3000);
       await shot('workspace-added');
+      /*
+       * ⭐ **硬断言工作区标题**:必须是**我们那个目录名**。
+       * 这一条把「选择器其实选了别处」这种静默失败挡在前面 —— 否则后面会一路走到
+       * 「变更列表里没有 e2e-marker.txt」,那已经离真因很远了。
+       */
+      const expectedTitle = basename(scratch);
+      if (!(await page.getByText(expectedTitle, { exact: true }).first().isVisible().catch(() => false))) {
+        await dumpControls('工作区加完之后');
+        throw new Error(`工作区没加到 ${scratch}:界面上的标题不是 ${expectedTitle}`
+          + '(实测只 fill 不回车时,它会静默落到 $HOME)');
+      }
+      ok(`工作区已加到 ${scratch}(标题 ${expectedTitle})`);
     }
   }
 }
