@@ -699,7 +699,7 @@ ok(`插件路由已就绪:build=${health.build} repos=${health.repos}`);
  * ⭐ **工作区登记表**:CI 上界面自述「Choose a workspace to start」、左栏「No sessions yet」
  * (artifact 截图 artifacts/e2e/ci-no-workspace.png)—— 一个工作区都没有 ⇒ 主 frame 与
  * 右侧栏都不渲染 ⇒ 「点不到 git tab」只是症状。这张表是宿主的真源:它在哪、登记了谁,
- * 一看便知(本地那张表里有 `.../deepseek-harness/default-workspace`)。
+ * 一看便知(CI 上实测是空的 —— 全新机器宿主不会自动建/登记工作区)。
  */
 const workspaceStore = join(DSH_HOME, 'storages', 'workspace.json');
 if (existsSync(workspaceStore)) {
@@ -870,15 +870,21 @@ step('准备一个真仓库(test 分支的浅克隆)');
  * 仓库就在工作区里。顺带这也是唯一有意义的判据 —— 沙箱本来就不允许碰工作区之外的东西。
  */
 /*
- * ⭐ 仓库落点 = **宿主的默认工作区目录**,不是随便一个临时目录。
+ * ⭐ 仓库落点 = **`$HOME/dsh-git`**(目录名就叫 `dsh-git`)。
  *
  * 为什么:`+ 添加本地仓库` 走的是宿主 `repos/autodetect`(取**当前工作区**路径),
  * 而界面上另外那条「添加新仓库」会唤起**系统文件夹选择器** —— 原生弹窗在无头浏览器里
  * 既看不到也点不动,自动化驱动不了。所以点击驱动的正路是:让**工作区本身就是一个
  * git 仓库**(这也正是真实用户的形状:他的工作区就是他要提交的仓库),
  * 然后点一下 `+ 添加本地仓库`,登记完全由点击完成。
+ *
+ * ⚠️ **目录名不是随便起的**:插件按**目录名**给仓库命名(`src/host/routes.ts` 的
+ * `repos/add` 里 `name: root.split('/').pop()`),远端名另存在 `remote` 字段。
+ * 早先我借用的是 harness 自己的默认工作区目录 `.../default-workspace`,
+ * 于是面板里那个仓库一直显示成 `default-workspace` —— 与 GitHub 仓库名、与包名都不一致,
+ * 读日志时很别扭。所以改成 `$HOME/dsh-git`:界面显示 `dsh-git`,与实际仓库同名。
  */
-const scratch = flag('repo-dir', join(homedir(), 'Documents', 'deepseek-harness', 'default-workspace'));
+const scratch = flag('repo-dir', join(homedir(), 'dsh-git'));
 rmSync(scratch, { recursive: true, force: true });
 mkdirSync(scratch, { recursive: true });
 
@@ -1260,7 +1266,8 @@ if (afterAdd.alerts.length > 0) {
 /*
  * 判据换成**我们真正关心的东西**:那个待提交的文件出现在变更列表里。
  * 不再断言仓库的显示名 —— CI 上工作区的显示名是 `runner`(由 $HOME 推导),
- * 不是目录名 `default-workspace`,拿目录名去等必然超时(2026-10-08 实测)。
+ * 而是会**按 harness 的规则改写**(那时工作区落在了 `$HOME`,显示名就成了 `runner`);
+ * 所以断言必须容忍 title-case/分词,而不是拿目录名做 exact 比较(2026-10-08 实测)。
  */
 const markerRow = page.locator('.gw-frow[data-path="e2e-marker.txt"]');
 try {
