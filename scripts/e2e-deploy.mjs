@@ -1202,13 +1202,36 @@ if (clickedAddLocal) {
   await dumpControls('既没有「添加本地仓库」也没有提交按钮时');
   throw new Error('仓库没有登记上,也没有可点的添加入口');
 }
-await page.waitForTimeout(1500);
 
-/** 判据取界面自己:仓库出现在面板里(顺便说明它被选中了) */
-await page.getByText(basename(scratch), { exact: false }).first().waitFor({ timeout: 20_000 });
-await page.waitForTimeout(2000);
-ok(`仓库已由**点击**添加并出现在界面:${basename(scratch)}`);
-await shot('repo-added-by-click');
+/*
+ * 点完之后**立刻**留现场:仓库到底加上了没有、宿主回了什么(reason/toast),
+ * 只靠「等 20 秒然后超时」是查不出来的 —— 2026-10-08 就为此白等了一轮。
+ */
+await page.waitForTimeout(2500);
+await shot('add-local-clicked');
+const afterAdd = await page.evaluate(() => ({
+  alerts: [...document.querySelectorAll('[role="alert"]')].map((el) => (el.textContent ?? '').trim()).filter((text) => text !== ''),
+  panel: (document.body.innerText ?? '').replace(/\s+/g, ' ').slice(0, 300),
+}));
+if (afterAdd.alerts.length > 0) {
+  warn(`点「添加本地仓库」之后的提示:${afterAdd.alerts.join(' / ')}`);
+}
+
+/*
+ * 判据换成**我们真正关心的东西**:那个待提交的文件出现在变更列表里。
+ * 不再断言仓库的显示名 —— CI 上工作区的显示名是 `runner`(由 $HOME 推导),
+ * 不是目录名 `default-workspace`,拿目录名去等必然超时(2026-10-08 实测)。
+ */
+const markerRow = page.locator('.gw-frow[data-path="e2e-marker.txt"]');
+try {
+  await markerRow.first().waitFor({ timeout: 25_000 });
+  ok('仓库已由**点击**登记,变更列表里出现了 e2e-marker.txt');
+  await shot('repo-added-by-click');
+} catch (error) {
+  await dumpControls('变更列表里没有 e2e-marker.txt 时');
+  info(`面板文本:${afterAdd.panel}`);
+  throw new Error(`点了「添加本地仓库」之后,变更列表里始终没有 e2e-marker.txt(${String(error).split('\n')[0]})`);
+}
 
 /** ③ 选中临时克隆(清单里现在只有它;界面上点一下,别只靠自动选中)。 */
 const repoName = basename(scratch);
