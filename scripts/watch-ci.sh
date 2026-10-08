@@ -39,8 +39,9 @@ fi
 
 echo
 echo "=== 失败现场(已滤掉 peer 噪音;只留结论行/错误/诊断)==="
+# 只滤 **peer 噪音**(那几千行是 dsh 自己的 peer 布局,与我们无关);
+# 其余**全留** —— 白名单写法已经三次把新加的诊断行滤掉了,代价是白等一轮。
 gh run view "${RUN}" --log-failed 2>&1 \
-  | grep -vE "missing peer|✕|├─|└─|│" \
-  | grep -E "✓ |! |Error|控件清单|弹层 HTML|截图|添加到|提交|exit=|浏览器控制台|页面文本|\[info\]|\[error\]|\[warning\]|\[pageerror\]" \
-  | tail -40
+  | grep -vE "missing peer|✕|├─|└─|│ *[├└]|^\s*$" \
+  | tail -50
 exit 1

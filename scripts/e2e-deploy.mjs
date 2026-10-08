@@ -1078,6 +1078,24 @@ if (!(await addWorkspaceButton.isVisible().catch(() => false))) {
   }
 }
 
+/*
+ * ⭐ **加完工作区还要有会话**。
+ *
+ * 宿主 `repos/autodetect` 是按**会话**解析当前工作区的(`currentWorkspace(sessionId)`)——
+ * CI 上左栏是 `No sessions yet`,没有会话就没有「当前工作区」,于是自动探测必然
+ * `detected:false`(2026-10-08 实测:点了「添加本地仓库」之后面板里始终没有仓库,等到超时)。
+ * 真实用户的第一步也是点 `New Session`,所以这里就点它。
+ */
+const newSessionButton = page.getByRole('button', { name: /^(New Session|新会话)/ }).first();
+if (await newSessionButton.isVisible().catch(() => false)) {
+  await newSessionButton.click({ timeout: 8000 }).catch(() => { /* 下面照旧 */ });
+  await page.waitForTimeout(3000);
+  await shot('new-session');
+  info('已点 New Session(autodetect 按会话找当前工作区,没有会话它必然失败)');
+} else {
+  info('界面已有会话,跳过 New Session');
+}
+
 const openedSidebar = await clickFirst([
   () => page.getByRole('button', { name: /^(打开右侧边栏|Open right sidebar)$/ }),
 ], 6000);
