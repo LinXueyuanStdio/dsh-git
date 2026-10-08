@@ -37,8 +37,9 @@
  */
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { uploadToCiAssets } from './lib/ci-assets.mjs';
 import {
-  appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync,
+  appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync,
   rmSync, writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -78,6 +79,8 @@ const tag = 'dsh-git e2e';
 let stepNo = 0;
 /** 每一步的结论,最后汇成 GitHub Actions 的 job summary。 */
 const checks = [];
+/** 已推到 ci-assets 的截图(写进 summary,让 Actions 页面上直接看得见)。 */
+const uploadedShots = [];
 /** 失败原因(top-level await 抛错时由 handler 记下)。 */
 let failure;
 
@@ -130,6 +133,18 @@ function writeSummary() {
     lines.push(`| ${mark} | ${entry.message.replace(/\|/g, '\\|')} |`);
   }
   lines.push('');
+  if (uploadedShots.length > 0) {
+    lines.push('### 每步截图');
+    lines.push('');
+    lines.push('| # | 截图 | 文件 |');
+    lines.push('|:--:|:----:|:-----|');
+    uploadedShots.forEach((shot, index) => {
+      lines.push(`| ${index + 1} | ![${shot.name}](${shot.url}) | \`${shot.name}\` |`);
+    });
+    lines.push('');
+    lines.push(`_共 ${uploadedShots.length} 张,存在 \`ci-assets\` 分支_`);
+    lines.push('');
+  }
   const text = `${lines.join('\n')}\n`;
   if (process.env.GITHUB_STEP_SUMMARY !== undefined) {
     try {
@@ -1414,6 +1429,32 @@ if (KEEP) {
   rmSync(scratch, { recursive: true, force: true });
   rmSync(PROFILE_DIR, { recursive: true, force: true });
   ok('临时克隆与 profile 已删除');
+}
+
+/*
+ * ⭐ **把截图推到 `ci-assets` 分支,让它们在 job summary 里直接可见。**
+ *
+ * job summary 里的 `![](url)` 必须是**可公开访问的图片 URL** —— artifact 的下载链接
+ * 做不到(要登录、也不是图片内容类型)。所以截图走一次 `ci-assets`(Git Data API,
+ * 只动远端那一个 ref,不碰本地工作树),summary 里用 raw URL 嵌成表格
+ * (与 viben 的 `scripts/lib/upload-ci-assets.sh` 同一套做法)。
+ *
+ * 本地跑没有 token ⇒ 这里只 warn,不影响判据(截图仍在 artifacts/e2e/)。
+ */
+try {
+  const shotFiles = readdirSync(SHOTS).filter((name) => name.endsWith('.png')).sort()
+    .map((name) => join(SHOTS, name));
+  const dir = `e2e/${process.env.GITHUB_RUN_ID ?? new Date().toISOString().replace(/[:.]/g, '-')}`;
+  const uploaded = await uploadToCiAssets({
+    repo: process.env.GITHUB_REPOSITORY ?? '',
+    token: process.env.GITHUB_TOKEN ?? '',
+    dir,
+    files: shotFiles,
+  });
+  uploadedShots.push(...uploaded);
+  ok(`截图已推到 ci-assets 分支:${dir}(${uploaded.length} 张,summary 里可见)`);
+} catch (error) {
+  warn(`推到 ci-assets 失败(截图仍在 artifact 里):${String(error).split('\n')[0]}`);
 }
 
 console.log(`\n${tag}: 全部通过(截图在 ${SHOTS})`);
