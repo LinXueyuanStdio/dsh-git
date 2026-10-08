@@ -1016,6 +1016,19 @@ const openedTab = await clickFirst([
 ], 15_000);
 if (!openedTab) {
   await dumpControls('点不到 git tab 时');
+  /*
+   * ⚠️ 光看 DOM 控件清单不够:2026-10-08 CI 实测 —— 清单里连右侧栏的开关都没有,
+   * 说明右侧栏**根本没组合出来**;而那正是「客户端模块加载失败」的典型表现,
+   * 它的现场只存在于**控制台**与页面文本里。所以这两样一起打出来。
+   * (顺便纠正一条曾经的误判:「不再打印『没有 sidebarRightTabs』」**不等于** provider 到了 ——
+   *  改成 `ctx.inject` 之后它没来也不会出声。)
+   */
+  info(`浏览器控制台全部 ${consoleLines.length} 行(末尾 25 行):`);
+  for (const line of consoleLines.slice(-25)) {
+    info(`  ${line.slice(0, 240)}`);
+  }
+  const bodyText = await page.evaluate(() => (document.body.innerText ?? '').replace(/\s+/g, ' ').slice(0, 400));
+  info(`页面文本:${bodyText}`);
   throw new Error('点不到 git tab:右侧栏 tab 没有注册上(判据是 `ctx.inject` 那条修复)');
 }
 /** 面板真的渲染了:本插件的样式全部 scope 在 `.gw-*` 下,这是它独有的锚点。 */
