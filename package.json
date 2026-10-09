@@ -66,7 +66,8 @@
     "check:static": "node scripts/check-all.mjs",
     "check:generated:rebuild": "node scripts/check-generated.mjs --rebuild",
     "typecheck": "node scripts/check-types.mjs",
-    "e2e": "node scripts/e2e-deploy.mjs"
+    "e2e": "node scripts/e2e-deploy.mjs",
+    "upstream:watch": "node scripts/upstream-watch.mjs"
   },
   "dependencies": {
     "@github/alive-client": "^1.2.0",

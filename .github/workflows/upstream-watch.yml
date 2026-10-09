@@ -1,0 +1,292 @@
+name: Upstream watch
+
+# 盯 deepseek-harness 的 npm 发布线,在**新宿主版本**上重跑一遍「装得上、加载得起来、
+# 端到端还通吗」,绿了就开一张 PR,红了就开一张 issue。
+#
+# ── 为什么这件事没有现成轮子 ────────────────────────────────────────────────
+#
+# 本仓库对上游**没有真依赖**:浏览器半的 `@deepseek-ai/*` 全是 esbuild 的 `external`
+# (`scripts/build.mjs`),运行期由宿主 loader 提供;`package.json` 里唯一写着上游的是
+# 可选 peer `@deepseek-ai/dsh-client-ui-primitives` 的一个版本范围,外加
+# `types/client-platform-shims.d.ts` 里那份手抄的类型面。
+# ⇒ **没有 lockfile 可升**,Dependabot 在这个仓库里什么都看不见;它也永远不会去跑
+# 那段 40 分钟的 `scripts/e2e-deploy.mjs` —— 而后者才是这个仓库唯一回答得了
+# 「用户装上还能用吗」的判据。所以这条 workflow 的全部价值不在「改版本号」,
+# 在**把现有判据搬到新宿主上重跑一遍**。
+#
+# ── 节奏:为什么是每 4 小时 ────────────────────────────────────────────────
+#
+# 从 registry 的 `time` 字段统计(2026-08-10 → 2026-10-03,`@deepseek-ai/dsh` 30 次发布):
+#
+#   - 相邻 rc 发布间隔:中位 **1.22 天**,p25 0.47 天,p75 3.93 天,最长 12.7 天;
+#   - 发布落在**全部 7 个星期几**,小时从 03h 到 22h UTC 都有 —— 没有可押的窗口;
+#   - rc.1 → rc.2 最短间隔是**小时级**(同日多版很常见)。
+#
+# 每 4 小时 = 一天 6 次检测,版本没变时几秒退出;变了一次才付那 40 分钟。
+# p25 是 0.47 天(约 11 小时)⇒ 6 小时一次会让约四分之一的版本在轮到之前就被下一版
+# 替掉,4 小时把这部分压到更小。**不要**改成每小时:上游不是按小时发的,
+# 多出来的跑动只会在 Actions 列表里刷屏(公开仓库额度不是瓶颈,信噪比才是)。
+#
+# ── 它与 ci.yml 的分工 ──────────────────────────────────────────────────────
+#
+# `ci.yml` 判「**你刚推的代码**还行不行」,宿主取 `@next`;
+# 本 workflow 判「**上游刚发的版本**还认不认这个插件」,宿主取**精确的目标版本**。
+# 两者跑的是同一条链(build + check + verify-plugin + e2e-deploy),
+# 所以这里红了**不等于**本仓库的代码坏了 —— 恰恰相反,它多半意味着上游动了接缝。
+#
+# ── 两个已知坑(都踩过) ─────────────────────────────────────────────────────
+#
+#  1. **`GITHUB_TOKEN` 建的 PR 不会触发 `pull_request` 上的 CI**(GitHub 的防递归)。
+#     所以这里**不**指望那条 CI:验证与开 PR 在**同一个 job** 里跑完,
+#     判据就是这一步自己。要绿的勾就自己往分支上推一次,或换 PAT。
+#  2. **子包的 `latest` 是脏的**(实测 2026-10:`dsh-base` / `dsh-web-app` 的 `latest`
+#     还停在 `0.0.1-rc.1`)。检测只认 `dist-tags.next` / `alpha`,
+#     并且要求核心 5 包**都**有这个版本才认「整列出齐」—— 否则验的是上游的发布时序。
+#     这道门有多严:历史 30 个版本里,核心 5 包的发布窗口**中位 0.4 分钟、最大 2.3 分钟**,
+#     没有一个版本缺包。所以下面 `settle` 默认 5 分钟是最大窗口的两倍多,余量充足。
+#     (`dsh-client-ui-sidebar-right` 刻意不进门槛:它直到 0.1.5-alpha.1 才跟着整列发。)
+on:
+  schedule:
+    # 避开整点(GitHub 的定时任务在 :00 最挤)。UTC。
+    - cron: '17 */4 * * *'
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: '发布线:next = rc 线;alpha = 预览线(更早看到,也更可能坏)'
+        type: choice
+        options: [next, alpha]
+        default: next
+      settle:
+        description: '「整列出齐」的等待窗口(分钟);历史最大发布窗口是 2.3 分钟'
+        default: '5'
+      force:
+        description: '无视基线与已有 PR/issue,强制重验一次'
+        type: boolean
+        default: false
+
+# 同一时刻只跑一条:两个并发实例会同时去 push 同名的分支。
+concurrency:
+  group: upstream-watch
+  cancel-in-progress: false
+
+# 这个 job 是本仓库里除了 release 之外唯一需要写权限的地方:
+#   contents      —— 建分支推 commit;e2e 还要往 `test` 分支真推一次
+#   pull-requests —— 开 PR
+#   issues        —— 红了开 issue
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    # 40 分钟的 e2e + 装宿主 + 装 pnpm/playwright;给足但不无限。
+    timeout-minutes: 75
+    env:
+      LANE: ${{ inputs.lane || 'next' }}
+      SETTLE: ${{ inputs.settle || '5' }}
+      FORCE: ${{ inputs.force || 'false' }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      REPORT: artifacts/upstream-watch/report.json
+      E2E_LOG: artifacts/upstream-watch/e2e.log
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      # 判据逻辑自身的自检:不联网、毫秒级。版本比较错一位的表现是**安静**的
+      # (要么「每次都报变了」,要么「永远报没变」),所以先钉住它再谈别的。
+      - name: 判据自检(compareVersions / peerCovers)
+        run: node scripts/upstream-watch.mjs --selftest
+
+      # ── 检测 ────────────────────────────────────────────────────────────
+      # 退出码 0 = 无需动作;10 = 上游变了;1 = 上游状态暂不可动作(整列没出齐 /
+      # 还在 settle 窗口 / tag 被回滚);2 = 探针自身出错。
+      # 除 2 之外都不是「失败」—— 这条 workflow 的常态是「什么都不做」。
+      - name: 检测上游发布线
+        id: detect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # `set -u` 下这几个必须有值;job 级 env 已经给了,这里再兜一次,
+          # 免得有人把这一段单独抠出去跑时死在「unbound variable」上。
+          LANE="${LANE:-next}"; SETTLE="${SETTLE:-5}"; FORCE="${FORCE:-false}"
+          mkdir -p artifacts/upstream-watch
+
+          set +e
+          node scripts/upstream-watch.mjs --json --lane="$LANE" --settle="$SETTLE" > "$REPORT"
+          code=$?
+          set -e
+          if [ "$code" = 2 ]; then
+            echo "::error::检测探针自身出错(见上面的 stderr)"
+            exit 2
+          fi
+
+          target="$(node -p "require('./$REPORT').target")"
+          changed=false
+          if [ "$code" = 10 ]; then changed=true; fi
+          if [ "$FORCE" = true ]; then changed=true; fi
+
+          # 去重:针对这个版本已经开过 PR(哪怕是被人关掉的),就不再重复劳动 ——
+          # 「被拒绝的方案不该每小时重提一次」。要重来就 --force。
+          if [ "$changed" = true ] && [ "$FORCE" != true ]; then
+            if [ "$(gh pr list --head "chore/upstream-watch-$target" --state all --limit 1 --json number --jq 'length')" != 0 ]; then
+              echo "::notice::已存在针对 $target 的 PR,跳过"
+              changed=false
+            fi
+          fi
+          # 同理:还挂着一张这个版本的失败 issue ⇒ 已知会红,不必再烧 40 分钟。
+          if [ "$changed" = true ] && [ "$FORCE" != true ]; then
+            title="[upstream-watch] @deepseek-ai/dsh@$target 在新宿主上验证失败"
+            if [ "$(gh issue list --state open --limit 100 --json title --jq "[.[] | select(.title == \"$title\")] | length")" != 0 ]; then
+              echo "::notice::已有一张 $target 的失败 issue 开着,跳过(修完用 force 重验)"
+              changed=false
+            fi
+          fi
+
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          if [ "$changed" = false ]; then
+            echo "::notice::$LANE 线目标版本 $target:本轮无需动作(检测退出码 $code)"
+          fi
+
+      # ── 验证:把 ci.yml 那条链在**这个宿主版本**上原样重跑 ───────────────
+      - name: 构建 + 发布物检查
+        if: steps.detect.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          npm run build
+          npm run check
+          node scripts/verify-plugin.mjs
+
+      - name: 全局安装 pnpm(dsh plugin 的底层)
+        if: steps.detect.outputs.changed == 'true'
+        run: npm i -g pnpm@11
+
+      # **精确版本**,不是 @next:这一次要回答的是「这一个版本认不认」。
+      # 顺带一条:`@deepseek-ai/dsh@X` 的依赖把 bundle 钉在 `^X`,而 `^0.2.0-rc.2`
+      # 按 semver 不包含 `0.2.1-alpha.1`(预发布版本只在同一 [major,minor,patch] 下被接受),
+      # 所以装出来的那棵树是**同一个版本**,不会掺进别的线。
+      - name: 全局安装目标版本的 dsh(宿主)
+        if: steps.detect.outputs.changed == 'true'
+        run: npm i -g "@deepseek-ai/dsh@${{ steps.detect.outputs.target }}"
+
+      - name: 全局安装 playwright(浏览器用 runner 自带的 Chrome)
+        if: steps.detect.outputs.changed == 'true'
+        run: npm i -g @playwright/test@1.59.1
+
+      # `continue-on-error` + `outcome`:红了要继续走下去(记账、开 issue),
+      # 但**绝不能被当成绿**。`pipefail` 是必需的 —— 少了它,这个管道的退出码
+      # 是 `tee` 的 0,这一步就永远不会失败。
+      - name: 端到端部署测试
+        id: e2e
+        if: steps.detect.outputs.changed == 'true'
+        continue-on-error: true
+        env:
+          DSH_HOME: ${{ runner.temp }}/dsh-home
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          node scripts/e2e-deploy.mjs --dsh-version "${{ steps.detect.outputs.target }}" 2>&1 | tee "$E2E_LOG"
+
+      # ── 绿:记账 → 开 PR ────────────────────────────────────────────────
+      - name: 记账并渲染 PR 正文
+        id: record
+        if: steps.detect.outputs.changed == 'true' && steps.e2e.outcome == 'success'
+        run: |
+          set -euo pipefail
+          node scripts/upstream-watch.mjs --apply \
+            --target="${{ steps.detect.outputs.target }}" --run-url="$RUN_URL"
+          node scripts/upstream-watch.mjs --render \
+            --report="$REPORT" --outcome=green --run-url="$RUN_URL" \
+            > artifacts/upstream-watch/body.md
+
+      - name: 开 PR(这个版本还没开过的话)
+        if: steps.record.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          target="${{ steps.detect.outputs.target }}"
+          branch="chore/upstream-watch-$target"
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -B "$branch"
+          git add package.json scripts/upstream-baseline.json CHANGELOG.md
+          if git diff --cached --quiet; then
+            # 理论上到不了(检测已经排除了「验过的版本」),但真到了就别硬造一张空 PR。
+            echo "::warning::$target 没有任何可提交的改动 —— 基线/CHANGELOG 已是这个状态"
+            exit 0
+          fi
+          git commit -m "chore(upstream): 在 @deepseek-ai/dsh@${target} 上通过端到端部署测试"
+          git push -f origin "$branch"
+          # `gh pr create` 把 PR URL 打到 stdout,后面关 issue 时要引用它。
+          pr_url="$(gh pr create --base main --head "$branch" \
+            --title "chore(upstream): 已在 @deepseek-ai/dsh@${target} 上验证通过" \
+            --body-file artifacts/upstream-watch/body.md)"
+
+          # 之前为这个版本开过失败 issue 的话,它已经不成立了 —— 关掉并指向这张 PR。
+          title="[upstream-watch] @deepseek-ai/dsh@$target 在新宿主上验证失败"
+          issue="$(gh issue list --state open --limit 100 --json number,title \
+            --jq "[.[] | select(.title == \"$title\")][0].number")"
+          if [ -n "$issue" ] && [ "$issue" != null ]; then
+            gh issue close "$issue" --comment "已在 $RUN_URL 上通过端到端部署测试:${pr_url}"
+          fi
+
+      # ── 红:开 issue(不推任何东西到 main) ────────────────────────────
+      - name: 渲染失败 issue 正文
+        id: red
+        if: steps.detect.outputs.changed == 'true' && steps.e2e.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          # 这一笔只落在 runner 上、进 artifact —— 红的时候**不往 main 推东西**。
+          # 真正的去重靠 issue 标题(见检测那一步),不靠这个文件。
+          node scripts/upstream-watch.mjs --record-red \
+            --target="${{ steps.detect.outputs.target }}" --run-url="$RUN_URL"
+          node scripts/upstream-watch.mjs --render \
+            --report="$REPORT" --outcome=red --run-url="$RUN_URL" --log="$E2E_LOG" \
+            > artifacts/upstream-watch/body.md
+
+      - name: 开/更新失败 issue
+        if: steps.red.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          target="${{ steps.detect.outputs.target }}"
+          title="[upstream-watch] @deepseek-ai/dsh@$target 在新宿主上验证失败"
+          issue="$(gh issue list --state open --limit 100 --json number,title \
+            --jq "[.[] | select(.title == \"$title\")][0].number")"
+          if [ -n "$issue" ] && [ "$issue" != null ]; then
+            gh issue comment "$issue" --body-file artifacts/upstream-watch/body.md
+          else
+            gh issue create --title "$title" --body-file artifacts/upstream-watch/body.md
+          fi
+
+      # 本轮唯一的「给人看」的证据(检测报告 + 正文 + e2e 日志 + 截图),
+      # 失败时更要拿到现场。
+      - name: 上传现场
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-watch-${{ steps.detect.outputs.target || 'none' }}
+          path: artifacts/upstream-watch/
+          if-no-files-found: warn
+          retention-days: 30
+
+      # e2e 红过就在**这一步**把 job 判红 —— 前面用 continue-on-error 放它继续走,
+      # 是为了记账与开 issue,不是为了让红变绿。
+      - name: 收尾(把 e2e 的红如实传出去)
+        if: steps.e2e.outcome == 'failure'
+        run: |
+          echo "::error::@deepseek-ai/dsh@${{ steps.detect.outputs.target }} 上端到端部署测试失败;已开 issue。"
+          exit 1

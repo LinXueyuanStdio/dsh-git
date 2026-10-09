@@ -1,0 +1,7 @@
+{
+  "$comment": "上游发布监视的状态。verified = 最后一次通过端到端部署测试的上游版本(由 .github/workflows/upstream-watch.yml 写);lastFailure = 最后一次红。人可以让它失效(把 verified 删掉)以强制重验一次。",
+  "lane": "next",
+  "verified": null,
+  "lastFailure": null,
+  "history": []
+}
