@@ -30,7 +30,7 @@
  * | `dispatcher.saveGitIgnore(repo, ignoreText)` | `ignoreTextHasChanged && ignoreText !== null` | 写/删仓库根 `.gitignore` | `store.saveGitIgnore` ⇒ 宿主 `gitignore/save`(本轮新建) |
  * | `removeConfigValue(repo,'user.name'/'user.email')` | 作用域**从 Local 切到 Global** | `git config --local --unset-all` | `store.saveGitConfig([{unset}])` ⇒ 宿主 `config-unset`(本轮新建;argv 早已在 `git-argv.ts:498`) |
  * | `setConfigValue(repo,'user.name'/'user.email',…)` | 作用域是 Local **且** 与初值不同 | `git config --local --replace-all` | `store.saveGitConfig` ⇒ 既有 `config-set` |
- * | `dispatcher.refreshAuthor(repo)` | 上面任一写发生 | 重读 `git var GIT_AUTHOR_IDENT` | **宿主没有 `repo/author-ident` 路由**(§10.10 待建第 9 项)⇒ 用 {@link GitStore.saveGitConfig} 里的 `gitConfigRevision` 计数器顶替:它只触发**重读 git 配置**,效果同形(见 `store.ts` 那段注释)。**这不是等价物,是替代品**,差异写在「六」 |
+ * | `dispatcher.refreshAuthor(repo)` | 上面任一写发生 | 重读 `git var GIT_AUTHOR_IDENT` | **路由已建**(2026-10 本批:`repo/author-ident`,`git-argv.ts` 的 `authorIdentArgv()`),身份**值**改由 {@link CommitAuthorAvatar} 从它取。上游那个 `dispatcher.refreshAuthor` **回调本身**仍然没有等价物(本弹窗与提交区没有共同祖先可传回调)⇒ 保留 {@link GitStore.saveGitConfig} 里的 `gitConfigRevision` 计数器作为**跨组件重读信号**。**这一位仍在,但职责已经变小**(见 `store.ts` 那段注释);它不是「缺路由的替代品」了 |
  *
  * **上游有、我们刻意不写的三处**:
  *  1. `forkContributionTarget` 的写(`:332-343`,条件是它变了)⇒ 需要
@@ -97,10 +97,12 @@
  *    我们没有建库能力(`unsupported-notices.ts` 的 `PUBLISH_REPOSITORY_UNAVAILABLE`
  *    说得比这里细)⇒ 这颗按钮接的是**同一条实话 toast**(与顶栏「发布仓库」按钮
  *    **同一句**、同一个 `store.toast`),不是静默 no-op。
- * 3. **`refreshAuthor` 是替代品不是等价物**:上游读 `git var GIT_AUTHOR_IDENT`
- *    (会做 system 级与 `EMAIL` 环境变量的解析),我们的计数器只触发**重读
- *    `user.name` / `user.email`**。差异面:`EMAIL` 环境变量与 system 级 user.name
- *    这两档我们本来就看不到(`CommitAuthorAvatar` 的文件头已如实写过同一条窄化)。
+ * 3. **`refreshAuthor` 的回调半边仍然缺**(2026-10 本批更新):身份**值**已经走
+ *    `repo/author-ident`(`git var GIT_AUTHOR_IDENT`,含 system 级与 `EMAIL` 环境变量的
+ *    解析),所以「我们看不到 `EMAIL` / system 级」那条窄化**已经不成立**;
+ *    仍然缺的只是上游那个**跨组件回调** `dispatcher.refreshAuthor` ——
+ *    本弹窗与提交区没有共同祖先可传回调,所以保留 `gitConfigRevision` 计数器作为
+ *    重读信号。它触发重读,值由路由给。
  * 4. **jsdom 不证几何**:本弹窗的判据跑在 jsdom(`docs/probes/repository-settings-dialog-probe.mjs`),
  *    只证结构 / 行为 / 请求载荷,**不证**观感。
  *
@@ -109,7 +111,8 @@
  * - `docs/unported-master-ledger.md` §3.8 / §4 把 `ui/repository-settings/**` 记成
  *   「有意排除 (d)」—— **本轮起不再成立**:三个页签已实现,第四个是状态缺口(needs-new-state)。
  * - `docs/goal-port-desktop.md` §10.10 的待建路由第 8 条(`gitignore/append`)本轮**落地**
- *   (外加读 / 整体写两条);第 9 条 `repo/author-ident` **仍未建**(见「六.3」)。
+ *   (外加读 / 整体写两条);第 9 条 `repo/author-ident` **已建**(2026-10,后续批次,
+ *   见「六.3」的更新)。
  * - `src/client/commit-avatar-notices.ts` 的 `REPOSITORY_SETTINGS_UNAVAILABLE`
  *   的回收条件**已满足**(弹窗有渲染分支了)⇒ 该常量在本文件落地后**不可达**,
  *   由它的持有者按那份文件里写的回收条件删除(本轮不动那个文件的所有权边界)。

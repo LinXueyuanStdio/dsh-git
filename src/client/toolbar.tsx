@@ -798,7 +798,27 @@ export function WorkbenchToolbar(props: WorkbenchToolbarProps): ReactNode {
               dispatcher={syncDispatcher}
               repository={repositoryForEntry(currentEntry, entryIndex)}
               aheadBehind={snap.sync === null ? null : { ahead: snap.sync.ahead, behind: snap.sync.behind }}
-              numTagsToPush={snap.sync?.tagCount ?? 0}
+              /*
+               * ⚠️ **`tagsToPush`(未推送的标签),不是 `sync.tagCount`(本地标签总数)**。
+               *
+               * 上游 `ui/app.tsx:3660` 的原句是
+               * `numTagsToPush={state.tagsToPush !== null ? state.tagsToPush.length : 0}`,
+               * 而 `state.tagsToPush` 是 `gitStore.tagsToPush`(`app-store.ts:1478`)——
+               * 「本地有、远端没有」的那一份(`lib/stores/git-store.ts:144/376-377`)。
+               *
+               * 这里以前写的是 `snap.sync?.tagCount ?? 0`,而 `tagCount` 是宿主
+               * `tagListArgv()`(`git tag -l`)的**行数** = **本地标签总数**
+               * (`git-service.ts` 的 `syncState`),与「未推送」无关 ——
+               * `changes-view.tsx` 的推送卡注释里就写着「别用 `snap.sync.tagCount`」。
+               * 代价是用户可见的、且**永远清不掉**的一个假角标:仓库里只要有**任何**一个
+               * 标签(哪怕早就推上去了),`renderAheadBehind` 就把它算进
+               * `ahead + numTagsToPush` ⇒ 推送成功后角标从 N 掉到 1 而不是 0,
+               * 按钮一直是「推送到 origin」(用户原话:「显示推送成功,但是状态又回到
+               * 待推送状态说有 1 个可以推」)。判据是
+               * `docs/probes/push-ahead-refresh-probe.mjs` 的 `B2`(判别夹具:标签**已**推送
+               * ⇒ `tagCount=1` 而 `tagsToPush=[]`,两个数据源取值不同,蒙不过去)。
+               */
+              numTagsToPush={snap.tagsToPush.length}
               remoteName={remoteNameOf(snap)}
               lastFetched={snap.sync?.lastFetchedAt == null ? null : new Date(snap.sync.lastFetchedAt)}
               networkActionInProgress={networkActionInProgress(snap)}

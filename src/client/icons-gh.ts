@@ -25,7 +25,16 @@ export type IconName =
   | 'inbox'
   | 'code' | 'issue' | 'pr' | 'play' | 'check-circle' | 'x-circle' | 'loader'
   | 'circle-idle' | 'external-link' | 'plus' | 'pencil' | 'trash' | 'comment'
-  | 'merge' | 'lock' | 'file' | 'folder' | 'folder-open';
+  | 'merge' | 'lock' | 'file' | 'folder' | 'folder-open'
+  /*
+   * CI 检查那一族 —— 符号身份与上游 `ui/branches/ci-status.tsx:124-148` 的
+   * `getSymbolForCheck` **一一对应**(判断在 `src/client/check-runs.ts` 的
+   * `getCheckAppearance`)。8 个结论 + 2 个「完整性指示器」的实心圆
+   * (上游 `ui/check-runs/ci-check-run-popover.tsx:246-260`),共 10 个,
+   * 全部来自 octicons 镜像,不是手写 path。
+   */
+  | 'check' | 'x' | 'stop' | 'alert' | 'skip' | 'square-fill' | 'dot-fill'
+  | 'issue-reopened' | 'check-circle-fill' | 'x-circle-fill';
 
 /**
  * 我们的图标名 → 上游 octicon 符号(键名与 `IconName` 一一对应,缺一个 TS 就报错)。
@@ -64,6 +73,20 @@ const SYMBOLS: Record<IconName, OcticonSymbol> = {
   file: octicons.file,
   folder: octicons.fileDirectory,
   'folder-open': octicons.fileDirectoryOpenFill,
+  /*
+   * CI 检查那一族:逐条对应上游 `ui/branches/ci-status.tsx:127-147` 的 switch
+   * (`pending` 那条是它的 `default`)。左边的名字是我们的,右边的符号是上游的。
+   */
+  check: octicons.check,
+  x: octicons.x,
+  stop: octicons.stop,
+  alert: octicons.alert,
+  skip: octicons.skip,
+  'square-fill': octicons.squareFill,
+  'dot-fill': octicons.dotFill,
+  'issue-reopened': octicons.issueReopened,
+  'check-circle-fill': octicons.checkCircleFill,
+  'x-circle-fill': octicons.xCircleFill,
 };
 
 export interface GwIconProps {

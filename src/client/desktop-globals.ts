@@ -43,3 +43,30 @@ export const __LINUX__ = /Linux/.test(ua) && !/Android/.test(ua)
  * 给一个不会与真实路径混淆的固定前缀。
  */
 export const __dirname = '/dsh-git-diff'
+
+/*
+ * **Node 的定时器全局**:`setImmediate` / `clearImmediate`。
+ *
+ * 为什么需要(2026-10 实测):镜像的虚拟列表 `ui/lib/list/section-list.tsx` 在
+ * **ResizeObserver 回调**里就用了 `setImmediate`(`:488`,`clearImmediate` 在 `:485`),
+ * 卸载路径在 `:1128`;`ui/lib/list/list.tsx:451-454, 1082` 同形。浏览器里没有这两个全局
+ * ⇒ `ReferenceError: setImmediate is not defined` ⇒ **React 17 把整棵 ChangesView 卸掉**
+ * (现场:`docs/probes/changes-discard-lines-probe.mjs` 报 `rows: 0` 而 `lineLabels: 8` ——
+ * 右栏还在、左栏整块没了)。
+ *
+ * 语义:Node 的 `setImmediate` 是「本轮 I/O 之后、定时器之前」;浏览器里最接近的等价物是
+ * `setTimeout(fn, 0)`(上游自己也只在 `ResizeObserver` 回调里用它做「尺寸稳定后再量一次」),
+ * 句柄类型是 `number`,所以 `clearImmediate` 直接接 `clearTimeout` —— 两边配对,
+ * 不会出现「clear 一个 set 的句柄类型不匹配」。
+ *
+ * 这两个名字进 `clientInject`(`scripts/build.mjs:103` 注入的是**整个文件**的导出),
+ * 所以镜像文件保持一字不改。
+ * @param handler - 回调。
+ */
+export const setImmediate = (handler: (...args: Array<unknown>) => void, ...args: Array<unknown>): number =>
+  (globalThis as { setTimeout: (fn: () => void, ms?: number) => number }).setTimeout(() => { handler(...args) }, 0)
+
+/** @param handle - `setImmediate` 的返回句柄。 */
+export const clearImmediate = (handle: number): void => {
+  (globalThis as { clearTimeout: (id: number) => void }).clearTimeout(handle)
+}

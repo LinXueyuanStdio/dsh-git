@@ -844,8 +844,64 @@ export function DesktopDiff(props: IDesktopDiffProps): ReactNode {
       el.addEventListener('mousedown', onMouseDownCapture, true);
     }
 
+    /**
+     * ⭐ **行勾选「点一下没反应」的根因修复**(2026-10-08,真 Chrome 实测)。
+     *
+     * ## 现场(逐条读数,`docs/probes/changes-linkage-probe.mjs` 的 D 组)
+     *
+     * 上游给「一行纳入/排除」修了**两条**通往同一个 `onIncludeChanged` 的路:
+     *  1. 行号格 `<div class="line-number" onMouseDown={onMouseDownLineNumber}>`
+     *     —— mousedown 记 `temporarySelection`,`document` 的 mouseup 由
+     *     `onEndSelection` 落地(`side-by-side-diff.tsx:1246-1260,1335-1354`);
+     *  2. 同一个格子里那个 `<label htmlFor={checkboxId}>` 包着 `<input class="sr-only">`
+     *     —— 点 label **原生激活** input ⇒ `onChange` ⇒ `onLineNumberCheckedChanged`
+     *     (`side-by-side-diff-row.tsx:781-800`)。
+     *
+     * **一次普通点击会同时走完两条** ⇒ 两次互为反向的写入 ⇒ 净零:
+     *  · `D6`(只跑 ①:合成 mousedown + document mouseup)⇒ 左栏行**变 `partial`**;
+     *  · `D8`(CDP **可信拖选**)⇒ 左栏行**变 `partial`**;
+     *  · `D4`(CDP **可信单击** label)⇒ 左栏行**纹丝不动**、`input.checked` 逐位不变;
+     *  · `D7`(点 hunk 那一格的 check-all label,**没有** ① 那条路)⇒ 一次就生效。
+     *  ⇒ 只有「同时有两条路」的那一格净零。「行勾选没有和左边列表联动」的用户报的
+     *  就是这一格:点一下什么都不发生,拖一下反而能用。
+     *
+     * ## 为什么在**我们的**层里拦,而不是改镜像
+     *
+     * `side-by-side-diff-row.tsx` 是**逐字镜像**(`verify-mirror` 要求字节一致),
+     * 动它就等于造第二份真源。而 `label` 的隐式激活是**默认行为**,在一个
+     * **捕获阶段**的 `click` 上 `preventDefault()` 就把它去掉 —— 我们这一层已经
+     * 因为同样的理由挂着 `contextmenu` 与 `mousedown` 两个捕获监听器(见上)。
+     *
+     * ## 去掉的是什么、留下的又是什么(不许丢功能)
+     *
+     * · 去掉的:label 的原生激活(**只有**它,`htmlFor` 是 label 唯一的默认动作);
+     * · 留下的:① 那条 mousedown/mouseup —— 它同时是**普通点击**与**拖选范围**的实现
+     *   (`D6`/`D8` 两条读数都还在);
+     * · 不受影响的:直接操作 `<input class="sr-only">`(读屏/AT 与键盘激活走的是
+     *   **input 自己**的 `click`,而 input 是 label 的**兄弟**、不命中下面这条选择器)
+     *   —— `D1` 正是这条路的读数。
+     *
+     * ## 退役条件
+     *
+     * ① 上游把 `<label htmlFor>` 换掉(或不再给行号格挂 `onMouseDown`);② 或镜像行
+     * 升到 React 18 之后实测「单击一次就生效」(那时本拦截就是多余的)——
+     * 两条任一成立就把这一段连同 `D4` 一起删掉,**不要**留着当装饰。
+     */
+    const onLineLabelClickCapture = (event: MouseEvent): void => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+      if (target.closest('.line-number label') === null) {
+        return;
+      }
+      event.preventDefault();
+    };
+    el.addEventListener('click', onLineLabelClickCapture, true);
+
     return () => {
       el.removeEventListener('contextmenu', onContextMenuCapture, true);
+      el.removeEventListener('click', onLineLabelClickCapture, true);
       if (blockDragSelection) {
         el.removeEventListener('mousedown', onMouseDownCapture, true);
       }

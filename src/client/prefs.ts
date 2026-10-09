@@ -172,3 +172,72 @@ export function usePreferredExternalEditor(): string | null {
   );
 }
 
+// ---------- `confirmCommitFilteredChangesKey`(上游「提交被筛选隐藏的改动时先确认」) ----------
+
+/**
+ * `确认提交被筛选隐藏的改动` 那个偏好 —— 上游 `lib/stores/app-store.ts:509-510` 的键名,
+ * **逐字**(注意它自己就带 `Key` 后缀,不是我们起的名字):
+ *
+ * ```ts
+ * const confirmCommitFilteredChangesKey: string =
+ *   'confirmCommitFilteredChangesKey'
+ * ```
+ *
+ * 上游把它写进 **localStorage**(同文件 `:7881-7882`:赋值之后
+ * `setBoolean(confirmCommitFilteredChangesKey, value)`,而 `setBoolean` 在
+ * `lib/local-storage.ts` 里就是 `localStorage.setItem`),所以这里走本模块同一条路径
+ * —— 不新增第二套存储机制,也不改宿主的 `prefs/set`(那个 `PrefsPatch` 的键集在
+ * `src/host/repo-registry.ts:55-67` 是固定的,加键要同时改宿主与 `src/index.ts` 的
+ * zod schema,那超出本泳道的文件范围)。
+ *
+ * 上游的**写侧**是应用菜单 ▸ Preferences ▸ Prompts 的复选框
+ * (`ui/preferences/prompts.tsx:224`)以及确认框自己的
+ * 「Do not show this message again」(`ui/changes/confirm-commit-filtered-changes-dialog.tsx:57-64,90`);
+ * **读侧**是 `ui/changes/filter-changes-list.tsx:945-951`
+ * (`askForConfirmationOnCommitFilteredChanges` ⇒ `showPromptForCommittingFileHiddenByFilter`)。
+ * 本插件在这之前**两侧都没有**(既没有写方也没有读方);现在两侧都落在这两个函数上。
+ */
+const KEY_CONFIRM_COMMIT_FILTERED_CHANGES = 'confirmCommitFilteredChangesKey';
+
+/** 上游 `lib/stores/app-store.ts:496` 的 `confirmCommitFilteredChangesDefault`(逐字 `true`)。 */
+export const CONFIRM_COMMIT_FILTERED_CHANGES_DEFAULT = true;
+
+/**
+ * 读「提交被筛选隐藏的改动时先弹确认框」。
+ *
+ * 取值口径照上游 `lib/local-storage.ts:20-39` 的 `getBoolean`:键不存在 ⇒ 默认值;
+ * `'1'`/`'true'` ⇒ 真;`'0'`/`'false'` ⇒ 假;其余(被手改过的值)⇒ 默认值。
+ */
+export function getConfirmCommitFilteredChanges(): boolean {
+  const raw = readRaw(KEY_CONFIRM_COMMIT_FILTERED_CHANGES);
+  if (raw === null) { return CONFIRM_COMMIT_FILTERED_CHANGES_DEFAULT; }
+  if (raw === '1' || raw === 'true') { return true; }
+  if (raw === '0' || raw === 'false') { return false; }
+  return CONFIRM_COMMIT_FILTERED_CHANGES_DEFAULT;
+}
+
+/** 写该偏好(上游 `app-store.ts:7879-7885` 的 `_setConfirmCommitFilteredChanges`)。 */
+export function setConfirmCommitFilteredChanges(value: boolean): void {
+  writeRaw(KEY_CONFIRM_COMMIT_FILTERED_CHANGES, value ? 'true' : 'false');
+}
+
+/**
+ * ⚠️ **这个键刻意没有 `useSyncExternalStore` 版本的订阅钩子**(本文件其余三个键都有),
+ * 理由是一条**实测过的**渲染路径约束,不是风格选择:
+ *
+ * 它唯一的读方是 `src/client/changes-view.tsx` 的 `ChangesView`,而 **20+ 条 jsdom 探针
+ * 直接挂载 `ChangesView`**(`commit-form-parity-probe` / `hidden-changes-warning*` /
+ * `changes-*` …),它们跑的是 `node_modules` 里的 **React 17.0.2** ——
+ * `useSyncExternalStore` 是 React 18 才有的导出,第一条探针就炸成
+ * `TypeError: (0, import_react16.useSyncExternalStore) is not a function`,
+ * 整棵树被卸载(实测:`commit-form-parity-probe` 从 exit 0 变成未捕获异常)。
+ * 产品里没有这个问题(真渲染层是 React 18),但**判据不能在探针里失真**。
+ *
+ * ⇒ 读方改用本文件本来就导出的两个**原语**:`subscribePreference(key, cb)` +
+ * `getConfirmCommitFilteredChanges()`(见 `changes-view.tsx` 里的那两行)。
+ * 存储、键名、广播机制**一个字都没换** —— 换的只是 React 侧的订阅写法。
+ * 退役条件:仓库把探针的 React 抬到 18(或给所有挂 `ChangesView` 的探针统一垫
+ * `useSyncExternalStore`)之后,这个键可以照其余三个键的形状补一个钩子。
+ */
+export const CONFIRM_COMMIT_FILTERED_CHANGES_KEY = KEY_CONFIRM_COMMIT_FILTERED_CHANGES;
+

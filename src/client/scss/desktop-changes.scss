@@ -451,3 +451,181 @@
   height: 12px;
   margin-bottom: 1px;
 }
+
+/*
+ * ===========================================================================
+ * `+n/-n` **在 diff header 那一行的齿轮左侧 · 红绿着色**(用户 2026-10-09 两次裁决)
+ * ===========================================================================
+ *
+ * 用户原话(逐字):「Changes 右边的 diff header 下面有 + / -,请挪到 header 里面」;
+ * 随后追加:「+n / -n 应该在 header 内的设置按钮的左侧,并且要有红绿着色」。
+ *
+ * ## 哪一部分由行内负责、哪一部分必须写成规则
+ *
+ * 镜像 `DiffHeader`(`ui/diff/diff-header.tsx`)的根 `.header` 是它**自己产出的**、
+ * 没有 `children` 插槽,而那份文件必须保持**逐字节**(`scripts/verify-mirror.mjs` 盯着)
+ * ⇒ 那两段数字只能是 `.header` 的**兄弟**,几何由 `changes-view.tsx` 的 `DiffPane`
+ * **量出来**写成行内 style:
+ *   · 竖直:与 `.header` 等高 + `marginTop = -headerHeight` ⇒ 落进 header 的矩形、同一行;
+ *   · 水平:行盒被 `marginLeft:auto` 钉在 `.diff-container` 的右边缘,再靠**行自己的
+ *     右内边距**(= 行盒右边缘 − 齿轮左边缘 + 一个呼吸位)把**内容**左推到齿轮左边。
+ *
+ * 剩下两件**行内做不到**的(要作用在镜像件的**既有孩子**与公共类上)只能写成规则:
+ *
+ *  1. **让位**:数字占的那段宽度必须从**路径文本**那里让出来,否则数字压在路径尾巴上。
+ *     让法是给 `.path-label-component` 加**右边距**:路径标签是 flex 生长项,
+ *     加右边距只让它**自己的盒**变窄(齿轮与状态图标的位置一点不动 —— 富余空间全被
+ *     生长项吃掉),而镜像 `PathText` 量的正是**它自己的**盒宽
+ *     (`ui/lib/path-text.tsx:369-372` 的 `getBoundingClientRect().width`)⇒ 文本跟着截断。
+ *     ⚠️ **不能**改用「给 `.header` 加右内边距」:那是**上一版**的写法,它把齿轮与状态
+ *     图标**一起往左推**,在 header 最右边留一段空白 —— 而数字当时正是放在那段空白里
+ *     (即「状态图标右侧」)。裁决要的是「齿轮左侧」,所以让位必须发生在**左邻**身上。
+ *  2. **着色**(`.add` 绿 / `.del` 红):`+n/-n` 是我们自己发明的信息,上游头部**没有**
+ *     这一格 ⇒ **没有上游色值可抄**。按本面既有契约绑**宿主语义令牌**
+ *     (`_dsh-bridge.scss` 文件头那条:颜色一律绑 DSH 令牌,不抄十六进制),取「新增 /
+ *     删除」这一对角色:`--dsw-alias-state-success-primary`(绿)与
+ *     `--dsw-alias-state-error-primary`(红)。它们正是本面 `--color-new` /
+ *     `--color-deleted` 绑的同一对令牌、也是 `src/client/styles.ts:819-820` 那两条
+ *     原本想用的色(见下面「为什么不放进 styles.ts」);随主题翻转,深色下自动换成
+ *     宿主的高亮变体。
+ *
+ * ## 变量(提供者与兜底)
+ *
+ *  · `--gw-diff-stat-w`:数字那一段**自己的**宽度(随 `+n`/`-m` 的位数变),由 `DiffPane`
+ *    用 `useLayoutEffect` 量到后写在 `.diff-container` 的行内 style 上 —— 自定义属性沿
+ *    DOM **向下继承**,写一次就够。量不到(jsdom 没有布局引擎 / 首帧)**不写**,
+ *    这里回落到 `0px`:路径标签于是和上游一样占满,**不假装量到了**。
+ *    `useLayoutEffect` 保证真实浏览器里那一刻在**绘制之前**就被纠正。
+ *  · `--gw-diff-stat-gap`:数字与齿轮之间的呼吸位。**由 CSS 提供、由 `DiffPane` 读**
+ *    (`getComputedStyle` 读自定义属性)⇒「齿轮前那个缝」只有一份真源。
+ *
+ * ## 作用域(为什么这几条不会漏进宿主皮肤)
+ *
+ * 四条规则都从 `.gw-desktop-changes`(`scripts/styles.mjs` 里注册的本面作用域根)起:
+ * `scripts/build.mjs` 的**产物前缀化** + `findLeakedRules` 保证「产物里任何顶层选择器
+ * 都必须落在某个注册作用域根下」——也就是说这几条规则在**宿主页面**上只可能命中
+ * `.gw-desktop-changes` 子树里的节点(宿主皮肤里既没有 `.gw-diff-stat*`,也没有
+ * `.gw-desktop-changes`)。History 侧的 `.gw-diff-stat` 颜色**刻意不动**:本次裁决只针对 Changes。
+ *
+ * ## `--gw-diff-stat-reserve`:从「数字的让位」退成**上游原值**
+ *
+ * 下面那条 `padding-right: var(--gw-diff-stat-reserve)` 是**上一版**为「数字放在状态图标
+ * 右侧」写的让位规则(2026-10-10 为修 `check-scope-roots` 收窄过选择器)。本次把数字挪到
+ * 齿轮左侧之后,让位改在**路径标签**上(见上),**产品里不再需要它** —— `DiffPane` 也不再写
+ * 这个变量,于是它取声明里的 `var(--spacing)` = 10px = **上游 `.header` 自己的右内边距**,
+ * header 右侧不再有多余空白。
+ * ⚠️ 这一条**故意保留**:`docs/probes/changes-diff-stat-reserve-probe.mjs` 钉着它的
+ * 选择器形状(恰好一个作用域根)与「变量真的被消费」那几条读数(`S1`–`S4`);
+ * 那是**样式规则**的探针(变量由探针自己写),不依赖产品里谁写它。
+ *
+ * ## 为什么着色规则**不**放进 `src/client/styles.ts`
+ *
+ * `styles.ts:816-820` 里有一对**从未生效**的着色规则:`.gw-diff-stat .a` /
+ * `.gw-diff-stat .d`,而 `changes-view.tsx` 渲染出来的两段数字带的类是 `add` / `del`
+ * (类名对不上 ⇒ 数字一直只继承三级文字色 —— 用户这次要的「红绿着色」正是补这一格)。
+ * 那两条**不动**(它们在另一个注入源里,且 `check-base-recipes` 的 `orphan/bare` 桶记着
+ * `.add`/`.del` 这两个「无规则类」),而是在本面**重新**给出作用域内的着色:令牌与那两条
+ * **同一对**,所以「加法是什么颜色」不会出现第二份真源。
+ */
+
+/*
+ * 变量的**声明点**(本面作用域元素自己身上)。
+ *
+ * 为什么必须有这三条:`scripts/build.mjs` 的第 5 道检查(变量绑定)要求「被引用的自定义
+ * 属性必须在**它自己的作用域下**有声明」——只在行内 style 里给值不够(那正是
+ * `scripts/styles.mjs` 的 `VARIABLE_EXCEPTIONS` 存在的理由)。
+ */
+.gw-desktop-changes {
+  --gw-diff-stat-reserve: var(--spacing);
+  --gw-diff-stat-w: 0px;
+  --gw-diff-stat-gap: var(--spacing-half);
+}
+
+/* 数字的让位:让**路径标签自己的盒**变窄(镜像 `PathText` 量的就是它的盒宽)。 */
+.gw-desktop-changes .diff-container > .header .path-label-component {
+  margin-right: calc(var(--spacing-half) + var(--gw-diff-stat-w) + var(--gw-diff-stat-gap));
+}
+
+/*
+ * 着色:两段数字各自的**角色色**,宿主语义令牌(`--dsw-alias-*`)、不写十六进制。
+ * 与 `styles.ts:819-820` 那两条同令牌 ⇒ 浅色下绿 / 红,深色下自动换成宿主的高亮变体。
+ * 作用域是 `.gw-desktop-changes`(见上),History 侧与宿主皮肤都拿不到。
+ */
+.gw-desktop-changes .gw-diff-stat.add {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.gw-desktop-changes .gw-diff-stat.del {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+/*
+ * ⚠️ **这一条里只能出现一个作用域根**(`.gw-desktop-changes`)—— 2026-10-10 修
+ * `check-scope-roots` 的未登记红。
+ *
+ * 改前是 `.gw-desktop-changes .gw-desktop-diff > .diff-container > .header`:
+ * **两个**作用域根出现在同一条选择器里,于是 `scripts/check-scope-roots.mjs` 记一条
+ * finding(它的判据是「一条选择器里作用域根 > 1 次」,防的是嵌套 `@import` 把第二个
+ * `&` 展开成含作用域根的完整父选择器那种**永不匹配**的死规则,机制见那个脚本头部)。
+ *
+ * 这一条**不是**那类死规则:`.gw-desktop-changes`(ChangesView 的根)的**后代**里
+ * 确实还有一个 `.gw-desktop-diff`(`changes-view.tsx` 渲染的那一层),所以改前的
+ * 选择器真的命中那个 header。但闸门的判据是**形状**(根的计数),而这条形状与
+ * 那 42 条死规则**逐字同形** ⇒ 它没法在形状上区分。
+ *
+ * 因此按「**收窄到语义等价、且形状唯一**」修:去掉中间那个 `.gw-desktop-diff`。
+ * 等价性由探针 `docs/probes/changes-diff-stat-reserve-probe.mjs` 承重:
+ *  · `S1` 新选择器在真 DOM 上命中 **恰好 1** 个 header,且与改前那条选择器命中的是
+ *    **同一个元素**(同帧两个 querySelector 的结果 `===`);
+ *  · `S2` 变量的消费是**活的**:`.diff-container` 上写 `--gw-diff-stat-reserve:60px`
+ *    ⇒ 同一帧 `getComputedStyle(header).paddingRight === '60px'`(阳性对照);
+ *  · `S3` **承重阴性对照**:把 `.gw-desktop-changes` 祖先挪掉 ⇒ 命中 0、变量不再被消费
+ *    (证明这条规则真的是**它**在给内边距,而不是上游 `.header` 自己的兜底);
+ *  · `S4` 变量未写时回落到 `10px`(上游 `.header` 的 `var(--spacing)`,改前改后同值)。
+ *
+ * 为什么不把 `.gw-desktop-diff` 挪到 `:is()` 里、或改用 `>` 组合子:两者都**只是换写法**,
+ * 根的字符串计数仍然是 2 ⇒ 闸门照旧红。形状规则是这一条闸门唯一的判据。
+ */
+.gw-desktop-changes .diff-container > .header {
+  padding-right: var(--gw-diff-stat-reserve);
+}
+
+/*
+ * ==========================================================================
+ * 作者输入框(co-author)与自动补全 —— 2026-10-09 新增的两个 partial
+ * ==========================================================================
+ *
+ * ## 为什么是这两个文件
+ *
+ * `ui/lib/author-input/author-input.tsx` 与
+ * `ui/autocompletion/user-autocompletion-provider.tsx` 是**镜像进来的**组件
+ * (提交表单的 co-author 输入框 + 它弹出的用户/emoji/分支自动补全),它们的配方分别写在
+ * 上游 `ui/_author-input.scss` 与 `ui/_autocompletion.scss` 里;而这两个 partial
+ * **此前不在任何移植面的 `@import` 闭包内** ⇒ 产物里 0 条规则,`check-base-recipes`
+ * 把它们报成**未登记 split**(`.author-input-component` / `.shadow-input` /
+ * `.added-author-container` / `.user`,以及本来就红的 `.autocompletion-container` /
+ * `.autocompletion-item` / `.autocompletion-popup` / `.emoji`)。
+ *
+ * 这两个文件**本来就在我们的上游镜像树里**
+ * (`src/client/scss/upstream/ui/_author-input.scss`、`_autocompletion.scss`),与
+ * `references/desktop/app/styles/ui/**` 逐字节相同(`cmp` 验过)⇒ **不需要新增任何 SCSS**,
+ * 缺的只是「谁 import 它们」。按上游自己的分法,它们的宿主是 `ui/changes/_commit-message.scss`
+ * (提交摘要行下面的作者行)——那正是本面,所以挂在 `.gw-desktop-changes` 上。
+ *
+ * 作用域由 `scripts/styles.mjs` 在编译产物上逐选择器前缀,产物里的形状是
+ * `.gw-desktop-changes .autocompletion-popup` 这种 —— 与宿主 DOM 不可能相交
+ * (宿主页面里没有 `.gw-desktop-changes`;构建期的 `findLeakedRules` 也会拦下任何
+ * 逃出作用域的规则)。两个 partial 里**没有任何 `body` / `:root` / `@keyframes`**,
+ * 所以前缀化不会有「根元素插错位置」那一类问题(已逐条读过全文)。
+ *
+ * ⚠️ 两个 partial 引用了 6 个桥里原来没有的变量(`--co-author-tag-*` / `--form-error-*`),
+ * 已按「结构数值沿用上游、颜色绑 DSH 令牌」补进 `_dsh-bridge.scss` 的同一个 mixin ——
+ * 不补的话那几条声明会按 invalid-at-computed-value-time **整条静默丢掉**。
+ *
+ * ⚠️ 漏登记的**前提**是 `scripts/styles.mjs` 的 `changes` 表项里也逐条写了 `requires`
+ * (构建期断言「它们在本面作用域下真的存在」)。只 import 不登记 = 缺口从「有闸门报」
+ * 退化成「没人守卫」。
+ */
+@import './upstream/ui/author-input';
+@import './upstream/ui/autocompletion';
+

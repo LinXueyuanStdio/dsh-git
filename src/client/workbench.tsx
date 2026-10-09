@@ -25,6 +25,23 @@ import { LocalCodeView } from './local-code-view.tsx';
 import { IssuesView } from './issues-view.tsx';
 import { PullsView } from './pulls-view.tsx';
 import { ActionsView } from './actions-view.tsx';
+/*
+ * **通知面板 + 轮询**(2026-10-08)。
+ *
+ * 上游的高信号通知走 `@github/alive-client` 的长连接 + `desktop-notifications`
+ * (OS 通知);我们这半两条都不在,替代物是**轮询**(`notifications.ts` 的文件头
+ * 写了它与上游的逐条语义差和请求预算)。`workbench.tsx` 负责三件事:
+ *  1. **启停轮询**(放在这一层而不是面板里 —— 面板关着的时候也必须继续轮询,
+ *     否则「你不在看的时候才该来的通知」永远不来);
+ *  2. 入口是**底部状态条 `.gw-footer` 右端**那颗带未读角标的开关
+ *     (`.gw-tab` 不再被它借用 —— 2026-10 用户裁决「那你做错了,不应该在页签里」,
+ *     逐条理由见 `notifications-view.tsx` 的 `NotificationsInboxButton`);
+ *  3. 打开时把 `.gw-inbox` 那一层画在 `.gw-body` 里(`styles.ts:124-132` 的
+ *     那一族规则**此前零写入方**,见 `notifications-view.tsx` 的文件头)。
+ */
+import { NotificationsPanel, NotificationsInboxButton } from './notifications-view.tsx';
+import { notificationsStore, notificationsStream } from './notifications.ts';
+import { applyAliveMode, callAliveStatus, ALIVE_WATCHDOG_MS, type AlivePuller } from './alive.ts';
 import { PreferencesDialog } from './preferences-dialog.tsx';
 import type { PreferencesTabId } from './preferences-dialog.tsx';
 /*
@@ -220,6 +237,38 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
   const preferencesOpen = popup === PopupType.Preferences;
   const [cloneOpen, setCloneOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  /**
+   * **通知面板开着吗**(`.gw-inbox` 覆盖层;与当前页签**正交** —— 它在
+   * `.gw-body` 里盖住页签正文,不改变 `snap.tab`)。
+   *
+   * 为什么不做成第七个页签:`.gw-inbox` 那一族规则(`styles.ts:124-132`)本来就是
+   * 「页签正文之上的一层」写的(`position:absolute;inset:0;z-index:28`),而它
+   * **此前零写入方**。做成页签要动 `store.ts` 的 `TabId` + `TAB_ORDER` + 计数
+   * (三处共享文件),收益一样。
+   */
+  const [inboxOpen, setInboxOpen] = useState(false);
+  /** 通知层的数据面快照(与面板读的是**同一份**;角标就是它的 `unread`)。 */
+  const notifSnap = useSyncExternalStore(
+    notificationsStore.subscribe,
+    notificationsStore.getSnapshot,
+    notificationsStore.getSnapshot,
+  );
+  /*
+   * 三个进 JSX 的回调都过 `useCallback` —— `.eslintrc.yml:125` 的
+   * `react/jsx-no-bind: error` 会把「传进 JSX 的标识符解析到组件内的箭头函数」
+   * 判成违规,而 `check-lint` 只拦**新增**违规(见 `workbench.tsx:196` 那段同款注释)。
+   */
+  const toggleInbox = useCallback((): void => {
+    setInboxOpen((open) => !open);
+  }, []);
+  const closeInbox = useCallback((): void => {
+    setInboxOpen(false);
+  }, []);
+  /** 「去 Pull requests」:关掉通知层 + 切到 PR 页签(详情对话框缺席时的替代路径)。 */
+  const openPullsFromInbox = useCallback((): void => {
+    store.setTab('pulls');
+    setInboxOpen(false);
+  }, [store]);
   const [dialog, setDialog] = useState<null | { opts: ConfirmOptions; resolve: (value: boolean) => void }>(null);
   /*
    * 界面缩放(px;`0` = 跟随宿主)—— **订阅** `prefs-bus` 的那一份,不再自己 `useState`。
@@ -315,6 +364,84 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
 
   const currentEntry = useMemo(() => currentEntryOf(snap), [snap.repos, snap.current]);
   const ghRef = useMemo(() => parseRepoInput(currentEntry?.remote ?? ''), [currentEntry?.remote]);
+
+  /**
+   * **通知的启停**(成本与语义差见 `src/client/notifications.ts` 的文件头)。
+   *
+   * 放在 `WorkbenchApp` 而不是面板里是**刻意的**:面板关着(甚至用户在看别的页签)
+   * 的时候也必须继续收 ——「你不在看的时候才该来的通知」正是通知存在的理由。
+   * 面板里那份订阅只负责**渲染**。
+   *
+   * `ghRef` 是 `useMemo` 出来的对象(引用只在远端变化时换),所以切仓库正好重建一次
+   * 目标与基线(`NotificationsStream.setTarget`)。没有 GitHub 远端 ⇒ `stop()`
+   * 并且 `target = null`(面板会说出「这个仓库没有 GitHub 远端」)。
+   *
+   * ★ **两条生产者互斥**(2026-10-08):先问宿主的 `alive/status` ——
+   * 只有读到 `listening === true`(连接**真的**建立了)才
+   * `notificationsStream.setAlive(true)`,那之后 `start()` **不建定时器**
+   * (GitHub 请求 0 次)。读不到 / 没就绪 / 老宿主 ⇒ `setAlive(false)` + 照旧轮询。
+   * 「有路由」不等于「已连接」,所以判据是 `listening` 而不是 `supported`。
+   */
+  useEffect(() => {
+    notificationsStream.setTarget(ghRef);
+    if (ghRef === null) {
+      notificationsStream.stop();
+      return undefined;
+    }
+    let puller: AlivePuller | null = null;
+    let cancelled = false;
+    let watchdog: ReturnType<typeof setInterval> | null = null;
+    void (async () => {
+      const applied = await applyAliveMode(ghRef);
+      if (cancelled) {
+        applied?.stop();
+        return;
+      }
+      puller = applied;
+      // 长连接没就绪 ⇒ 这里是轮询;就绪 ⇒ `start()` 只切 transport,不建定时器。
+      notificationsStream.start();
+      /*
+       * **运行期回落到轮询**:`probe()` 只问一次,所以这里每 60s 复读一次宿主的读数。
+       *
+       * ⚠️ **它只在「会话被拿掉」时才回落**:`listening` 自 2026-10-08 起是
+       * 「真的有一条 session + 一条订阅」。上游 `AliveStore` 只在
+       * `unsubscribeFromAccount`(`stop()` / `refresh()` 那条路)里删它们;
+       * **一次 socket 掉线不会**让这个字段变 false(上游 `AliveSession` 自己重连)
+       * ⇒ 「连接断了」这件事**今天**仍然可能不被这里发现。这是**已登记的边界**,
+       * 不是「兜底已经覆盖了所有掉线」(见 `docs/alive-connection-port.md` §12.7)。
+       *
+       * 为什么**不**在这里补一次「向前切长连接」(首次探测没赶上就永远轮询):
+       * 那会让长连接**迟到地**接管,而宿主缓冲里此刻仍留着轮询**已经报过**的那条事件
+       * ⇒ 同一条评论以 `a:` 再进一次列表(两条生产者先后都跑 —— 正是本仓禁止的形状)。
+       * 宁可停在轮询。60s 一次,打的是**本机**路由。
+       */
+      watchdog = setInterval(() => {
+        void (async () => {
+          if (cancelled || puller === null) {
+            return;
+          }
+          const status = await callAliveStatus();
+          if (cancelled || status === null) {
+            return;
+          }
+          if (status.listening !== true) {
+            puller?.stop();
+            puller = null;
+            notificationsStream.setAlive(false);
+            notificationsStream.start();
+          }
+        })();
+      }, ALIVE_WATCHDOG_MS);
+    })();
+    return () => {
+      cancelled = true;
+      if (watchdog !== null) {
+        clearInterval(watchdog);
+      }
+      puller?.stop();
+      notificationsStream.stop();
+    };
+  }, [ghRef]);
 
   // 远端视图需要的 token:host 只在 remote-repos 里回缓存,不吐令牌。
   // 因此远端写操作要求用户仍处于登录态;读公开仓无需令牌。
@@ -427,6 +554,13 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
           </ErrorBoundary>
         ) : (
           <>
+            {/*
+              * **这一行只有 `TAB_ORDER` 那 6 个真页签** —— `role=tablist` 里不许有
+              * 第 7 颗(2026-10 用户裁决「那你做错了,不应该在页签里」)。
+              * 上游的仓库页签栏同样只有两页签(`ui/repository.tsx:217-233` 的
+              * `renderTabs()` = `#changes-tab` + `#history-tab`),页签行里**没有**
+              * 任何通知面。通知入口在 `.gw-footer`(见下面那颗)。
+              */}
             <div className="gw-tabs" role="tablist">
               {TAB_ORDER.map((tab) => (
                 <TabButton key={tab.id} id={tab.id} label={tab.label}
@@ -498,6 +632,18 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
                 <ViewPort store={store} snap={snap} ghRef={ghRef} onOpenGitSettings={openGitSettings}
                   onOpenRepositorySettings={openGitConfigSettings} />
               </ErrorBoundary>
+              {/*
+                * **通知层**:`.gw-inbox` 是 `position:absolute;inset:0;z-index:28`
+                * (`styles.ts:124`),挂在 `.gw-body` 里就是「盖住页签正文」。
+                * 它自己带 `ErrorBoundary` —— 通知数据面坏了不该带走整个页签正文
+                * (与其它浮层同一条纪律,见下方 clone / preferences 的边界)。
+                */}
+              {inboxOpen && (
+                <ErrorBoundary label="通知面板" resetKey={ghRef === null ? 'no-remote' : `${ghRef.owner}/${ghRef.repo}`}
+                  onError={reportPanelError}>
+                  <NotificationsPanel onOpenPulls={openPullsFromInbox} onClose={closeInbox} />
+                </ErrorBoundary>
+              )}
             </div>
           </>
         )}
@@ -509,6 +655,16 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
             {snap.sync !== null && snap.sync.remotes.length > 0 ? ` · ${snap.sync.remotes.join(',')}` : ''}
             {snap.storagePersistent === false ? ' · 存储仅内存' : ''}
             {snap.busy !== '' ? ` · ${snap.busy}…` : ''}
+            {/*
+              * **通知入口 —— 状态条右端那颗铃**(2026-10 用户裁决「不应该在页签里」;
+              * 位置理由与上游依据见 `notifications-view.tsx` 的 `NotificationsInboxButton`)。
+              *
+              * ⚠️ 只在**选了仓库**时渲染:那一层 `.gw-inbox` 画在 `.gw-body` 里,
+              * 而空态(`snap.current === ''`)那一支**根本没有** `.gw-body`
+              * (见上面 `snap.current === '' ? <Empty …/> : …`)⇒ 那时画出这颗按钮
+              * 就会是「点了没有任何东西」的假控件,正是本仓禁止的形状。
+              */}
+            {snap.current !== '' && <NotificationsInboxButton active={inboxOpen} unread={notifSnap.unread} onToggle={toggleInbox} />}
           </span>
         </div>
 

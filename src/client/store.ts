@@ -4,7 +4,7 @@
  * @module dsh-git/client/store
  */
 
-import { api, unwrap, waitForRoutes, type AuthStatePayload, type HealthPayload, type RemoteRepo } from './api.ts';
+import { api, unwrap, waitForRoutes, type AuthStatePayload, type HealthPayload, type RemoteRepo, type IStashFilePayload } from './api.ts';
 import { fileStatusKindOf, supportsLineSelection } from './file-kind.ts';
 import { RepoStateCache, noopStatsStore, type RepoScopedSnapshot } from './repo-state-cache.ts';
 import { appFileStatusOf, buildPartialPatchFromRaw, toDiffSelection, type FileStatusKind, type LineSelectionSpec } from '../core/partial-stage.ts';
@@ -65,6 +65,41 @@ import {
   getHideWhitespaceInChangesDiff, getHideWhitespaceInHistoryDiff, getShowSideBySideDiff,
   setHideWhitespaceInChangesDiff, setHideWhitespaceInHistoryDiff, setShowSideBySideDiff,
 } from './diff-mode.ts';
+import { AppFileStatusKind, CommittedFileChange } from '../core/desktop/models/status.ts';
+import type { AppFileStatus } from '../core/desktop/models/status.ts';
+import { StashedChangesLoadStates } from '../core/desktop/models/stash-entry.ts';
+import type { IStashEntry } from '../core/desktop/models/stash-entry.ts';
+/*
+ * ---- 共同作者(Co-Authored-By,2026-10 本轮)**唯一的**四个依赖 ----
+ *
+ * `isKnownAuthor` 是**运行期**谓词(不是类型):`getCoAuthorTrailers` 用它把
+ * `UnknownAuthor` 挡在 trailer 之外,判据逐字来自上游 `ui/changes/commit-message.tsx:577-585`
+ * 的 `.filter(isKnownAuthor)`。它是 `Author` 判别联合的**唯一**官方收窄函数
+ * (`models/author.ts:47-50`),不在这里另写一份 `kind === 'known'`。
+ */
+import { isKnownAuthor } from '../core/desktop/models/author.ts';
+import type { Author } from '../core/desktop/models/author.ts';
+/*
+ * `ITrailer` 是上游 `lib/git/interpret-trailers.ts:17-20` 的接口,**只作类型**使用
+ * (所以不产生运行期边 —— 那个模块在浏览器半有一半是抛错的替身,见它的文件头)。
+ * 用上游那个类型而不是自己写 `{token,value}`:`ICommitContext.trailers`
+ * (`models/commit.ts:31`)收的就是它,两处必须**同一个**类型。
+ */
+import type { ITrailer } from '../core/desktop/lib/git/interpret-trailers.ts';
+/*
+ * `IAutocompletionProvider` 是 `AutocompletingInput` 收的那个协议
+ * (`ui/autocompletion/autocompletion-provider.ts:19-62`)。**只作类型** ——
+ * 直接指向定义它的模块,不绕 `ui/autocompletion/index.ts`(那是 `export *` 桶,
+ * 会把三个本仓不存在的模块拉进包;同一条理由已登记在 `verify-mirror.mjs` 的
+ * `autocompleting-text-input.tsx` / `ref-name-text-box.tsx` 两条 EXPECTED 上)。
+ */
+import type { IAutocompletionProvider } from '../core/desktop/ui/autocompletion/autocompletion-provider.ts';
+/*
+ * 镜像替身 `GitStore` **只作类型**(它就是本文件 `class GitStore` 要满足的那份
+ * 契约;`implements Pick<MirrorGitStore, …>` 见类声明上方)。名字带 `Mirror` 前缀是
+ * 为了避免与本文件的 `class GitStore` 撞名 —— 两个名字都必须是它们各自文件里的原名。
+ */
+import type { GitStore as MirrorGitStore } from '../core/desktop/lib/stores/git-store.ts';
 
 /**
  * 网络动作在飞期间**轮询宿主进度**的间隔(ms)。
@@ -451,6 +486,64 @@ export function summaryOrPlaceholderOf(summary: string, files: readonly ChangedF
 }
 
 /**
+ * **共同作者 → 提交 trailer** —— 上游 `ui/changes/commit-message.tsx:577-585` 的
+ * `getCoAuthorTrailers()` 的**逐字**语义(那 9 行整段抄在下面,一段没改):
+ *
+ * ```ts
+ * private getCoAuthorTrailers() {
+ *   const { coAuthors } = this.props
+ *   const token = 'Co-Authored-By'
+ *   return this.isCoAuthorInputEnabled
+ *     ? coAuthors
+ *         .filter(isKnownAuthor)
+ *         .map(a => ({ token, value: `${a.name} <${a.email}>` }))
+ *     : []
+ * }
+ * ```
+ *
+ * 三条**必须**逐字保留的细节(每一条都有一个「看起来一样」的错写法):
+ *  1. **开关关掉时返回 `[]`**(`isCoAuthorInputEnabled` 那一支)。它只在
+ *     `repository.gitHubRepository !== null` 时为真(`:815-817`)—— 也就是说
+ *     「在非 GitHub 仓库里,共同作者一个都不进提交消息」。这不是遗漏。
+ *  2. **`.filter(isKnownAuthor)`**:输入框里「还没核到人」的 `UnknownAuthor`
+ *     (`models/author.ts:20-30`)**不进** trailer —— 拿 `author.name` 去读一个
+ *     没有 `name` 字段的联合成员,在类型层就过不去,那正是判别联合的用处。
+ *  3. **值的形状是 `` `${name} <${email}>` ``**,token 是 `'Co-Authored-By'`
+ *     (大小写逐字;`isCoAuthoredByTrailer`(`lib/git/interpret-trailers.ts:26-28`)
+ *     比较时才 `toLowerCase()`)。
+ *
+ * ## 它今天**没有产品调用点**,原因(不是「忘了接」)
+ *
+ * 上游把这 9 行的结果放进 `ICommitContext.trailers`(`commit-message.tsx:617-626`),
+ * 再由 `lib/format-commit-message.ts:33-35` 交给 `mergeTrailers()`
+ * (一条 `git interpret-trailers --trailer …`,真跑 git)。我们这一侧**两处**都还没通:
+ *   · `store.commit()` 发的载荷没有 `trailers` 字段(`api.commit`,
+ *     `src/client/api.ts:1009-1012`);
+ *   · 宿主 `commit` 路由也不收它(`src/host/routes.ts:877-889`),而
+ *     `src/core/desktop/lib/git/interpret-trailers.ts:87-93` 的 `mergeTrailers`
+ *     是**抛错替身**(`requiresHost`)。
+ * ⇒ 把这个数组塞进**现在**的载荷 = 宿主静默忽略它 = 「界面收了但提交里没有」
+ * (本仓最贵的那类静默缺陷)。所以本轮**只把唯一一份投影函数落下来**,
+ * 端到端那一步(宿主路由 + `mergeTrailers`)写在报告里,不假装接通。
+ *
+ * @param coAuthors - 表单里当前的共同作者(**可能是 `UnknownAuthor`**)。
+ * @param isCoAuthorInputEnabled - 上游 `commit-message.tsx:815-817` 的那条闸门
+ *   (`repository.gitHubRepository !== null`)。
+ * @returns trailer 数组;**开关关掉时为 `[]`**。
+ */
+export function getCoAuthorTrailers(
+  coAuthors: ReadonlyArray<Author>,
+  isCoAuthorInputEnabled: boolean,
+): ReadonlyArray<ITrailer> {
+  const token = 'Co-Authored-By';
+  return isCoAuthorInputEnabled
+    ? coAuthors
+      .filter(isKnownAuthor)
+      .map((a) => ({ token, value: `${a.name} <${a.email}>` }))
+    : [];
+}
+
+/**
  * 「当前这份 diff 对应哪个目标」的**唯一**一处定义 —— 请求序号与陈旧判定都靠它。
  *
  * 为什么必须抽出来(而不是留在 `loadDiff()` 里):这个 key 有两个消费方 ——
@@ -476,9 +569,14 @@ export interface Snapshot {
    * **git 作者身份被写过的次数**(仓库设置弹窗 ▸ Git Config 页的保存)。
    *
    * 消费点只有一个:`src/client/changes-view.tsx` 的 `CommitAuthorAvatar` 把
-   * `snap.gitConfigRevision ?? 0` 列进那个「读 user.name / user.email」effect 的依赖 ——
+   * `snap.gitConfigRevision ?? 0` 列进那个「取作者身份」effect 的依赖 ——
    * 于是「在仓库设置里改了作者」**当场**反映到提交区的「Committing as」浮层,
    * 不需要刷新页面、也不需要先提交一次。完整理由见 `initial()` 里同名字段的注释。
+   *
+   * ⚠️ 2026-10 本批更新:`repo/author-ident` 路由**已经建好**(`git var GIT_AUTHOR_IDENT`),
+   * 身份**值**由它提供;这个计数器现在只承担**跨组件重读信号**(上游那半是
+   * `dispatcher.refreshAuthor`)。它**不再**是「缺路由的替代品」,但**仍然承重** ——
+   * 按「先做,不删」留着。
    *
    * 可选:老夹具构造 `Snapshot` 字面量时不必补它(`?? 0`)。
    */
@@ -501,8 +599,9 @@ export interface Snapshot {
    * 最近一次**生成提交信息失败**的原始错误;`null` = 没有尚未关闭的失败弹窗。
    *
    * 用户 2026-10-07 报:「Changes 页面左下角点击生成的时候,**如果出现生成错误,
-   * 错误通知里缺失具体信息**」。改前这条失败走 `store.fail()`,而那个方法对
-   * `code === 'internal'` **刻意不附 `detail`**(`fail()` 的 suffix 判据),
+   * 错误通知里缺失具体信息**」。改前这条失败走 `store.fail()`,而那个方法当时对
+   * `code === 'internal'` **不附 `detail`**、且只取 detail 首行(`fail()` 的 suffix 判据;
+   * ⚠️ **那三条已于 2026-10 根因修复**,见 `fail()` 头注释),
    * 于是宿主放在信封里的原始证据(生成 diff 失败时的 git stderr、
    * 见 `git-service.ts` 的 `classifyGitFailure`)在客户端被**丢掉**;
    * 而且它只是一条 7 秒后消失、无法选中的 toast。
@@ -534,6 +633,31 @@ export interface Snapshot {
    * 切仓库时清空,`refreshAll()` / 打开 History 页签立刻拿回来。
    */
   tagsToPush: string[];
+  /**
+   * **当前分支的 Desktop stash 条目**,`null` = 这个分支没有 stash。
+   *
+   * 上游的载体:`GitStore.currentBranchStashEntry`(`lib/stores/git-store.ts:1227-1231`)
+   * —— 它是从 `_desktopStashEntries`(按**分支名**索引的 `Map`)里按当前 tip 的分支取出来的;
+   * 在 `IRepositoryState` 里叫 `changesState.stashEntry`(`lib/app-state.ts:845-848`)。
+   *
+   * 两类消费点(缺一个都会让 stash 面像没接):
+   *  1. **Changes 表头右键**「贮藏全部改动…」的标签与启用判据
+   *     (上游 `filter-changes-list.tsx:544,549-554`);
+   *  2. **空态的 stash 卡** —— 上游 `no-changes.tsx:398-421` 要
+   *     `changesState.stashEntry !== null && files.kind === Loaded`,
+   *     而那张卡是 `renderActions()` 里**优先级最高**的一支
+   *     (`:742` 的 `renderViewStashAction() || renderRemoteAction()`)。
+   *
+   * ⚠️ 它的 `files` 走**与上游同一个两段式**(`:1250-1270` 的
+   * `loadFilesForCurrentStashEntry`):`NotLoaded` → `Loading` → `Loaded`。
+   * 空态卡严格要求 `Loaded`,所以「列表拿到了但文件还没装载完」时卡片**故意不出现**
+   * (与上游同形:那一刻它显示的是远端那一支)。
+   *
+   * **不是按仓库缓存的字段**(照 `tagsToPush` 的处置):切仓库时清空,
+   * `loadStashEntries()` 立刻按新仓库重取 —— 留上一个仓库的 stash 会让
+   * 「贮藏全部改动」按下别的分支的名字。
+   */
+  stashEntry: IStashEntry | null;
   branches: BranchEntry[];
   selectedFiles: string[];
   /**
@@ -573,6 +697,32 @@ export interface Snapshot {
   selectedCommit: string;
   commitDetailFiles: { path: string; status: string; additions: number; deletions: number }[];
   commitForm: CommitForm;
+  /**
+   * **提交表单里「共同作者」那一行的开关** —— 上游 `IChangesState.showCoAuthoredBy`
+   * (`lib/app-state.ts:826`),由 `GitStore.showCoAuthoredBy`(`lib/stores/git-store.ts:957-959`)
+   * 投影而来(`lib/stores/app-store.ts:1466-1470` 那条 `updateChangesState` 回调)。
+   *
+   * ⚠️ **它不是偏好键、也没有 localStorage**:上游的存储是**每仓库一份**的 `GitStore`
+   * 字段 `_showCoAuthoredBy`(`git-store.ts:138`,**初值 `false`**,`git-store.ts` 里
+   * `localStorage` **0 命中**),容器是 `lib/stores/git-store-cache.ts:6-31` 的
+   * `Map<string, GitStore>`。所以这里也按仓库留(见 `coAuthorStates`)。
+   *
+   * 消费点:`src/client/co-authors-row.tsx`(上游 `commit-message.tsx:815-821` 的
+   * `isCoAuthorInputEnabled` / `isCoAuthorInputVisible` 两条 getter)。
+   */
+  showCoAuthoredBy: boolean;
+  /**
+   * **已经加进提交表单的共同作者**(判别联合 `Author`,不是纯字符串)——
+   * 上游 `IChangesState.coAuthors`(`lib/app-state.ts:835`)← `GitStore.coAuthors`
+   * (`git-store.ts:965-967`,后备字段 `_coAuthors` `:140`,**初值 `[]`**)。
+   *
+   * 为什么类型是 `Author` 而不是「姓名+邮箱」两个字符串:`KnownAuthor`
+   * (`kind:'known'`,有 name/email/username)才可能进 trailer;`UnknownAuthor`
+   * (`kind:'unknown'`,只有 username + `state:'searching'|'error'`)是「输入了但还没
+   * 在 GitHub 上核到人」的中间态 —— 上游 `commit-message.tsx:582` 的
+   * `.filter(isKnownAuthor)` 就是靠这个判别联合把后者挡在 trailer 之外的。
+   */
+  coAuthors: Author[];
   auth: AuthStatePayload | null;
   remoteRepos: RemoteRepo[];
   remoteReposLoading: boolean;
@@ -662,19 +812,27 @@ function initial(): Snapshot {
     status: null,
     sync: null,
     tagsToPush: [],
+    // 上游初值:`GitStore._desktopStashEntries` 空 Map ⇒ `currentBranchStashEntry` = null
+    // (`lib/stores/git-store.ts:158,1227-1231`)。
+    stashEntry: null,
     /*
      * **git 作者身份的版本号**(2026-10,仓库设置弹窗那条线)。
      *
-     * 为什么要一个计数器而不是让视图自己重读:`CommitAuthorAvatar` 的读配置 effect 的
-     * 依赖是 `[path, headSha]`(`src/client/changes-view.tsx` 的 `readEffectiveAuthor`)——
-     * 这是**上游的**触发时机(`ui/changes/commit-message.tsx:492-499,798` 的
+     * 为什么要一个计数器而不是让视图自己重读:`CommitAuthorAvatar` 取作者身份的 effect
+     * 依赖是 `[path, headSha, gitConfigRevision]`(`src/client/changes-view.tsx`)——
+     * 前两个是**上游的**触发时机(`ui/changes/commit-message.tsx:492-499,798` 的
      * `commitAuthor` 变化 + `onRefreshAuthor()`),刻意不挂 `snap` 全量(否则每敲一个字
-     * 摘要都会打四发 host 调用)。而「在仓库设置里改了 user.name/user.email 但没有提交」
+     * 摘要都会打一发 host 调用)。而「在仓库设置里改了 user.name/user.email 但没有提交」
      * 这一档,`headSha` **不变** ⇒ 不重读 ⇒ 「Committing as」浮层继续显示旧身份,
      * 直到用户提交一次。上游靠 `dispatcher.refreshAuthor(repository)`
-     * (`repository-settings.tsx:380-382`)把 `commitAuthor` 换掉,我们没有那条路由
-     * (`repo/author-ident` 在 `goal-port-desktop.md` §10.10 的待建清单里),于是用这个
-     * 计数器顶替**同一件事**:写配置时 +1,视图把它列进那个 effect 的依赖。
+     * (`repository-settings.tsx:380-382`)把 `commitAuthor` 换掉;那个回调跨不过
+     * 仓库设置弹窗与提交区这两个组件,于是用这个计数器把**同一件事**送达:写配置时 +1,
+     * 视图把它列进那个 effect 的依赖。
+     *
+     * ⚠️ 2026-10 本批更新:身份**值**已经改由 `repo/author-ident` 路由提供
+     * (`git var GIT_AUTHOR_IDENT`),所以计数器**不再**是「缺路由的替代品」;
+     * 它现在只剩「跨组件重读信号」这一件事,而那一件事上游也不是路由做的。
+     * 按「先做,不删」保留。
      *
      * 可选字段:老夹具 / 别的泳道构造的 `Snapshot` 字面量不必补它(`?? 0`)。
      */
@@ -700,6 +858,14 @@ function initial(): Snapshot {
       generating: false,
       generatedBy: '',
     },
+    /*
+     * 共同作者的**初值** —— 逐字取上游 `GitStore` 的两个字段初值:
+     * `_showCoAuthoredBy = false`(`lib/stores/git-store.ts:138`)、
+     * `_coAuthors = []`(`:140`)。**刻意不在这里另写一套默认**(默认值只能有一处:
+     * `coAuthorStates` 未命中时回落到这里,见 `coAuthorStateOf()`)。
+     */
+    showCoAuthoredBy: false,
+    coAuthors: [],
     auth: null,
     remoteRepos: [],
     remoteReposLoading: false,
@@ -751,10 +917,106 @@ function repoScopedOf(snap: Snapshot): RepoScopedSnapshot {
 declare const __BUILD_STAMP__: string | undefined;
 const BUILD_STAMP: string = typeof __BUILD_STAMP__ === 'string' ? __BUILD_STAMP__ : '未知';
 
-export class GitStore {
+/**
+ * 宿主那条 `stash/show` 的 **JSON 状态** → 镜像模型的 `AppFileStatus`
+ * (上游 `mapStatus` 的产物类型,`models/status.ts:26-52`)。
+ *
+ * 为什么要在客户端做这一步(而不是让宿主直接把 `CommittedFileChange` 发过来):
+ * 那是**类实例**,HTTP 信封只能带纯 JSON。宿主发的是 `kind` 字符串 + 可选字段
+ * (与 `AppFileStatusKind` 的取值**逐字相同**,见 `core/parse.ts` 的
+ * `mapRawStatusToAppFileStatus`),这里把它还原成判别联合 —— 于是
+ * `models/stash-entry.ts` 的 `IStashEntry.files` 是**真类型**,不是 `as any` 糊过去的。
+ *
+ * `default` 落到 `Modified` 与上游 `mapStatus` 的兜底**同形**(`lib/git/log.ts:114`:
+ * 认不出的字母 ⇒ `Modified`)。
+ * @param status - 宿主载荷里的状态对象。
+ */
+function stashFileStatusOf(status: IStashFilePayload['status']): AppFileStatus {
+  const submoduleStatus = status.submoduleStatus;
+  switch (status.kind) {
+    case 'New':
+      return { kind: AppFileStatusKind.New, submoduleStatus };
+    case 'Deleted':
+      return { kind: AppFileStatusKind.Deleted, submoduleStatus };
+    case 'Untracked':
+      return { kind: AppFileStatusKind.Untracked, submoduleStatus };
+    case 'Renamed':
+      return {
+        kind: AppFileStatusKind.Renamed,
+        oldPath: status.oldPath ?? '',
+        submoduleStatus,
+        renameIncludesModifications: status.renameIncludesModifications === true,
+      };
+    case 'Copied':
+      return {
+        kind: AppFileStatusKind.Copied,
+        oldPath: status.oldPath ?? '',
+        submoduleStatus,
+        renameIncludesModifications: status.renameIncludesModifications === true,
+      };
+    case 'Modified':
+    default:
+      return { kind: AppFileStatusKind.Modified, submoduleStatus };
+  }
+}
+
+/**
+ * `stash/show` 的文件清单 → **镜像的** `CommittedFileChange[]`
+ * (上游 `getStashedFiles` 返回的就是这个类型,`lib/git/stash.ts:279-297`)。
+ *
+ * `commitish` / `parentCommitish` 由宿主原样带来(上游是 `stashSha` 与 `` `${stashSha}^` ``),
+ * 不在这里重算 —— `SeamlessDiffSwitcher` 一族要靠它们取 diff。
+ * @param files - 宿主载荷。
+ */
+function stashFilesToCommittedFileChanges(
+  files: readonly IStashFilePayload[],
+): CommittedFileChange[] {
+  return files.map((file) => new CommittedFileChange(
+    file.path,
+    stashFileStatusOf(file.status),
+    file.commitish,
+    file.parentCommitish,
+  ));
+}
+
+/**
+ * **一个仓库那一份共同作者状态**(`GitStore` 的 `coAuthorStates` 的值类型)。
+ *
+ * 形状逐字对应上游 `GitStore` 的两个后备字段:`_showCoAuthoredBy`
+ * (`lib/stores/git-store.ts:138`)/ `_coAuthors`(`:140`)—— 也就是说**只有两个字段**,
+ * 没有第三份「上次的值」「脏标记」之类的东西。名字带 `I` 前缀是本仓 lint 的要求
+ * (`@typescript-eslint/naming-convention` 对 `selector: interface` 钉 `^I[A-Z]`,
+ * 见 `./repo-state-cache.ts` 里同一条说明),不是风格偏好。
+ */
+interface ICoAuthorState {
+  readonly showCoAuthoredBy: boolean;
+  readonly coAuthors: ReadonlyArray<Author>;
+}
+
+/*
+ * **编译期契约(共同作者那两条写方法)** —— `implements Pick<…>` 不是装饰:
+ * 镜像替身 `src/core/desktop/lib/stores/git-store.ts` 声明了上游
+ * `GitStore.setShowCoAuthoredBy`(`:1434`)/ `setCoAuthors`(`:1448`)两个方法,
+ * 而这一行是它们**唯一**的消费方(`src/client/co-authors-row.tsx` 的
+ * `ICoAuthorsRowProps.store`)。少了同名同签名的方法 ⇒ 这里 TS2420、
+ * 调用点 TS2741,错误停在**编译期**而不是「界面点了没反应」。
+ *
+ * 为什么**不**把整个替身 `implements` 进来:那份替身还声明着 `defaultRemote` /
+ * `setRemoteURL`(宿主侧 git 能力),我们这类里**没有**它们(见那份文件头的第 1 条)。
+ * ⇒ 精确取 `Pick`,只钉这一件事。
+ */
+export class GitStore implements Pick<MirrorGitStore, 'setShowCoAuthoredBy' | 'setCoAuthors'> {
   private state: Snapshot = initial();
   /** `loadDiff()` 的请求序号:只让最新一次的响应落地(见该方法上的说明)。 */
   private diffSeq = 0;
+  /**
+   * `refreshStatus()` 的请求序号:**同一个理由**(见该方法上的说明)。
+   *
+   * 缺了它,一次「推送之前发出的读」晚于推送自己那次刷新落地时,会把它带回来的
+   * `ahead=1` 盖到新值上 —— 界面回到「待推送」(用户报的那一句)。
+   * 判据:`docs/probes/push-ahead-refresh-probe.mjs` 的 `L1`。
+   */
+  private statusSeq = 0;
 
   /**
    * **按仓库**的视图状态(上游 `RepositoryStateCache` 与上游一致的容器 + 我们自己的形状)。
@@ -766,6 +1028,36 @@ export class GitStore {
    * 否则「默认值」就有了第二份真源。
    */
   private readonly repoStates = new RepoStateCache({ initial: () => repoScopedOf(initial()) });
+
+  /**
+   * **每仓库一份的共同作者状态** —— 上游那一份的容器是
+   * `lib/stores/git-store-cache.ts:6-31` 的 `Map<string, GitStore>`(它按
+   * `repository.hash` 收 `GitStore`,而 `_showCoAuthoredBy` / `_coAuthors` 正是
+   * `GitStore` 上的两个字段,`git-store.ts:138,140`);我们这边没有 `GitStore` 实例
+   * (它是宿主侧的 git 门面),所以按**路径**留同样那两个值。
+   *
+   * ## 为什么它不放进 `repoStates`(`RepoStateCache`)
+   *
+   * 镜像 `RepositoryStateCache` 的 `changesState` 里**确实**有两个精确的槽
+   * (`lib/app-state.ts:826,835` 的 `showCoAuthoredBy` / `coAuthors`),而
+   * `repoStates` 正是那份镜像的容器 —— 看起来那里才是「正确」的落点。
+   * 但本轮的**所有权边界**是:`src/client/repo-state-cache.ts` 不在本泳道
+   * (只允许动 `src/client/store.ts` + 新建文件),要写进去就得给
+   * `RepoStateCache` 加一个写 `changesState` 的方法。
+   * ⇒ 本轮把真源放在这里,**一个 `Map`、两个字段、一个读写口**(`coAuthorStateOf` /
+   * 两个 setter),`Snapshot` 上的两个字段只是它在「当前仓库」上的投影。
+   * **退役条件**:Changes 容器整体切到 `ui/changes/**`(那时
+   * `repositoryStateCache.changesState` 就是真源)时,删掉这个 Map 与 `coAuthorStateOf`,
+   * 把两个 setter 改成写镜像的槽 —— 那时 `docs/changes-state-adoption.md` 的
+   * apply-cold 计划也已经完成。
+   *
+   * ## 键是**路径**(与 `repoStates` 同一个口径)
+   *
+   * `repo-state-cache.ts` 用的也是路径(它文件头明写「我们的 `ChangedFile` 没有上游的
+   * `FileChange.id`」,所以整条缓存链的口径都是路径)。共用一个口径的后果是
+   * 「同一个仓库的选中态与共同作者一起被留/一起被弃」,不会出现一边命中一边不命中。
+   */
+  private readonly coAuthorStates = new Map<string, ICoAuthorState>();
 
   /**
    * 定时器:**网络动作在飞期间**的进度轮询(见 {@link startSyncProgressPolling})。
@@ -834,11 +1126,61 @@ export class GitStore {
     this.emit({ toasts: this.state.toasts.filter((t) => t.id !== id) });
   }
 
+  /**
+   * 一条失败通知(toast)的**唯一**产地 —— 40 处调用点、35 个公开方法都从这里出。
+   *
+   * ## 2026-10 根因修复:`internal` 的 `detail` 不再被丢掉,且带上错误码
+   *
+   * 改前这里是:
+   *
+   * ```ts
+   * const suffix = detail 非空 && code !== 'internal' ? `（${detail.split('\n')[0]}）` : '';
+   * this.toast(`${message}${suffix}`, 'err');
+   * ```
+   *
+   * 三处**系统性**的丢信息(不是某一个表面的问题):
+   *  1. `code !== 'internal'` ⇒ `classifyGitFailure` 兜底落 `internal` 的**全部** git 失败
+   *     (原始 stderr 就在 `detail` 里)在客户端被整段丢掉;
+   *  2. `detail.split('\n')[0]` ⇒ 多行 detail(`git apply` 一次就产两行)只播第一行;
+   *  3. 从不拼 `错误码:<code>` ⇒ 用户报缺陷时我们连是哪个码都不知道。
+   *
+   * 用户裁决(2026-10):「`internal` 的 detail 可能含 provider 原文与原始 stderr **可以进 toast**」。
+   * 三条一起修,`message` **逐字**保留(绝不换成「未知错误」这类占位符 —— 占位符是宿主
+   * 在**没有** stderr 时才写进 `message` 的,客户端不许再造一个)。
+   *
+   * ## 多行 detail 在 toast 里怎么呈现(这是一条**裁决**,不是随手之举)
+   *
+   * 真相是:**`Toast` 原语吃一个字符串**(`bits.tsx` 的 `Toasts` 传
+   * `text={current.message}`),而且它的 `.text` 那个 class **没有** `white-space`
+   * 声明(`references/deepseek-harness/.../Toast.module.css` 只给 `.toast` 定
+   * `max-width: min(640px, calc(100vw - 48px))`),所以:
+   *
+   *  - **换行符不会换来换行** —— CSS 默认 `white-space: normal` 会把 `\n` 折成空格,
+   *    而长文靠 `max-width` **自动折行**。把 `\n` 原样塞进去 = 播出来是一行长句,
+   *    且拼接处会**丢词界**(`第一行第二行`),这是「静默地毁掉证据」;
+   *  - 因此这里把 detail 的多行**用一个空格**并成一段:落进 toast 后**读到的就是屏幕上
+   *    那一行**,可复算、可断言(`docs/probes/fail-toast-detail-probe.mjs` 逐字比对);
+   *  - **不加长度上限、不加截断标记**:detail 在宿主侧已经有硬上限
+   *    (`git-service.ts` 的 `stderr.trim().slice(0, 2000)`),客户端再截一刀只会让
+   *    「截了多少」变成第二个需要标注的事实;本仓的先例是**截断必须标注**
+   *    (`commandLineOf()` 的 `…(命令过长,已截断)`),而这里选择**不截**,所以不需要标记。
+   *    代价如实记账:2000 字符会撑出一条很高的横幅(7 秒后消失)。
+   *  - 需要**可滚、可选中、可复制**的长文时,正确落点是**弹窗**(推送失败 /
+   *    生成失败的 `<pre>`,见 `bits.tsx` 与 `pushFailure` / `generateFailure`),
+   *    **不是**这里 —— 本方法**不**新增第二套弹窗/toast 机制。
+   */
   private fail(error: GitError): void {
-    const suffix = error.detail !== undefined && error.detail !== '' && error.code !== 'internal'
-      ? `（${error.detail.split('\n')[0] ?? ''}）`
-      : '';
-    this.toast(`${error.message}${suffix}`, 'err');
+    const detail = error.detail ?? '';
+    /*
+     * 分隔符:detail 用宿主 `message` 里已经在用的全角括号,`错误码:` 用空格接在最后
+     * —— 两处都和弹窗那一族(`bits.tsx` 的 `错误码:<code>` 一行)保持同一种读法。
+     */
+    const parts = [
+      error.message,
+      ...(detail !== '' ? [`（${detail.replace(/\s*\n\s*/g, ' ').trim()}）`] : []),
+      `错误码:${error.code}`,
+    ];
+    this.toast(parts.join(' '), 'err');
   }
 
   // ---------- 启动 ----------
@@ -1202,6 +1544,8 @@ export class GitStore {
      * 列表点勾选),而这三样 `refreshAll()` 立刻就能拿回来 ⇒ 它们照旧清空。
      */
     const restored = this.repoStates.restore(path);
+    /** 这个仓库那一份共同作者状态(未命中 ⇒ `false`/`[]`,见 `coAuthorStateOf`)。 */
+    const coAuthored = this.coAuthorStateOf(path);
     this.emit({
       current: path,
       status: null,
@@ -1209,6 +1553,9 @@ export class GitStore {
       // 同上:`tagsToPush` 是**上一个仓库**的标签身份清单,留着会让菜单项按错仓库判定
       // (`Delete tag` 会对着 B 的标签问 A 的未推送集合)。`refreshAll()` 立刻重取。
       tagsToPush: [],
+      // 同理:`stashEntry` 属于**上一个仓库的那个分支** —— 留着会让「贮藏全部改动」
+      // 按 B 的分支名去建 stash、让「查看贮藏」指向 A 的 sha。`loadStashEntries()` 立刻重取。
+      stashEntry: null,
       branches: [],
       // 进行中的进度属于「上一个仓库的网络动作」:切仓库时它已经无意义。
       progress: null,
@@ -1222,6 +1569,15 @@ export class GitStore {
       // `prefs.stagedOnly`,由设置面板的勾选框写),不是按仓库的状态。
       // 以前这里写 `stagedOnly: true`,于是切一次仓库就把用户的偏好覆盖掉 ——
       // 与「刷新后弹回默认」是同一类静默丢失,只是触发动作不同(切仓库 vs 刷新)。
+      /*
+       * **共同作者按仓库留**(2026-10 本轮):上游那两个值住在每仓库一份的 `GitStore`
+       * (`git-store-cache.ts:6-31`)、切仓库**不重置**
+       * (`app-store.ts:2237-2241` 的 `_refreshRepository` 只刷新不重置)⇒
+       * 「在 A 里加了共同作者、切到 B、再切回 A」列表与开关都该还在。
+       * 未命中 ⇒ `coAuthorStateOf()` 回落到 `initial()` 的 `false`/`[]`(干净的仓库)。
+       */
+      showCoAuthoredBy: coAuthored.showCoAuthoredBy,
+      coAuthors: [...coAuthored.coAuthors],
       ...restored,
     });
     await this.refreshAll();
@@ -1229,6 +1585,13 @@ export class GitStore {
 
   async refreshAll(): Promise<void> {
     await Promise.all([this.refreshStatus(), this.refreshBranches(), this.refreshLog(true)]);
+    /*
+     * stash **必须**排在 `refreshStatus()` 之后:它按**当前分支名**挑条目,还要读
+     * `status.branch` / `detached` / `unborn` 三个字段(上游 `_refreshRepository`
+     * 也是先刷新 Changes 那一批状态、再 `gitStore.loadStashEntries()`,
+     * 见 `lib/stores/app-store.ts:4136-4146`)。
+     */
+    await this.loadStashEntries();
   }
 
   /**
@@ -1282,10 +1645,242 @@ export class GitStore {
     }
   }
 
+  // ---------- stash 族(上游 `lib/git/stash.ts` + `lib/stores/git-store.ts`) ----------
+
+  /**
+   * **装载当前分支的 stash** —— 上游 `GitStore.loadStashEntries()`
+   * (`lib/stores/git-store.ts:1194-1221`)与它的下半段
+   * `loadFilesForCurrentStashEntry()`(`:1250-1288`)。
+   *
+   * ## 逐条照抄的判断(每一条都有上游行号)
+   *
+   *  1. **只认 Desktop 建的条目**:过滤发生在宿主(`stash/list` 只回带
+   *     `!!GitHub_Desktop<…>` 的),这里不重判;
+   *  2. **按分支名索引、每个分支只留第一条**(`:1199-1213`):reflog 是 LIFO,
+   *     所以「第一条」= 该分支最近一次 stash。同一个 sha 且文件已装载 ⇒ **复用**,
+   *     不再问一次 `stash/show`(`:1205-1212`);
+   *  3. **不在一个有效分支上 ⇒ `null`**(`:1227-1231` 的 `tip.kind === TipState.Valid`):
+   *     分离头 / unborn 时不清空别的仓库的东西,只把本仓库这一格置空;
+   *  4. 文件清单走 `NotLoaded → Loading → Loaded` 状态机(`:1250-1288`)。
+   *
+   * ## 两处与上游的差别(都是「宁可少一次假数据」)
+   *
+   *  - **失败静默**:`stash/list` 失败(仓库刚被删、宿主没起…)时不弹 toast、不写
+   *    `globalError`,只把 `stashEntry` 置 `null` —— 与 `refreshTagsToPush` 同一条契约
+   *    (它服务的两个消费点都只是「一个菜单项 + 一张建议卡」,不该打断用户);
+   *  - **`stash/show` 失败 ⇒ 退回 `NotLoaded`**(上游没有 catch,条目会**永远卡在
+   *    `Loading`**,见 `:1262-1264` 与 `:1272` 之间那段)。可见后果我们在探针里量过:
+   *    两种做法的**当帧**表现相同(空态卡都不出现);差别是下一次 `refreshAll()`
+   *    还能重试,而上游那一份永远不会。
+   */
+  public async loadStashEntries(): Promise<void> {
+    const path = this.state.current;
+    if (path === '') { return; }
+    const status = this.state.status;
+    if (status === null || status.detached === true || status.unborn === true || status.branch === '') {
+      if (this.state.stashEntry !== null) {
+        this.emit({ stashEntry: null });
+      }
+      return;
+    }
+    const result = await api.stashList(path);
+    if (!result.ok) {
+      // 静默保留语义:拿不到 ⇒ 当作「没有 stash」(不带省略号的菜单项 + 没有卡),
+      // 而不是把上一条留在快照里 —— 留着会让「贮藏全部改动」用**旧 sha** 去 drop。
+      if (this.state.stashEntry !== null) {
+        this.emit({ stashEntry: null });
+      }
+      return;
+    }
+    const entry = result.value.desktopEntries.find((e) => e.branchName === status.branch) ?? null;
+    if (entry === null) {
+      if (this.state.stashEntry !== null) {
+        this.emit({ stashEntry: null });
+      }
+      return;
+    }
+    const existing = this.state.stashEntry;
+    if (
+      existing !== null
+      && existing.stashSha === entry.stashSha
+      && existing.files.kind === StashedChangesLoadStates.Loaded
+    ) {
+      return;
+    }
+    this.emit({ stashEntry: { ...entry, files: { kind: StashedChangesLoadStates.NotLoaded } } });
+    await this.loadFilesForCurrentStashEntry();
+  }
+
+  /**
+   * 把 `stashEntry.files` 从 `NotLoaded` 推到 `Loaded`
+   * (上游 `loadFilesForCurrentStashEntry`,`lib/stores/git-store.ts:1250-1288`)。
+   *
+   * 期间可能切了仓库 / 又 stash 了一次 ⇒ 落地前重新核对 `stashSha`
+   * (上游 `:1272-1276` 的 `currentEntry.stashSha !== stashEntry.stashSha` 早退,
+   * 我们这里是同一件事的按快照写法)。
+   */
+  private async loadFilesForCurrentStashEntry(): Promise<void> {
+    const path = this.state.current;
+    const entry = this.state.stashEntry;
+    if (path === '' || entry === null || entry.files.kind !== StashedChangesLoadStates.NotLoaded) {
+      return;
+    }
+    this.emit({ stashEntry: { ...entry, files: { kind: StashedChangesLoadStates.Loading } } });
+    const result = await api.stashShow(path, entry.stashSha);
+    const current = this.state.stashEntry;
+    // 期间 stash 变了 / 被 drop 了 / 切了仓库 ⇒ 这次响应丢掉(与上游的 sha 核对同义)。
+    if (current === null || current.stashSha !== entry.stashSha) { return; }
+    this.emit({
+      stashEntry: {
+        ...current,
+        files: result.ok
+          ? {
+            kind: StashedChangesLoadStates.Loaded,
+            files: stashFilesToCommittedFileChanges(result.value.files),
+          }
+          // 见本方法上方的「差别 2」:退回 NotLoaded(下次还能重试),而不是卡在 Loading。
+          : { kind: StashedChangesLoadStates.NotLoaded },
+      },
+    });
+  }
+
+  /**
+   * **贮藏全部改动** —— 上游 `AppStore._createStashForCurrentBranch(repository, true)`
+   * (`lib/stores/app-store.ts:4849-4886`)+ `createStashAndDropPreviousEntry`(`:8980-9000`)。
+   *
+   * 上游的**两段**在这里各占一段:
+   *  1. `showConfirmationDialog && hasExistingStash` ⇒ 「覆盖贮藏」弹窗
+   *     (`PopupType.ConfirmOverwriteStash`,`:4635`)。**弹窗在视图层**
+   *     (`changes-view.tsx` 读 `snap.stashEntry !== null` 决定弹不弹,与上游同一条判据),
+   *     本方法只在**确认之后**被调用 —— 所以它对应的是上游那条 `showConfirmationDialog`
+   *     已经走完的路径;
+   *  2. 建完**再丢掉这一条之前的旧条目**(`:8986-8997` 的
+   *     `dropDesktopStashEntry(repository, entry.stashSha)`)。注意范围:
+   *     丢的是**同一个分支**上、建之前的那一条,不是随便哪一条。
+   *
+   * `untrackedFiles` 取自当前 `status.files` 里 `untracked === true` 的那些
+   * (上游 `:8998-9004` 的 `getUntrackedFiles(workingDirectory)`)—— 宿主会把它们
+   * **先整份 `git add`** 再 stash(desktop/desktop#8085)。
+   * @returns 是否真的建出了一条 stash(`false` = `No local changes to save`)。
+   */
+  public async stashAllChanges(): Promise<boolean> {
+    const path = this.state.current;
+    const status = this.state.status;
+    if (
+      path === '' || status === null || status.branch === ''
+      || status.detached === true || status.unborn === true
+    ) {
+      // 上游 `:4861-4863`:`currentBranch === null` ⇒ 直接 `return false`(不弹错)。
+      this.toast('当前不在一个分支上,无法贮藏改动。', 'err');
+      return false;
+    }
+    /** 建之前的那一条 —— 用来判「建成功后要不要丢旧的」(上游 `:8986`)。 */
+    const previous = this.state.stashEntry;
+    const untracked = (status.files ?? [])
+      .filter((file) => file.untracked === true)
+      .map((file) => file.path);
+    this.emit({ busy: 'stash' });
+    const result = await api.stashPush(path, status.branch, untracked);
+    this.emit({ busy: '' });
+    if (!result.ok) {
+      this.fail(result.error);
+      return false;
+    }
+    if (!result.value.created) {
+      // 上游 `:202-204` 的 `No local changes to save` —— 那是**正常状态**,不是失败。
+      this.toast('没有可贮藏的本地改动。');
+      return false;
+    }
+    if (previous !== null) {
+      const dropped = await api.stashDrop(path, previous.stashSha);
+      if (!dropped.ok) {
+        // 旧条目没丢掉不该让「已经存好了」这件事变成失败 —— 如实说出来,继续刷新。
+        this.fail(dropped.error);
+      }
+    }
+    this.toast(`已贮藏全部改动(分支 ${status.branch})`);
+    await this.refreshAll();
+    return true;
+  }
+
+  /**
+   * **恢复(应用并删除)当前分支的 stash** —— 上游 `AppStore._popStashEntry`
+   * (`lib/stores/app-store.ts:9006-9017`)+ `lib/git/stash.ts:238-271`。
+   *
+   * 冲突时宿主的信封是 `merge-conflicts`(git 退出码 1 且 stderr 非空),
+   * 那时 stash **还在**(用户留着它);`fail()` 会把宿主那句原文播出来。
+   */
+  public async popStash(): Promise<boolean> {
+    const path = this.state.current;
+    const entry = this.state.stashEntry;
+    if (path === '' || entry === null) { return false; }
+    this.emit({ busy: 'stash' });
+    const result = await api.stashPop(path, entry.stashSha);
+    this.emit({ busy: '' });
+    await this.refreshAll();
+    if (!result.ok) {
+      this.fail(result.error);
+      return false;
+    }
+    this.toast('已恢复贮藏的改动。');
+    return true;
+  }
+
+  /**
+   * **丢弃当前分支的 stash** —— 上游 `AppStore._dropStashEntry`
+   * (`lib/stores/app-store.ts:9020-9035`)+ `lib/git/stash.ts:219-229`。
+   *
+   * 只动 reflog,**工作区一个字节都不动**(判据:`docs/probes/stash-probe.mjs` 的 B5)。
+   */
+  public async dropStash(): Promise<boolean> {
+    const path = this.state.current;
+    const entry = this.state.stashEntry;
+    if (path === '' || entry === null) { return false; }
+    this.emit({ busy: 'stash' });
+    const result = await api.stashDrop(path, entry.stashSha);
+    this.emit({ busy: '' });
+    if (!result.ok) {
+      this.fail(result.error);
+      return false;
+    }
+    this.toast('已丢弃这条贮藏的改动。');
+    await this.refreshAll();
+    return true;
+  }
+
   async refreshStatus(): Promise<void> {
     const path = this.state.current;
     if (path === '') { return; }
+    /*
+     * ## 守卫:只让**最新**一次 `refreshStatus` 的响应落地(2026-10 根因修复)
+     *
+     * 缺这条守卫时的用户可见后果(用户原话):
+     * > 「点击**推送到 origin** 后显示**推送成功**,但是状态又回到**待推送**状态说
+     * > 有 **1 个可以推**。」
+     *
+     * 机制:一次**推送之前发出**的读(`status` / `sync-state`)如果晚于推送自己那次
+     * `refreshAll()` 落地,它带回来的 `ahead` 是**推送前**算的 `1` —— `emit` 是
+     * 「合并 + 覆盖」(`:913-918`),于是**旧数据盖掉新数据**,界面回到「待推送」
+     * 直到下一次轮询(5s)才自愈;而如果那次旧读的窗口更宽(宿主忙、事件循环被占),
+     * 用户看到的就是**一直**停在 1。
+     *
+     * 为什么必须有这一条而不是靠「调用方别并发」:并发的来源**在产品里**——
+     * `startPolling` 的 5s 定时器(`:1134-1140`,`workbench.tsx:268` 装)、
+     * `setTab('changes')` 的 fire-and-forget `refreshStatus()`(`:1792`)、
+     * `refreshAll()` 的 `Promise.all` 尾(`:1386`)。它们与推送自己那次刷新的窗口
+     * 可以重叠,而且**没有任何一处**能保证顺序。
+     *
+     * 与 `loadDiff()` 的 `diffSeq`(`:858`/`:1871`/`:1892`)**同一条规矩、同一个理由**
+     * (「先发后到的那份会盖住后发先到的那份」),只是那一条守的是 diff、这一条守的是
+     * `status` + `sync`。判据:`docs/probes/push-ahead-refresh-probe.mjs` 的 `L1`
+     * (把一次旧读的响应**扣住**,等推送的刷新落地之后再放行 ⇒ 快照必须仍是 `ahead=0`);
+     * 阴性对照 `--pre-fix-store` 把这两行撤回去 ⇒ `L1` 实测转红。
+     */
+    const seq = (this.statusSeq += 1);
     const [status, sync] = await Promise.all([api.status(path), api.syncState(path)]);
+    if (seq !== this.statusSeq) {
+      return;
+    }
     if (status.ok && sync.ok) {
       // 纳入状态按**路径**存:文件不再是变更文件(提交掉了 / 被丢弃 / 被撤销)时
       // 必须一起清掉,否则同一路径下次出现会带着上一次的选区冒出来。
@@ -1880,10 +2475,13 @@ export class GitStore {
    *
    * **最后那一步是本方法存在的理由**:写完之后把
    * {@link Snapshot.gitConfigRevision} +1 并 `emit`。没有它,「在仓库设置里改作者」
-   * 在界面上完全不可见(`CommitAuthorAvatar` 的读配置 effect 只看 `path` 与 `headSha`)。
-   * 宿主侧的那条 `repo/author-ident`(`git var GIT_AUTHOR_IDENT`)路由**仍然缺**
-   * (`goal-port-desktop.md` §10.10 第 9 项)—— 这个计数器是它的等价物,不是它的替代品:
-   * 它只触发**重读 git 配置**,与上游 `refreshAuthor` 读完 `git var` 的效果同形。
+   * 在界面上完全不可见(`CommitAuthorAvatar` 取作者身份的 effect 只看 `path` 与 `headSha`)。
+   *
+   * ⚠️ 2026-10 本批更新:宿主侧的 `repo/author-ident`(`git var GIT_AUTHOR_IDENT`)
+   * 路由**已经建好并已被 `CommitAuthorAvatar` 消费** —— 所以这一段**不再**说
+   * 「路由仍然缺」。留下来的这一位仍然承重,但职责只剩一件:把「刚写过作者配置」
+   * 这件事**送达**那个组件(上游那半是 `dispatcher.refreshAuthor`,不是路由)。
+   * 按「先做,不删」保留。
    *
    * @param entries - 要写(`value` 是字符串)或要删(`unset: true`)的配置项。
    *   作用域从 Local 切回 Global 时上游走的是**删键**而不是写空串
@@ -1914,6 +2512,126 @@ export class GitStore {
 
   setCommitField<K extends keyof CommitForm>(key: K, value: CommitForm[K]): void {
     this.emit({ commitForm: { ...this.state.commitForm, [key]: value } });
+  }
+
+  // ---------- 共同作者(Co-Authored-By)----------
+  //
+  // 上游那一条链(逐环 `file:line`,本节的四个方法逐字对应它):
+  //   `ui/changes/commit-message.tsx:841` 的 `onAuthorsUpdated` → `:824-825` →
+  //   `filter-changes-list.tsx:1028-1029` 的 `onCoAuthorsUpdated` →
+  //   `dispatcher.setCoAuthors(repository, coAuthors)`(`dispatcher.ts:2561-2565`)→
+  //   `app-store.ts:8858-8863` 的 `_setCoAuthors` →
+  //   `gitStoreCache.get(repository).setCoAuthors(coAuthors)`(`git-store.ts:1448-1451`)。
+  // 我们这边 `GitStore` 这个类**本身就是** app-store 那一层(宿主调用全从这里出),
+  // 所以落点就是下面三个方法 + 一个只读访问器。
+  //
+  // ⚠️ **`app-store.ts` 那份替身里为什么没有 `_setCoAuthors`**:上游那两个方法
+  // (`app-store.ts:8844` / `:8858`)的函数体逐字是
+  // `this.gitStoreCache.get(repository).setX(...)` —— 按本仓自己的判据那是**编排**
+  // (见 `docs/dead-code-and-missing-state-audit.md:358` 与
+  // `docs/changes-state-adoption.md:1063` 两处已经这么判过),而我们的 `app-store.ts`
+  // 替身只收**纯状态迁移**(`applyChangesStatus`)。编排的落点是本文件。**这是有意的**,
+  // 不是漏了。
+
+  /**
+   * 取某个仓库那一份共同作者状态;**未命中回落到 `initial()` 的初值**
+   * (= 上游 `git-store-cache.ts` 的 `get()` 未命中时 `new GitStore(...)`,
+   * 即「干净的仓库」:`false` / `[]`)。
+   *
+   * 「未命中回落初值」这条**不能省**:它保证「第一次进 A 仓库」不会带上 B 的共同作者。
+   * @param path - 仓库路径;空串(未选中任何仓库)时同样回落初值。
+   */
+  private coAuthorStateOf(path: string): ICoAuthorState {
+    const existing = this.coAuthorStates.get(path);
+    if (existing !== undefined) {
+      return existing;
+    }
+    return { showCoAuthoredBy: initial().showCoAuthoredBy, coAuthors: initial().coAuthors };
+  }
+
+  /**
+   * 上游 `GitStore.setShowCoAuthoredBy(showCoAuthoredBy: boolean): void`
+   * (`lib/stores/git-store.ts:1434-1442`),**签名逐字**。
+   *
+   * 逐字保留的两条语义(都是上游那一版的行为,不是我们的发挥):
+   *  1. **关掉 ⇒ 清空共同作者**:`if (!showCoAuthoredBy) { this._coAuthors = [] }`
+   *     (`:1437-1438`)。所以「移除共同作者」这个动作**不需要**第二个入口 ——
+   *     用户菜单里那一项(`commit-message.tsx:863-874` 的
+   *     `getAddRemoveCoAuthorsMenuItem`)调的就是这一个方法。
+   *  2. 打开时**不动**现有列表(`setShowCoAuthoredBy(true)` 只写布尔量)。
+   *
+   * @param showCoAuthoredBy - 目标状态。
+   */
+  public setShowCoAuthoredBy(showCoAuthoredBy: boolean): void {
+    const path = this.state.current;
+    if (path === '') { return; }
+    const next: ICoAuthorState = showCoAuthoredBy
+      ? { showCoAuthoredBy, coAuthors: this.state.coAuthors }
+      : { showCoAuthoredBy, coAuthors: [] };
+    this.coAuthorStates.set(path, next);
+    // 一次 `emit` 同时写两个字段:真源(Map)与投影(快照)**不可能**分家。
+    this.emit({ showCoAuthoredBy: next.showCoAuthoredBy, coAuthors: [...next.coAuthors] });
+  }
+
+  /**
+   * 上游 `GitStore.setCoAuthors(coAuthors: ReadonlyArray<Author>): void`
+   * (`lib/stores/git-store.ts:1448-1451`),**签名逐字**。
+   *
+   * ⚠️ **它不碰 `showCoAuthoredBy`** —— 上游也只有 `restoreCoAuthorsFromCommit()`
+   * (`:915-919`)那条**反推**路径会把开关自动打开。我们这一条是「用户在表单里加/减人」,
+   * 与上游同一条。
+   *
+   * 传进来的数组**原样收下**(不排序、不去重、不裁剪):顺序就是 trailer 的顺序
+   * (`commit-message.tsx:581-583` 的 `.map()`),上游也不排序。
+   * @param coAuthors - 零个或多个作者。
+   */
+  public setCoAuthors(coAuthors: ReadonlyArray<Author>): void {
+    const path = this.state.current;
+    if (path === '') { return; }
+    const list = [...coAuthors];
+    this.coAuthorStates.set(path, { showCoAuthoredBy: this.state.showCoAuthoredBy, coAuthors: list });
+    this.emit({ coAuthors: list });
+  }
+
+  /**
+   * **共同作者输入框要的自动补全提供者清单** —— 上游那一件的清单由
+   * `ui/changes/sidebar.tsx:143-152` 的 `buildAutocompletionProviders(...)` 建出来,
+   * 里面同时有 emoji / issues / user 三族,`commit-message.tsx:271-281` 的
+   * `findCoAuthorAutoCompleteProvider()` 再从里面挑出 `CoAuthorAutocompletionProvider`。
+   *
+   * ⚠️ **今天返回空数组,而且这不是「还没写」,是缺两样前置**(逐条给证据):
+   *  1. `CoAuthorAutocompletionProvider`(`ui/autocompletion/user-autocompletion-provider.tsx:208`)
+   *     需要一个 **`GitHubUserStore`**(查 mentionable users)——
+   *     本仓 **client 根没有**它(只有 host 根的镜像
+   *     `src/host/mirror/lib/stores/github-user-store.ts`),而它要
+   *     `GitHubUserDatabase`(dexie)+ `API.fromAccount`
+   *     (`github-user-store.ts:53,96`),那是宿主能力;
+   *  2. 它还要一个 **`GitHubRepository` + `Account`** —— 而本插件的客户端
+   *     **没有** GitHub API / 认证集成,拿不到 `GitHubRepository`(它由
+   *     `lib/stores/repositories-store.ts` 从 API 载荷建出来,那份 store 在 host 根)。
+   *     实证:`src/client/changes-view.tsx:3380-3384` 的 `CommitBox` 与
+   *     `src/client/repo-state-cache.ts:210` 的 `repoFor()` 都按
+   *     `new Repository(path, 0, null, false[, alias])` 构造 ⇒
+   *     `repository.gitHubRepository` **恒为 `null`**。
+   * ⇒ 退而回**空清单**是**如实**的空值,而不是伪造一个「永远返回空命中的 provider」
+   * (那会让输入框看起来能用、但一个用户都补不出来 —— 本仓最贵的那类假绿)。
+   *
+   * `ui/autocompletion/build-autocompletion-providers.ts`(上游那份**真正的**清单构造器)
+   * **刻意没有逐字抄进来**:它 import `GitHubUserStore, IssuesStore from '../../lib/stores'`
+   * 与 `lib/emoji`,而 `src/core/desktop/lib/stores/` 没有 `index.ts`、
+   * `lib/stores/issues-store.ts`、`lib/databases/index.ts` 三个模块,且
+   * `issues-autocompletion-provider.tsx` 还要我们的 dispatcher 替身里**没有**的
+   * `refreshIssues`(`dispatcher.ts:1043`)⇒ 逐字加进来是 **+5 条新 tsc 诊断**
+   * (会红 `check-types` 的「无回归」判据)。登记在报告里,不凑数。
+   *
+   * **退役条件**:① client 根补上 `GitHubUserStore`(真身或宿主路由门面)+
+   * `lib/stores/index.ts` / `lib/databases/index.ts` / `lib/stores/issues-store.ts`
+   * 三个类型模块,② 且本插件拿到 GitHub 仓库身份 —— 那时这个方法改成
+   * `ui/autocompletion/build-autocompletion-providers.ts` 的逐字调用
+   * (清单构造只有一处,不许在调用点另拼)。
+   */
+  public coAuthorAutocompletionProviders(): ReadonlyArray<IAutocompletionProvider<unknown>> {
+    return [];
   }
 
   /**
@@ -1969,17 +2687,20 @@ export class GitStore {
       /*
        * 生成失败 ⇒ **弹窗**(带 `detail` 与错误码),不是一条只播一行的 toast。
        *
-       * 为什么不能继续用 `this.fail()`:
-       *  1. `fail()` 对 `code === 'internal'` **不附 `detail`** —— 而生成路线上
-       *     「取 diff 失败」正是 `internal`(`classifyGitFailure` 兜底),宿主明明把
-       *     git 原始 stderr 放进了 `detail`,客户端却把它丢了;
-       *  2. toast 是**一条**,`Toast` 原语只吃一个 `text` 字符串 ⇒ 放不下
-       *     限高可滚、可选中复制的 `<pre>`,也放不下 `错误码:` 那一行;
+       * 为什么不能继续用 `this.fail()`(⚠️ 下面第 1、2 条在 2026-10 的**根因修复**后
+       * **已经过期**,`fail()` 现在也逐字播 `detail`、也带错误码;保留这段是因为
+       * **结论没变**:这条路径仍然要走弹窗,理由换成下面 2' 与 3):
+       *  1. ~~`fail()` 对 `code === 'internal'` **不附 `detail`**~~ —— 已修(见 `fail()`
+       *     的头注释与 `docs/probes/fail-toast-detail-probe.mjs`);改前后这条路径
+       *     确实因为这一条走不通;
+       *  2'. toast 是**一条**,`Toast` 原语只吃一个 `text` 字符串 ⇒ 放不下
+       *     限高可滚、可选中复制的 `<pre>` —— 生成失败的 detail 是**多行**的
+       *     (模型原文 / git stderr),toast 里只能并成一行(这正是 `fail()` 现在的做法),
+       *     而用户要的是「像推送失败那样」能读、能选、能复制的那一份;
        *  3. 用户 2026-10-07 的硬要求是「生成错误必须给出具体信息」,
        *     这与推送失败那轮(`docs/push-failure-surfaces.md` §10)是同一条契约。
        *
-       * `fail()` 一个字没删:它仍然是其它 30 处失败路径的出口(那里没有 detail 可播,
-       * 或者 detail 已经在 suffix 里播了)。
+       * `fail()` 一个字没删:它仍然是其它 40 处调用点的出口。
        */
       this.emit({ generateFailure: result.error });
       return;

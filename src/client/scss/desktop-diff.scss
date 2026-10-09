@@ -200,6 +200,29 @@ $gray-500: var(--text-secondary-color);
 @import './upstream/ui/ref';
 
 /*
+ * (7) 路径文本两条配方:`ui/_path-label.scss`(`.path-label-component`)+
+ *     `ui/_path-text.scss`(`.path-text-component` + `.dirname`)。
+ *
+ *     **2026-10-08 新增,使用方是 `DiffHeader`** —— 在此之前这两条只被 History 面
+ *     import(`src/client/desktop-history.scss:383-384`),所以产物里只有
+ *     `.gw-desktop-history .path-text-component`(实测:`.gw-desktop-diff
+ *     .path-text-component` 命中 **0** 条)。
+ *
+ *     为什么需要它们(不是"好看一点"):镜像 `PathText`(`ui/lib/path-text.tsx:342`)
+ *     渲染的根是 `<div className="path-text-component">`,而**截断算法(`:396-404`)
+ *     依赖这个盒子量出来的宽度**;`.path-label-component` 则给它 `display:flex` +
+ *     `flex-grow:1` + `min-width:0`(上游 `_path-label.scss:1-8`)。缺任一条,
+ *     `.diff-container .header` 那一行里的长路径既不会截断、也拿不到可用宽度。
+ *
+ *     ⚠️ 这两个 partial 只有**配方**,没有变量;`.dirname` 用的
+ *     `--text-secondary-color` 已经在 `.gw-desktop-diff` 的 `dsh-desktop-bridge`
+ *     里声明过了(`_dsh-bridge.scss:72`),所以不需要再补变量。
+ *     (仓库列表面也 import 了这两张表;作用域不同 ⇒ 必须各留一份。)
+ */
+@import './upstream/ui/path-label';
+@import './upstream/ui/path-text';
+
+/*
  * `ui/_tab-bar.scss` 要的 5 个变量,上游都在 `styles/_variables.scss` 的 `:root` 块里
  * (`:root` 不能嵌套 import —— 嵌进来会变成 `.gw-desktop-diff :root`,永不匹配;
  *  现在作用域由产物前缀化加,但那份变量表仍**不**在编译闭包里,所以这里照旧手补)。

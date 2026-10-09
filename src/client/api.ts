@@ -264,7 +264,29 @@ export async function blobBytes(
       etag,
     };
   }
-  const rest = await getRange(url, BLOB_PROBE_BYTES, wanted - 1);
+  /*
+   * ⚠️ **续取的起点是「真的拿到了多少」,不是 `BLOB_PROBE_BYTES`。**
+   *
+   * 2026-10-10 实测(探针 `docs/probes/changes-oversized-warning-probe.mjs` 的 Z1,
+   * 真宿主 + 真 git + 真 Chrome):浏览器可能把一次 `Range: bytes=0-8191` 用**更小的
+   * 缓存分片**满足 —— 那一帧的实际响应是
+   *
+   * ```
+   * range: bytes=0-8191   206   bytes: 5   content-length: 5
+   * x-dsh-git-size: 14    content-range: bytes 0-4/14    etag: "<HEAD 的 blob sha>"
+   * ```
+   *
+   * 也就是说 `probe.bytes` 只有 5 字节(而不是请求的 8192),而 `total` 是 14。
+   * 旧写法接着问 `bytes=8192-13`(从常量起算)⇒ 起点 8192 ≥ 实体长度 14 ⇒
+   * 宿主按 RFC 回 **416**,`getRange` 把 416 当「不可用」⇒ 语法高亮/上下文展开
+   * 退回 JSON 老路(多一趟请求),控制台每次留一条 416。
+   *
+   * 改成从 `probe.bytes.length` 续取:在**正常**路径上(第一段就是 0..8191)
+   * 它与常量逐字同值 ⇒ 行为不变;在被缓存分片满足的那条路上,它问的是**真正缺的那一段**。
+   * 残余边界(如实记):若浏览器再给一个**不连续**的分片,这里仍会把两段拼在一起 ——
+   * 那条路要 `Content-Range` 逐段校验才挡得住,不在本次改动范围。
+   */
+  const rest = await getRange(url, probe.bytes.length, wanted - 1);
   if (rest === null || rest.bytes === null) {
     return { kind: 'unavailable' };
   }
@@ -426,6 +448,18 @@ const AuthStateShape: Shape = {
 
 /** 每条路由的形状。**键就是 `call()` 的第一个参数**。 */
 const SHAPES: Readonly<Record<string, Shape>> = {
+  // ---------- 长连接(上游 AliveStore)----------
+  // 只登记**宿主能保证**的键:`event` 是上游契约(见 `gh-api.ts` 的 `GH_PROXY_SHAPE` 注释)。
+  'alive/status': {
+    record: {
+      listening: 'boolean', supported: 'boolean', endpoint: 'string?',
+      received: 'number?', cursor: 'number?', lastError: 'string|null?',
+    },
+  },
+  // `events` 的元素形状由 `client/alive.ts` 的 `asAliveEvent` 守卫逐条收窄
+  // (`Shape` 里没有「数组元素是任意对象」这一档,这里只钉「是数组」)。
+  'alive/events': { record: { events: { array: { record: {} } }, cursor: 'number' } },
+
   // ---------- 就绪 / 仓库清单 ----------
   'health': {
     record: {
@@ -466,6 +500,30 @@ const SHAPES: Readonly<Record<string, Shape>> = {
   'show-file': textPayloadShape(['text', 'binary', 'too-big', 'missing']),
   'file-text': textPayloadShape(['text', 'binary', 'too-big']),
   'repo/tree': { record: { files: { array: 'string' }, truncated: 'boolean' } },
+  /*
+   * 作者身份(上游 `lib/git/var.ts` 的 `getAuthorIdentity`,`git var GIT_AUTHOR_IDENT`)。
+   *
+   * ⚠️ `ident` **必须**是 `string|null`:`null` 是**一条真实结局**
+   * (`user.useConfigOnly` 且没配 name/email ⇒ git 退出码 128 ⇒ 上游回 `null`,`var.ts:33-35`),
+   * 把它收窄成 `string` 会让那一档被**载荷守卫**判成畸形 —— 而那正是 `undo-commit`
+   * 已经付过一次代价的缺陷类(见 `docs/probes/api-declaration-vs-host-probe.mjs`):
+   * 宿主明明成功了,客户端却拿到 `ok:false`。
+   *
+   * 解析(姓名/邮箱)不在这里:用镜像里那份 `CommitIdentity.parseIdentity`。
+   */
+  'repo/author-ident': { record: { ident: 'string|null' } },
+
+  // ---------- 多提交操作(squash / reorder)----------
+  /*
+   * `result` 收窄成 `'string'` —— 理由与 `repo/author-ident` 的 `ident` 同一条:
+   * 它是 `RebaseResult` 的枚举值,宿主回的就是**字符串**;声明成字面量联合会让守卫
+   * 在宿主将来加枚举值时把**成功**判成畸形(那正是 `undo-commit` 付过代价的缺陷类)。
+   * 消费方自己按 `src/core/desktop/lib/git/rebase.ts:36-69` 的 6 个值分支。
+   */
+  'multi-commit/squash': { record: { result: 'string' } },
+  'multi-commit/reorder': { record: { result: 'string' } },
+  // 续跑变基(2026-10-10):与上面两条同一形状 —— `RebaseResult` 的字符串值。
+  'rebase/continue': { record: { result: 'string' } },
 
   // ---------- 系统动作 ----------
   // ⭐ 缺陷现场 #2:少了 apps ⇒ `snap.externalApps.filter` 抛 ⇒ 整个 Changes 面板不渲染。
@@ -675,6 +733,63 @@ const SHAPES: Readonly<Record<string, Shape>> = {
   // 少这个键 ⇒ 载荷被拒 ⇒ 客户端静默保留旧值 ⇒ 那一项**恒灰**,与没接这条路由一样。
   'tag-unpushed': { record: { tags: { array: 'string' } } },
   'remote-branch-delete': OkTrueShape,
+
+  // ---------- stash 族(上游 `lib/git/stash.ts`) ----------
+  /*
+   * `desktopEntries` 的形状与宿主 `IStashEntryPayload`(=`IStashEntry` 的 JSON 投影)
+   * 逐字对齐:`name` / `branchName` / `stashSha` / `tree` / `parents`。
+   * 少写任何一个键 ⇒ 载荷被**拒** ⇒ `stashEntry` 恒 `null` ⇒
+   * 「贮藏全部改动」恒灰、空态 stash 卡永不出现(与没接这条路由一样)。
+   */
+  'stash/list': {
+    record: {
+      desktopEntries: {
+        array: {
+          record: {
+            name: 'string', branchName: 'string', stashSha: 'string', tree: 'string',
+            parents: { array: 'string' },
+          },
+        },
+      },
+      stashEntryCount: 'number',
+    },
+  },
+  // `created` 是**上游同一个函数的返回值**:`false` = `No local changes to save`。
+  'stash/push': { record: { ok: { literal: [true] }, created: 'boolean' } },
+  'stash/pop': OkTrueShape,
+  'stash/drop': OkTrueShape,
+  // `status` 是 `AppFileStatus` 的 JSON 投影(`core/parse.ts` 的 `IStashFileStatusJson`)。
+  // `linesAdded`/`linesDeleted` 是整条 stash 的**总量**(上游 `parseRawLogWithNumstat` 的返回值)。
+  'stash/show': {
+    record: {
+      files: {
+        array: {
+          record: {
+            path: 'string',
+            status: {
+              record: {
+                kind: 'string',
+                oldPath: 'string?',
+                renameIncludesModifications: 'boolean?',
+                submoduleStatus: {
+                  optional: {
+                    record: {
+                      commitChanged: 'boolean', untrackedChanges: 'boolean', modifiedChanges: 'boolean',
+                    },
+                  },
+                },
+              },
+            },
+            commitish: 'string',
+            parentCommitish: 'string',
+          },
+        },
+      },
+      linesAdded: 'number',
+      linesDeleted: 'number',
+    },
+  },
+  'stash/move': { record: { sha: 'string' } },
 };
 
 /**
@@ -808,6 +923,68 @@ export const api = {
   /** 本地工作区文件清单(遵守 .gitignore);远端 Code 页签不用它。 */
   repoTree: (path: string) => call<{ files: string[]; truncated: boolean }>('repo/tree', { path }),
   /**
+   * 「git 这次提交会用谁当作者」—— 上游 `lib/git/var.ts:20-42` 的 `getAuthorIdentity`。
+   *
+   * 唯一调用点:`src/client/changes-view.tsx` 的 `CommitAuthorAvatar`(提交区左下角头像 /
+   * 「Committing as」浮层)。返回的是**原始那一行** `Name <email> <ts> <tz>`,
+   * 由调用方交给镜像里的 `CommitIdentity.parseIdentity` —— 不在这里解析。
+   * `ident === null` = `user.useConfigOnly` 且没配 name/email(上游此时也回 `null`,
+   * 「这次提交注定失败」),**不是**传输失败。
+   */
+  repoAuthorIdent: (path: string) => call<{ ident: string | null }>('repo/author-ident', { path }),
+
+  /**
+   * **多提交操作 · squash** —— 上游 `lib/git/squash.ts`(宿主侧 `GitService.squashCommits`)。
+   *
+   * `result` 是镜像 `src/core/desktop/lib/git/rebase.ts:36-69` 那个 `RebaseResult`
+   * 枚举的**字符串值**(wired 之后由 `lib/rebase.ts` 的 `formatRebaseValue` 同族消费):
+   * `'CompletedWithoutError' | 'AlreadyUpToDate' | 'ConflictsEncountered' |
+   *  'OutstandingFilesNotStaged' | 'Aborted' | 'Error'`。
+   *
+   * ⚠️ **冲突是 `ok:true`**:`ConflictsEncountered` 走的是成功信封(上游
+   * `parseRebaseResult` 也是**返回**它,不是抛)。把它当失败会骗用户。
+   * ⚠️ **冲突的出路在 2026-10-10 接通了**:`ConflictsEncountered` 之后走
+   * {@link continueRebase}(宿主 `rebase/continue` 路由)接着跑,不再需要用户去命令行。
+   */
+  multiCommitSquash: (input: {
+    path: string;
+    toSquash: readonly string[];
+    squashOnto: string;
+    lastRetainedCommitRef: string | null;
+    commitMessage: string;
+    noVerify?: boolean;
+  }) => call<{ result: string }>('multi-commit/squash', { ...input }),
+
+  /**
+   * **继续变基** —— 上游 `ui/dispatcher/dispatcher.ts:1473-1512` 的 `continueRebase`
+   * → `app-store.ts:7535-7553` → `lib/git/rebase.ts:444-546`;宿主侧
+   * `GitService.continueRebase`。
+   *
+   * 请求只有 `path`(与可选 `noVerify`):上游还要一个 `manualResolutions`
+   * (客户端「手工标记为已解决」状态机),而它整个不在本仓 —— 到达这条请求的前提是
+   * 「冲突文件已经没有了」(`ContinueRebase` 那颗按钮在同帧被禁用)。
+   *
+   * `result` 与 {@link multiCommitSquash} 同一套 `RebaseResult` 字符串值;
+   * `Aborted` = `.git/REBASE_HEAD` 读不到(变基已经不在进行中,上游同样回它)。
+   */
+  continueRebase: (input: { path: string; noVerify?: boolean }) =>
+    call<{ result: string }>('rebase/continue', { ...input }),
+
+  /**
+   * **多提交操作 · reorder** —— 上游 `lib/git/reorder.ts`(宿主侧 `GitService.reorderCommits`)。
+   *
+   * `beforeCommit: null` = 移到最前(上游 `reorder.ts:120-126`)。
+   * 响应与 `multiCommitSquash` 同一套。
+   */
+  multiCommitReorder: (input: {
+    path: string;
+    toMove: readonly string[];
+    beforeCommit: string | null;
+    lastRetainedCommitRef: string | null;
+    noVerify?: boolean;
+  }) => call<{ result: string }>('multi-commit/reorder', { ...input }),
+
+  /**
    * 读工作区文件文本(**老 host 兜底**,同 `showFile`)。
    *
    * 新的原始字节路径见 {@link blobUrl};二进制 base64 的兜底上限是 256 KiB。
@@ -820,6 +997,29 @@ export const api = {
      */
     encoding?: 'utf8' | 'base64';
   }>('file-text', { path, file }),
+  /**
+   * 工作区文件的**字节数** —— `fs.promises.stat` 的客户端包装。
+   *
+   * 唯一消费者是 `src/client/history-view.tsx` 安装的 `IFsPromisesHost.stat`
+   * (`src/client/shim-node-fs-promises.ts` 的注入点),而它的调用方是**逐字镜像**的
+   * 上游 `lib/large-files.ts`(`src/core/desktop/lib/large-files.ts`,100 MiB 阈值
+   * 在那一份里)。所以这条包装**不判任何阈值**,只搬数字。
+   *
+   * `size === null` = 不是工作区里的普通文件(缺失/目录):调用方按 `ENOENT` 处理,
+   * 与 node `fs.promises.stat` 对缺失文件的语义对齐(见 `GitService.fileSize` 的边界表:
+   * 符号链接报**链接自身**的大小,链接指向仓库外时被守卫拒绝)。
+   */
+  fileSize: (path: string, file: string) => call<{ size: number | null }>('file-size', { path, file }),
+  /**
+   * 这批路径里哪些**没有被 LFS 跟踪** —— 上游 `lib/git/lfs.ts:107` 的
+   * `filesNotTrackedByLFS`(逐文件 `git check-attr filter <path>`)。
+   *
+   * `unsupported: true` = 这个 host 没有注入 LFS 能力(旧 host,或探针的
+   * `createGitHandler` 没传 `deps.lfs`)⇒ 调用方必须**说实话并照常提交**,
+   * 不许把空名单当成「都被 LFS 覆盖了」(那是凭空消失的告警)。
+   */
+  lfsUntracked: (path: string, files: ReadonlyArray<string>) =>
+    call<{ untracked: string[]; unsupported: boolean }>('lfs/untracked', { path, files: [...files] }),
   /** 本机可用的外部编辑器(Desktop 的 Open in <editor>)。 */
   systemApps: () => call<{ apps: { id: string; label: string }[] }>('system/apps'),
   /** 在文件管理器中显示(Desktop 的 Show in Finder / Show in Explorer)。 */
@@ -1089,7 +1289,152 @@ export const api = {
   /** 删远端分支(git push <remote> --delete <branch>)。 */
   deleteRemoteBranch: (path: string, remote: string, branch: string) =>
     call<{ ok: true }>('remote-branch-delete', { path, remote, branch }),
+
+  // ---------- stash 族(上游 `lib/git/stash.ts`,298 行) ----------
+
+  /**
+   * 列 stash。上游:`getStashes`(`lib/git/stash.ts:45-88`)。
+   *
+   * `desktopEntries` **只含** Desktop 建的条目(消息带 `!!GitHub_Desktop<branch>`);
+   * `stashEntryCount` 是 `refs/stash` reflog 的总条数 ——
+   * 与上游 `entries.length - 1` 的**已实测偏离**写在
+   * `src/host/git-service.ts` 的 `stashList` JSDoc 上。
+   */
+  stashList: (path: string) =>
+    call<{ desktopEntries: IStashEntryPayload[]; stashEntryCount: number }>('stash/list', { path }),
+
+  /**
+   * 建 stash。上游:`createDesktopStashEntry`(`lib/git/stash.ts:143-207`)。
+   *
+   * ⚠️ `untrackedFiles` **必须传**(调用方从 `status.files` 里挑 `untracked === true` 的那些):
+   * 宿主会先把它们整份 `git add` 再 `stash push` —— 少了这一步,未跟踪文件
+   * **不会被存进 stash**,切分支后它们会原地留下(上游注释直指 desktop/desktop#8085)。
+   * @param branch - 当前分支名(进 stash 消息;detached/unborn 时调用方**不该**调它)。
+   * @returns `created:false` = git 回了 `No local changes to save`(不是失败)。
+   */
+  stashPush: (path: string, branch: string, untrackedFiles: readonly string[]) =>
+    call<{ ok: true; created: boolean }>('stash/push', { path, branch, untrackedFiles: [...untrackedFiles] }),
+
+  /** 把一条 stash 应用回工作区并删掉它。上游:`popStashEntry`(`lib/git/stash.ts:238-271`)。 */
+  stashPop: (path: string, sha: string) => call<{ ok: true }>('stash/pop', { path, sha }),
+
+  /** 丢弃一条 stash(只动 reflog,不动工作区)。上游:`dropDesktopStashEntry`(`:219-229`)。 */
+  stashDrop: (path: string, sha: string) => call<{ ok: true }>('stash/drop', { path, sha }),
+
+  /**
+   * 某条 stash 改了哪些文件。上游:`getStashedFiles`(`lib/git/stash.ts:279-297`)。
+   * 每个 `status` 是 `AppFileStatus` 的 JSON 投影(见 `core/parse.ts` 的
+   * `mapRawStatusToAppFileStatus`),`kind` 的取值与镜像 `models/status.ts` 的
+   * `AppFileStatusKind` **逐字相同**。
+   */
+  stashShow: (path: string, sha: string) =>
+    call<{ files: IStashFilePayload[]; linesAdded: number; linesDeleted: number }>('stash/show', { path, sha }),
+
+  /**
+   * 把一条 stash 挪到别的分支名下。上游:`moveStashEntry`(`lib/git/stash.ts:95-116`)。
+   *
+   * ⚠️ **今天没有产品调用点**:触发它的上游弹窗
+   * (`ui/stash-changes/stash-and-switch-branch-dialog.tsx`)属于切分支那条面,
+   * 本泳道没有接。包装先落地,接线时直接调它。
+   */
+  stashMove: (path: string, sha: string, branch: string) =>
+    call<{ sha: string }>('stash/move', { path, sha, branch }),
+  /*
+   * ---------- 长连接(上游 `AliveStore`)----------
+   *
+   * 见 `src/client/alive.ts` 与 `docs/alive-connection-port.md`。**两条都是读**,
+   * 令牌与 WS 地址都留在宿主(浏览器拿不到)。
+   *
+   * ⚠️ 这两条包在这里**不是风格问题**:浏览器半有一条 `no-restricted-syntax`
+   * 明令**禁止直接调 `fetch()`**(它的报错文本就是说明书:「走 `api.ts` 或
+   * `gh-api.ts` 这两条类型化传输层」)。第一版把 `fetch('dsh-git/alive/…')` 写在
+   * `alive.ts` 里 ⇒ `check-lint` 新增 1 条违规。
+   */
+  aliveStatus: () => call<IAliveStatusPayload>('alive/status'),
+  aliveEvents: (since: number) => call<IAliveEventsPayload>('alive/events', { since }),
 };
+
+/**
+ * 宿主 `alive/status` 的载荷(`src/host/routes.ts` 的 `alive/status`)。
+ *
+ * `supported` 是**部署判据**:老 host 没有这条路由 ⇒ `ok:false`;
+ * 有路由但**连接没建立** ⇒ `supported:true, listening:false`。
+ * 客户端只信后者为「可以停轮询」——两者混淆会让通知彻底不来。
+ */
+export interface IAliveStatusPayload {
+  /**
+   * **宿主真的有那条长连接会话吗**(不是「宿主要求订阅了」)。
+   *
+   * 语义自 2026-10-08 起是**结果**:上游 `AliveStore` 里 `sessionPerEndpoint.size > 0`
+   * **且** `subscriptions.length > 0`。404/403 那一档(端点没开 Alive)恒 `false`
+   * ⇒ 客户端**维持轮询**。见 `docs/alive-connection-port.md` §12。
+   */
+  listening: boolean;
+  /** 宿主有没有接长连接(`false` = 老宿主)。 */
+  supported: boolean;
+  /** 当前 endpoint。 */
+  endpoint?: string;
+  /** 收到过多少条事件。 */
+  received?: number;
+  /** 游标最大值。 */
+  cursor?: number;
+  /** 最近一次失败原因。 */
+  lastError?: string | null;
+}
+
+/** 宿主 `alive/events` 的载荷。 */
+export interface IAliveEventsPayload {
+  /** 增量事件(`event` 是逐字的 `DesktopAliveEvent`,上游契约,不在这里逐字段声明)。 */
+  events: ReadonlyArray<{ id: number; event: unknown; receivedAt: number }>;
+  /** 下一次要用的游标。 */
+  cursor: number;
+}
+
+/**
+ * 一条 Desktop 建的 stash 条目 —— 宿主 `IStashEntryPayload`
+ * (= 上游 `IStashEntry`,`references/desktop/app/src/models/stash-entry.ts:3-22`)的 JSON 投影。
+ *
+ * 字段名与上游**逐字相同**;`files` 那一段**不在这里**:上游也是两段式
+ * (`getStashes` 只给条目,文件清单由 `getStashedFiles` 单独取、经
+ * `loadFilesForCurrentStashEntry` 装进 `StashedChangesLoadStates` 状态机)。
+ */
+export interface IStashEntryPayload {
+  /** 上游 `IStashEntry.name` = `%gD`,`refs/stash@{N}`。 */
+  name: string;
+  /** 上游 `IStashEntry.branchName`(从 stash 消息里解出来的分支名)。 */
+  branchName: string;
+  /** 上游 `IStashEntry.stashSha` = `%H`。 */
+  stashSha: string;
+  /** 上游 `IStashEntry.tree` = `%T`。 */
+  tree: string;
+  /** 上游 `IStashEntry.parents` = `%P`。 */
+  parents: string[];
+}
+
+/**
+ * 一条 stash 里的文件 —— 上游 `CommittedFileChange`(`models/status.ts:342-353`)的 JSON 投影。
+ *
+ * `status` 的 `kind` 取值与镜像的 `AppFileStatusKind` **逐字相同**
+ * (`New` / `Modified` / `Deleted` / `Copied` / `Renamed` / `Untracked`),
+ * 因此 `store.ts` 可以零映射地把它当成 `AppFileStatus` 构造 `CommittedFileChange`。
+ */
+export interface IStashFilePayload {
+  path: string;
+  status: {
+    kind: string;
+    oldPath?: string;
+    renameIncludesModifications?: boolean;
+    submoduleStatus?: {
+      commitChanged: boolean;
+      untrackedChanges: boolean;
+      modifiedChanges: boolean;
+    };
+  };
+  /** 上游 `CommittedFileChange.commitish` = 那条 stash 的 sha。 */
+  commitish: string;
+  /** 上游 `CommittedFileChange.parentCommitish` = `<sha>^`。 */
+  parentCommitish: string;
+}
 
 /** 登录状态(仅尾 4 位)。 */
 export interface AuthStatePayload {

@@ -4,13 +4,23 @@
  * @module dsh-git/client/changes-view
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { api } from './api.ts';
 import { Icon } from './icons.ts';
 import { ConfirmDialog, Empty, GenerateFailureDialog } from './bits.tsx';
-import { DiffSettings } from './diff-settings.tsx';
 import { DesktopDiff } from './desktop-diff.tsx';
+/*
+ * **镜像的 diff 头部**(2026-10-08 接线)—— 上游 `ui/changes/changes.tsx:105-117`
+ * 在 Changes 右栏渲染的就是它(`PathLabel` + `DiffOptions` + 状态 Octicon)。
+ *
+ * 我们以前用**手写**的 `.gw-diff-head`(`.gw-path` 纯文本 + `+n/-n` + 手写
+ * `DiffSettings`),差别与理由见 `docs/changes-diff-header-adoption-plan.md`。
+ * 手写那两件(头部 JSX 与 `diff-settings.tsx`)**停止使用但不删除**:
+ * `src/client/diff-settings.tsx` 一个字没动,`.gw-diff-head` / `.gw-path` /
+ * `.gw-diffopt*` 的 CSS 也全部留在 `src/client/styles.ts` 里(退役条件写在上面那份文档里)。
+ */
+import { DiffHeader } from '../core/desktop/ui/diff/diff-header.tsx';
 import { getPreferredExternalEditor } from './prefs.ts';
 /*
  * **Changes 列表的右键菜单**(逐文件菜单 + 表头菜单)。
@@ -52,20 +62,58 @@ import {
   remoteNameOf,
   tipOf,
 } from './sync-state.ts';
-import { commitPlaceholderOf, includeStateOf, prepopulateCommitSummaryOf, summaryOrPlaceholderOf } from './store.ts';
+import { commitPlaceholderOf, getCoAuthorTrailers, includeStateOf, prepopulateCommitSummaryOf, summaryOrPlaceholderOf } from './store.ts';
 import type { CommitForm, GitStore, IncludeState, Snapshot } from './store.ts';
 import { supportsLineSelection } from './file-kind.ts';
-import type { ChangedFile } from '../core/types.ts';
+import type { ChangeStatus, ChangedFile, DiffResult } from '../core/types.ts';
 import type { LineSelectionSpec } from '../core/partial-stage.ts';
 import { conflictSummaryText } from '../core/status-porcelain.ts';
 import { isEmptyOrWhitespace } from '../core/desktop/lib/is-empty-or-whitespace.ts';
-import { createPathDisplayState } from '../core/desktop/lib/path-display.ts';
 import { Checkbox, CheckboxValue } from '../core/desktop/ui/lib/checkbox.tsx';
 import { ForcePushBranchState } from '../core/desktop/lib/rebase.ts';
 import { TipState } from '../core/desktop/models/tip.ts';
 import { formatNumber } from '../core/desktop/lib/format-number.ts';
 import { HiddenChangesWarning, isCommittingFileHiddenByFilter } from './hidden-changes-warning.tsx';
 import type { IFileListFilterState } from '../core/desktop/lib/app-state.ts';
+/*
+ * **变更文件列表体 = 镜像的虚拟列表**(`changes-file-list.tsx` 的文件头写了全部理由)。
+ *
+ * 审计 `docs/changes-file-list-gap-audit.md` §2.2 的读数:镜像 `ui/lib/list/**`(4,604 行)
+ * + `ui/lib/section-filter-list.tsx`(808 行)= **5,412 行已经在产物里却没有渲染方**,
+ * 而我们这里是 `{shown.map(...)}` 的 O(N) 全渲染。本文件现在把列表体交给它。
+ */
+import { ChangesFileList, appFileStatusOfChange, changesRowItemsOf, filterChangesRows } from './changes-file-list.tsx';
+import type { IChangesRowItem } from './changes-file-list.tsx';
+import { getRememberedScrollTop, setRememberedScrollTop } from './changes-file-list.tsx';
+// `SelectionSource` 必须从 `filter-list` 取:`filter-list.tsx:199` 把它**加宽**成
+// `ListSelectionSource | IFilterSelectionSource`,而镜像列表收的是那个加宽版。
+import type { SelectionSource } from '../core/desktop/ui/lib/filter-list.tsx';
+/*
+ * 行内容的镜像件(逐个 `file:line` 见各组件自己的文件头):
+ *  · `PathLabel`(`ui/lib/path-label.tsx:37-71`):目录/文件名分段 + 重命名时
+ *    `arrowRight` **朝右**的箭头 + 按**实测宽度**截断(`PathText`);
+ *  · `Octicon` + `iconForStatus`(`ui/octicons/status.ts:16-38`):冲突走 `octicons.alert`
+ *    (我们以前是手写 `x-circle`,`STATUS_META.U`);
+ *  · `AriaLiveContainer`(`ui/accessibility/aria-live-container.tsx`):勾选变化时读屏宣告
+ *    (行文本变动的**唯一**出口,`changed-file.tsx:106`);
+ *  · `mapStatus`(`lib/status.ts`):宣告文本里的状态词。
+ */
+import { PathLabel } from '../core/desktop/ui/lib/path-label.tsx';
+import { Octicon, iconForStatus } from '../core/desktop/ui/octicons/index.ts';
+import { AriaLiveContainer } from '../core/desktop/ui/accessibility/aria-live-container.tsx';
+/*
+ * 筛选的两件镜像纯函数:`getNoResultsMessage`(逐条说出**是哪几个筛选**把行筛没了,
+ * 上游 `filter-changes-logic.ts:77-126`)/ `hasActiveFilters`(**包含 filterText**,
+ * 上游 `:147-149`)—— `Clear filters` 的可见性就按它。
+ */
+import {
+  applyFilters,
+  getNoResultsMessage,
+  hasActiveFilters,
+} from '../core/desktop/ui/changes/filter-changes-logic.ts';
+// 右栏多选空态(上游 `ui/changes/multiple-selection.tsx`,26 行;渲染点 `ui/repository.tsx:563-567`)。
+import { MultipleSelection } from '../core/desktop/ui/changes/multiple-selection.tsx';
+import type { IMatches } from '../core/desktop/lib/fuzzy-find.ts';
 // 「发布仓库」缺什么的**唯一文案源** —— 顶栏 `toolbar.tsx` 的同一支按钮用逐字同一份,
 // 所以这句用户可见的话只有一处真源(见那个文件的文件头与可回收条件)。
 import { PUBLISH_REPOSITORY_UNAVAILABLE } from './unsupported-notices.ts';
@@ -94,6 +142,172 @@ import type { Emoji } from '../core/desktop/lib/emoji.ts';
 // `ui/changes/_changes-list.scss:234-254` 提供 —— 与上游同一个 partial)。
 import CSSTransition from 'react-transition-group/CSSTransition';
 import TransitionGroup from 'react-transition-group/TransitionGroup';
+/*
+ * **stash 族**(2026-10 接线;上游 `lib/git/stash.ts` + `ui/stashing/**`)。
+ *
+ * `models/stash-entry.ts` 此前是「逐字在树、零消费」(`docs/unported-master-ledger.md`
+ * §1.1.2 的读数):本文件与 `store.ts` 现在是它的**真消费方** ——
+ * `IStashEntry` 是快照字段的类型,`StashedChangesLoadStates` 是那个三态状态机的
+ * **运行期**判据(空态卡严格要求 `Loaded`,见上游 `no-changes.tsx:398-407`)。
+ */
+import { StashedChangesLoadStates } from '../core/desktop/models/stash-entry.ts';
+import type { IStashEntry } from '../core/desktop/models/stash-entry.ts';
+import { AppFileStatusKind, WorkingDirectoryStatus } from '../core/desktop/models/status.ts';
+import type { AppFileStatus } from '../core/desktop/models/status.ts';
+/*
+ * ---------------------------------------------------------------------------
+ * 提交流的**三件镜像件**(2026-10-09;用户规则:「除左下角提交信息生成器以外,
+ * 上游 Changes 的每一项功能都必须存在」)
+ * ---------------------------------------------------------------------------
+ *
+ * 三件都是**字节一致的镜像**(`cmp` 无输出),此前树里有、**0 个 importer**
+ * (审计 `docs/changes-view-component-tree-audit.md` §2 的旁挂段与 §5 第 7/8 项):
+ *
+ * | 镜像件 | 上游渲染点 | 本文件的接线点 |
+ * |---|---|---|
+ * | `ui/changes/continue-rebase.tsx`(75 行) | `filter-changes-list.tsx:905-920` 的**整表单替换** | `CommitBox` 的 rebase 分支 |
+ * | `ui/changes/commit-warning.tsx`(56 行) | `commit-message.tsx:1256-1262`(amend 提示)等 7 支 | `CommitBox` 的 amend 提示 |
+ * | `ui/changes/confirm-commit-filtered-changes-dialog.tsx`(95 行) | `ui/app.tsx:2809`(`PopupType.ConfirmCommitFilteredChanges`) | `ChangesView` 的提交流(触发点在 `CommitBox`) |
+ *
+ * **裁决 B(没有 popup 宿主 ⇒ 不从宿主渲染)**:本插件没有应用层弹窗宿主(实测:全仓
+ * 只有 `repo-bar.tsx:711` 一个收窄的 `showPopup` 替身,客户端 `PopupDetail` 联合里
+ * **没有**这两个 dialog 的型别,两件都不在产物里)⇒ 三件一律**由流程所有者渲染**,
+ * 与 `CloneDialog` / `SquashDialog` 完全同形,**零新机制**。
+ */
+import { ContinueRebase } from '../core/desktop/ui/changes/continue-rebase.tsx';
+import { CommitWarning, CommitWarningIcon } from '../core/desktop/ui/changes/commit-warning.tsx';
+import { ConfirmCommitFilteredChanges } from '../core/desktop/ui/changes/confirm-commit-filtered-changes-dialog.tsx';
+/*
+ * ---------------------------------------------------------------------------
+ * 共同作者行(`Co-Authored-By`)—— 2026-10-10 **挂载**(用户规则:「上游 Changes 的
+ * 每一项功能都必须存在」;实现件本身由另一条泳道落成)
+ * ---------------------------------------------------------------------------
+ *
+ * 上游 `ui/changes/commit-message.tsx:1806` 的 `{this.renderCoAuthorInput()}` 落在
+ * **提交按钮之前、`.action-bar` 那一行之后**(`renderAmendCommitNotice` 与
+ * `renderSubmitButton` 之间)。我们的 `CommitBox` 是**手写壳**,所以这一行只能由
+ * 本文件挂上去 —— 组件本体(`./co-authors-row.tsx`)一个字不改。
+ *
+ * ⚠️ **它今天在产品里渲染 `null`,而且这是已知的正确行为**(两条上游闸门都关着:
+ * `repository.gitHubRepository === null`、`store.coAuthorAutocompletionProviders()`
+ * 返回 `[]`)。本文件**不**伪造 `gitHubRepository`、**不**把开关硬写成 `true` ——
+ * 探针 `docs/probes/changes-co-authors-mount-probe.mjs` 把这两条做成同帧读数。
+ *
+ * **退役条件**:① 客户端接上 GitHub 仓库身份;② client 根补上 `GitHubUserStore`
+ * 与三个类型模块(见 `co-authors-row.tsx` 的文件头)。两条都满足时这四行编辑继续有效。
+ */
+import { CoAuthorsRow } from './co-authors-row.tsx';
+/*
+ * ---------------------------------------------------------------------------
+ * 筛选选项弹层换**镜像 `Popover`**(2026-10-10;上游
+ * `ui/changes/changes-list-filter-options.tsx:151-224` 用的就是它)
+ * ---------------------------------------------------------------------------
+ *
+ * 改前是我们**手写**的一个绝对定位 `div.gw-filter-pop`(styles.ts):有关闭按钮与
+ * 「点选项即关」,但**没有** Escape、没有 FocusTrap、关闭后焦点不回触发按钮 ——
+ * 与 `docs/goal-port-desktop.md` §10.9 记的「手写弹层通病」同一族,
+ * 审计 `docs/changes-file-list-gap-audit.md` §3.3 #28/#12 各记过一条。
+ *
+ * 镜像 `Popover` 自己就带 `focus-trap-react`(`escapeDeactivates: true` +
+ * `returnFocusOnDeactivate` 的默认值)与 `onClickOutside`/`onMousedownOutside`,
+ * 所以换成它**不是**换一层皮:三条行为(点外面关 / Esc 关 / 焦点归还)由它提供。
+ */
+import { Popover, PopoverAnchorPosition, PopoverDecoration } from '../core/desktop/ui/lib/popover.tsx';
+/*
+ * ---------------------------------------------------------------------------
+ * 超大文件告警(`OversizedFiles`)—— 2026-10-10 接线(用户规则:「上游 Changes 的
+ * 每一项功能都必须存在」)
+ * ---------------------------------------------------------------------------
+ *
+ * 上游那一条链是**三跳**,逐条对着源码读出来:
+ *
+ * | 上游 | 位置 | 内容 |
+ * |---|---|---|
+ * | 触发点 | `ui/changes/sidebar.tsx:159-183`(`onCreateCommit` 的第一件事) | `getLargeFilePaths(repository, workingDirectory)` ⇒ `filesNotTrackedByLFS(repository, overSizedFiles)` ⇒ 非空则 `showPopup({ type: PopupType.OversizedFiles, … })` 并 **`return false`**(不提交) |
+ * | 判定(阈值) | `lib/large-files.ts:7,28-35` | `stat(join(repository.path, file.path)).size > 100 * 1024 * 1024`,`selection.getSelectionType() !== None` 的**纳入提交**文件才量 |
+ * | 弹窗 | `ui/changes/oversized-files-warning.tsx`(90 行) | `Dialog id="oversized-files"` + 标题「Files too large」+ 那句「If you commit these files, you will no longer be able to push this repository to GitHub.com.」+ `PathText` 列表 + `OkCancelButtonGroup destructive okButtonText="Commit Anyway"`;`onSubmit` 自己调 `dispatcher.commitIncludedChanges(repository, context)` 然后 `setCommitMessage(repository, DefaultCommitMessage)` |
+ *
+ * **两半都是镜像件**:阈值判定是 `src/core/desktop/lib/large-files.ts`(逐字,`cmp` 无输出),
+ * 「是否被 LFS 覆盖」由宿主 `lfs/untracked` 路由**复用**镜像
+ * `src/host/mirror/lib/git/lfs.ts:107` 的 `filesNotTrackedByLFS`。本文件只做**接线**
+ * (裁决 B:没有 popup 宿主 ⇒ 由流程所有者渲染,与 `CloneDialog` / `SquashDialog` /
+ * `ConfirmCommitFilteredChanges` 完全同形)。
+ *
+ * ⚠️ **本项含宿主半改动**(`file-size` 与 `lfs/untracked` 两条路由 + `GitService.fileSize`
+ * + `src/host/lfs-check.ts`)⇒ **要重启 DSH** 才生效;只刷新页面时 `file-size` 404,
+ * 镜像 `getLargeFilePaths` 会把那个 ENOENT 逐文件吞掉(它自己的 `catch`),告警**不出现**。
+ * 这正是 `src/client/store.ts:1034-1039` 那条「host 半是旧构建 … 请重启 DSH」存在的理由。
+ */
+import { OversizedFiles } from '../core/desktop/ui/changes/oversized-files-warning.tsx';
+import { getLargeFilePaths } from '../core/desktop/lib/large-files.ts';
+import type { ICommitContext } from '../core/desktop/models/commit.ts';
+/*
+ * 镜像 `Dialog` 的 `DialogStackContext` —— **不是可选装饰**:它的默认值是
+ * `{ isTopMost: false }`(`ui/dialog/dialog.tsx:37-39`),而 `Dialog.componentDidMount`
+ * 只在 `isTopMost` 为真时才 `dialogElement.showModal()`(`:394-404`)。
+ * 没有 Provider 的话原生 `<dialog>` **永远不会打开**(UA 默认 `display:none`)——
+ * 那正是「面板从没打开过」那一类空绿。上游由 `ui/app.tsx` 的 popup 栈提供它,
+ * 我们由**流程所有者**提供一个单元素栈(`value={{ isTopMost: true }}`)。
+ */
+import { DialogStackContext } from '../core/desktop/ui/dialog/dialog.tsx';
+import { LinkButton } from '../core/desktop/ui/lib/link-button.tsx';
+import type { RebaseConflictState } from '../core/desktop/lib/app-state.ts';
+// `ContinueRebase` 的 `onSubmit` 把 `MultiCommitOperationKind.Rebase` 交给门面
+// (`continue-rebase.tsx:25`);门面的签名要与上游逐字 ⇒ 这里也要那个类型。
+// 上游它是个 `const enum`(`models/multi-commit-operation.ts:13`),`import type`
+// 不产生运行期边(我们不读它的值,只放在参数类型位置)。
+import type { MultiCommitOperationKind } from '../core/desktop/models/multi-commit-operation.ts';
+import { Dispatcher } from '../core/desktop/ui/dispatcher/index.ts';
+import {
+  CONFIRM_COMMIT_FILTERED_CHANGES_KEY,
+  getConfirmCommitFilteredChanges,
+  setConfirmCommitFilteredChanges,
+  subscribePreference,
+} from './prefs.ts';
+
+/*
+ * ⚠️ 这个**门面类必须定义在 `ChangesView` 之前**:`no-use-before-define` 会把
+ * 「先用在 `useMemo` 里、类在后面」记成新增违规(实测 `check-lint` 的 6 条新增之一)。
+ * 它只依赖 import 进来的镜像 `Dispatcher`,放在模块顶部没有任何副作用。
+ */
+/**
+ * `OversizedFiles` 要的那两个 `Dispatcher` 方法 —— 它的 `onSubmit` 逐字是
+ * (`ui/changes/oversized-files-warning.tsx:77-89`):
+ *
+ * ```ts
+ * this.props.onDismissed()
+ * await this.props.dispatcher.commitIncludedChanges(this.props.repository, this.props.context)
+ * this.props.dispatcher.setCommitMessage(this.props.repository, DefaultCommitMessage)
+ * ```
+ *
+ * 也就是说**「Commit Anyway」真的要提交一次**(它不是「关掉弹窗就完事」)——
+ * 这条闸门与 `ConfirmCommitFilteredChanges` 那条同形(那边是
+ * `onCommitAnyway` 回调,这边是 dispatcher 方法,因为上游就是这么分的)。
+ *
+ * ## `setCommitMessage` 为什么是**空实现**(如实记这一处偏离)
+ *
+ * 上游 `_setCommitMessage(repository, DefaultCommitMessage)` 是**无条件**清空提交信息
+ * (提交成功、失败都清)。我们**不**照做,因为:
+ *  · 我们这层的 `store.commit()` 在**成功**路径上已经重置了表单
+ *    (`src/client/store.ts:3120-3138` 的 `commitForm: {...base, signoff, noVerify}`),
+ *    所以成功时这一句本来就是多余的;
+ *  · 失败时清空会把用户刚写的提交信息**删掉**(上游那条无条件清理的后果),
+ *    而本仓没有任何理由复刻这个副作用。
+ * ⇒ 这里是**一条有意的行为偏离**,不是漏做;要复刻上游只需在这里调
+ * `store.setCommitField('summary', '')` + `('description', '')`。
+ */
+class OversizedFilesDispatcher extends Dispatcher {
+  public constructor(private readonly onCommitAnyway: () => Promise<void>) {
+    super();
+  }
+  public async commitIncludedChanges(): Promise<boolean> {
+    await this.onCommitAnyway();
+    return true;
+  }
+  public async setCommitMessage(): Promise<void> {
+    // 见类注释:成功时的重置已经由 `store.commit()` 自己做,失败时**故意不清**。
+  }
+}
 
 export function ChangesView(props: {
   store: GitStore;
@@ -147,6 +361,33 @@ export function ChangesView(props: {
    * 两者共用一句话的措辞不行 —— 一个是「文件没了」,一个是「文件里那几行没了」。
    */
   const [confirmDiscardLines, setConfirmDiscardLines] = useState<{ file: string; spec: LineSelectionSpec } | null>(null);
+  /**
+   * **覆盖贮藏**的确认闸门(上游 `PopupType.ConfirmOverwriteStash`,
+   * `ui/stash-changes/overwrite-stashed-changes-dialog.tsx`)。
+   *
+   * 上游的措辞是 `warning` + destructive 的 `Overwrite` 按钮
+   * (`:37-55`:正文「This will overwrite your existing stash with your current changes.」)。
+   * 我们复用仓库里**已有的**对话框壳(`bits.tsx` 的 `ConfirmDialog`),不新建第二套
+   * —— 与 `confirmDiscard` / `confirmDiscardLines` 同一条分工。
+   */
+  const [confirmStashOverwrite, setConfirmStashOverwrite] = useState(false);
+  /** stash 面板里「丢弃这条贮藏」的确认闸门(上游 `PopupType.ConfirmDiscardStash`)。 */
+  const [confirmDiscardStash, setConfirmDiscardStash] = useState(false);
+  /**
+   * **Changes 页签现在显示的是工作区还是 stash** —— 上游是
+   * `changesState.selection.kind`(`ChangesSelectionKind.WorkingDirectory` ↔
+   * `ChangesSelectionKind.Stash`,`lib/app-state.ts:790-810`),
+   * 由 `Dispatcher.selectStashedFile` / `selectWorkingDirectoryFiles` 切换
+   * (`app-store.ts:3569` 的 `_selectStashedFile`),`filter-changes-list.tsx:1095-1105`
+   * 的 `onStashEntryClicked` 就是那个开关。
+   *
+   * ⚠️ **本仓用一个组件内的布尔量顶替那份状态**,理由是它今天只服务这一棵子树
+   * (上游那份在 `repositoryStateCache` 里,因为我们还没有把 Changes 容器整体切到
+   * `ui/changes/**`)。**退役条件**:Changes 容器接线那一刻,这个 boolean 应当搬进
+   * `repo-state-cache.ts` 的 `selection.kind`(`models/` 那一侧的类型已经在了),
+   * 否则同一个判断会有两份真源。
+   */
+  const [showStashedChanges, setShowStashedChanges] = useState(false);
 
   /**
    * 行尾两颗单文件按钮(暂存 / 取消暂存 / 丢弃)的**具名回调**。
@@ -250,20 +491,80 @@ export function ChangesView(props: {
       conflictState: (current.status?.operation ?? null) !== null,
       committing: current.busy === 'commit',
       rebaseConflict: current.status?.operation === 'rebase',
-      hasStash: false, // 没有 stash 路由 ⇒ 恒 false(标签因此恒不带省略号,与上游 `:563` 同形)
+      /*
+       * `hasStash` 的上游出处:`filter-changes-list.tsx:544` 读
+       * `changesState.stashEntry`,`:549-554,563` 用它决定标签带不带省略号
+       * (「贮藏全部改动…」= 还会再问一次要不要覆盖)。
+       * 改前这里是写死的 `false`,于是那一项**恒不带省略号**。
+       */
+      hasStash: current.stashEntry !== null,
     }, {
       discardAll: (targets: readonly ChangedFile[]) => { setConfirmDiscard([...targets]); },
+      /*
+       * **`stashAll` 2026-10 接上了**。确认闸门留在本层(与 `discardAll` 同一条分工):
+       * 上游 `AppStore._createStashForCurrentBranch(repository, true)`
+       * (`lib/stores/app-store.ts:4849-4886`)在 `hasExistingStash` 时**不建 stash**,
+       * 而是弹 `PopupType.ConfirmOverwriteStash`(`:4865-4871`);
+       * 确认之后才走 `createStashAndDropPreviousEntry`(`:8980-9000`)——
+       * 那一步就是 `store.stashAllChanges()`。
+       */
+      stashAll: () => {
+        if (store.snapshot().stashEntry !== null) { setConfirmStashOverwrite(true); return; }
+        void store.stashAllChanges();
+      },
     });
   }, [store]);
   const onDiscardLinesSelected = useCallback(
     (file: string, spec: LineSelectionSpec) => { setConfirmDiscardLines({ file, spec }); },
     [],
   );
+  /**
+   * 打开 stash 面板(空态那两处入口 —— 卡片按钮与左下角那颗按钮 —— 用的是**同一个**回调)。
+   *
+   * 为什么不是「onClick 里内联一个 setState」:`react/jsx-no-bind` 只认 CallExpression,
+   * 组件作用域里的内联箭头会被记成新增 lint 违规(本文件那几条存量就是这么来的)。
+   */
+  const onViewStash = useCallback(() => { setShowStashedChanges(true); }, []);
+  /**
+   * 左下角那颗按钮的**开关** —— 上游 `onStashEntryClicked`
+   * (`filter-changes-list.tsx:1094-1105`):已经显示着 stash ⇒ 切回工作区列表
+   * (`dispatcher.selectWorkingDirectoryFiles`);否则切到 stash
+   * (`dispatcher.selectStashedFile`)。
+   */
+  const onToggleStashView = useCallback(() => { setShowStashedChanges((showing) => !showing); }, []);
+  /**
+   * stash 面板里那颗「丢弃」按钮 —— 上游 `StashDiffHeader.onDiscardClick`
+   * (`ui/stashing/stash-diff-header.tsx:79-103`)的**判定那一半**:
+   * `askForConfirmationOnDiscardStash` 为真时弹 `PopupType.ConfirmDiscardStash`,
+   * 否则**直接**丢。
+   *
+   * 那个偏好(`confirmDiscardStash`,`lib/stores/app-store.ts:245` / `:4635` 一族)今天
+   * **没有写侧**(我们没有那个「Do not show this message again」复选框的落点),
+   * 所以它按**默认值 `true` 走确认框** —— 与上游出厂设置一致,不是我们发明的拦截。
+   * 探针把两条分支都量过(见 `docs/probes/stash-ui-probe.mjs` 的 D 组)。
+   */
+  const onDiscardStashClick = useCallback(() => { setConfirmDiscardStash(true); }, []);
   /** 左栏宽度(变更列表 + 提交区 | diff),持久化到 `dsh-git.sidebar-width`。 */
   const split = useSplitWidth(SIDEBAR_WIDTH_STORAGE_KEY);
+  /**
+   * 给镜像 `PathLabel` → `PathText` 的**实测可用宽度**(上游 `changed-file.tsx:57-67` 的同一套算术:
+   * `listItemPadding 10*2` + `checkboxWidth 20` + `filePadding 5` + `statusWidth 16` = **51**)。
+   *
+   * `undefined` 是**刻意**的兜底(jsdom 没有布局引擎,`split.width` 是 0):
+   * `PathText` 在不给宽度时渲染**完整文本**(`path-text.tsx:344-347`),给了才会按实测截断。
+   * ⇒ 真实浏览器里拿到真实宽度(截断位置与 Desktop 一致),测不到宽度时不假装截断。
+   */
+  const pathWidth = split.width > 120 ? split.width - 51 : undefined;
 
   const status = snap.status;
-  const files = status?.files ?? [];
+  /**
+   * **`files` 必须是一个稳定引用**(2026-10 修 `react-hooks/exhaustive-deps`):
+   * `status?.files ?? []` 里那个 `[]` 字面量**每次渲染都是一个新数组** ⇒ 它的下游
+   * `useCallback`(`onListItemContextMenu` / `toggleIncludeOf` / `filtered` 一族)
+   * 依赖数组**每帧都变** ⇒ 那些 memo 全部失效。`useMemo` 不是性能装饰,是这条
+   * 依赖链成立的前提;`status` 变(真刷新)时它照旧重算。
+   */
+  const files = useMemo(() => status?.files ?? [], [status]);
   /**
    * 一个文件的**纳入状态**(三态)。真值在 `store.includeState`(客户端模型),
    * 缺失 = 默认纳入(上游 `DiffSelection.fromInitialSelection(All)`)。
@@ -271,7 +572,14 @@ export function ChangesView(props: {
   const stateOf = (file: ChangedFile): IncludeState => includeStateOf(snap.includeState[file.path]);
   const listed = new Set(files.map((f) => f.path));
 
-  const selected = new Set(snap.selectedFiles);
+  /**
+   * **`selected` 同理必须稳定**(2026-10 修 `react-hooks/exhaustive-deps`):
+   * `new Set(...)` 每次渲染都是新对象 ⇒ `onPlainKeyDown` / `renderRow` 的依赖数组
+   * 每帧都变。`store.selectFiles` / `toggleFile` / 每次 `refreshStatus` 的过滤都
+   * **重新分配** `selectedFiles` 数组(`store.ts:1724-1731`、`:1845-1857`)⇒
+   * 用它的引用做 dep 不会漏更新。
+   */
+  const selected = useMemo(() => new Set(snap.selectedFiles), [snap.selectedFiles]);
 
   // ---- 筛选(照 Desktop 的 Filter Options)----
   //
@@ -283,36 +591,88 @@ export function ChangesView(props: {
   const [activeOptions, setActiveOptions] = useState<FilterKey[]>([]);
   const [filterOpen, setFilterOpen] = useState(false);
 
-  /** 选项谓词。 */
-  const optionPredicates: Record<FilterKey, (f: ChangedFile) => boolean> = {
-    included: (f) => stateOf(f) !== 'none',
-    excluded: (f) => stateOf(f) === 'none',
-    new: (f) => f.untracked === true || f.staged === 'A' || f.unstaged === 'A',
-    modified: (f) => f.staged === 'M' || f.unstaged === 'M',
-    deleted: (f) => f.staged === 'D' || f.unstaged === 'D',
+  /**
+   * 五项筛选的**单一真源** —— 镜像 `IFileListFilterState`(`lib/app-state.ts:873-...`)。
+   * 上游它是 app-state 字段(由六个 `dispatcher.set*Filter*` 写);我们是 `useState`,
+   * 但**只有这一处**(`filterText` + `activeOptions` 两者)。
+   */
+  const filterState: IFileListFilterState = {
+    filterText,
+    isIncludedInCommit: activeOptions.includes('included'),
+    isExcludedFromCommit: activeOptions.includes('excluded'),
+    isNewFile: activeOptions.includes('new'),
+    isModifiedFile: activeOptions.includes('modified'),
+    isDeletedFile: activeOptions.includes('deleted'),
   };
   const FILTER_KEYS: FilterKey[] = ['included', 'excluded', 'new', 'modified', 'deleted'];
   const FILTER_LABELS: Record<FilterKey, string> = {
     included: '纳入提交', excluded: '排除提交', new: '新文件', modified: '已修改', deleted: '已删除',
   };
-  /** 按文字 + 选项过滤。文字只匹配路径(不匹配状态字母),且**保持原顺序**(不做模糊重排)。 */
-  const passes = (f: ChangedFile): boolean => {
-    const query = filterText.trim().toLowerCase();
-    if (query !== '' && !f.path.toLowerCase().includes(query)) { return false; }
-    if (activeOptions.length === 0) { return true; }
-    return activeOptions.every((key) => optionPredicates[key](f)); // 选项之间是 AND
-  };
-  const shown = files.filter(passes);
-  /** 计数**只统计当前可见集合**(与 Desktop 的 getFilterCounts 一致,不是总数)。 */
-  const optionCounts = Object.fromEntries(
-    FILTER_KEYS.map((key) => [key, files.filter((f) => passes(f) && optionPredicates[key](f)).length]),
-  ) as Record<FilterKey, number>;
-  const visible = { total: shown.length };
-  const includedCount = files.filter((f) => stateOf(f) !== 'none').length;
-  const shownIncludedCount = shown.filter((f) => stateOf(f) !== 'none').length;
+  /**
+   * ⭐ **可见行 = 镜像的筛选结果**:`filterChangesRows` 用的是镜像 `match`
+   * (模糊匹配 + 匹配下标 + 按分数排序,`lib/fuzzy-find.ts:24-53`)与镜像 `applyFilters`
+   * (五个选项,`filter-changes-logic.ts:155-166`)。
+   * 我们原来那份 `passes()`(子串匹配、无下标、保持原顺序)**已退役** ——
+   * 它给不出 `<mark>` 需要的位置,也不做上游那种重排。
+   *
+   * `useMemo` 的 dep 只列**值**的依赖:`filterState` / `stateOf` 每次渲染都是新对象,
+   * 把它们列进去等于没有 memo(审计 §3.4 #38 记的就是这条「输入筛选词时全量重建」)。
+   */
+  const filtered = useMemo(
+    () => filterChangesRows(files, filterState, true, stateOf),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [files, filterText, activeOptions, snap.includeState],
+  );
+  /**
+   * 可见的**文件**那一列 —— 由 `filtered` 派生,所以只在筛选结果真的变时重建
+   * (2026-10-09:以前每次渲染都 `map` 一遍 500 行,而它的下游是
+   * `flat` / `visibleItems` / `invalidationProps` 一族 —— 每帧换身份会让
+   * `changes-file-list.tsx` 的失效闸门恒为「变了」,那次接线就等于没接)。
+   */
+  const shown = useMemo(() => filtered.rows.map((row) => row.file), [filtered]);
+  /**
+   * 计数**只统计当前可见集合**(与 Desktop 的 `getFilterCounts` 同口径,不是总数)。
+   * 谓词用的是**镜像的** `applyFilters`(单项打开),所以计数与列表**不可能**分叉
+   * —— 这正好收掉审计 §3.3 #29 那处细微差(上游 `included` 的判据是
+   * `selection.getSelectionType() === All`,我们原来是 `!== 'none'`)。
+   */
+  const singleOptionFilter = (key: FilterKey): IFileListFilterState => ({
+    filterText: '',
+    isIncludedInCommit: key === 'included',
+    isExcludedFromCommit: key === 'excluded',
+    isNewFile: key === 'new',
+    isModifiedFile: key === 'modified',
+    isDeletedFile: key === 'deleted',
+  });
+  const optionCounts = useMemo(() => Object.fromEntries(
+    FILTER_KEYS.map((key) => [key, filtered.rows.filter((row) => applyFilters(row, true, singleOptionFilter(key))).length]),
+    // `FILTER_KEYS` 是组件内的常量数组(内容恒定);`singleOptionFilter` 每帧新建但只读闭包。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  ) as Record<FilterKey, number>, [filtered]);
+  const visible = { total: filtered.rows.length };
+  const includedCount = useMemo(
+    () => files.filter((f) => includeStateOf(snap.includeState[f.path]) !== 'none').length,
+    [files, snap.includeState],
+  );
+  const shownIncludedCount = useMemo(
+    () => filtered.rows.filter((row) => includeStateOf(snap.includeState[row.file.path]) !== 'none').length,
+    [filtered, snap.includeState],
+  );
   /** 头部三态复选框:全部纳入 → 选中;一个都没 → 未选;部分 → 混合。 */
   const allShownIncluded = shown.length > 0 && shownIncludedCount === shown.length;
+  /**
+   * `.diff-container` 的 ref(我们渲染的那一层,`ui/changes/changes.tsx:104`)。
+   * `DiffPane` 要拿它量两件事,见那边 `useLayoutEffect` 的注释 —— 都只服务
+   * `+n/-n` 回到 header 行里这一条布局(用户 2026-10-09 的裁决)。
+   */
+  const diffContainerRef = useRef<HTMLDivElement>(null);
   const checkAllRef = useRef<HTMLInputElement>(null);
+  /**
+   * 筛选按钮的 ref —— 镜像 `Popover` 的 `anchor`(上游
+   * `changes-list-filter-options.tsx:157,225-227` 用 `filterOptionsButtonRef` 同一个用途)。
+   * 弹层定位(floating-ui)与「Esc/点外面关闭之后焦点回到触发按钮」都以它为锚。
+   */
+  const filterButtonRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     const el = checkAllRef.current;
     if (el === null) { return; }
@@ -321,7 +681,7 @@ export function ChangesView(props: {
   });
 
   /** 键盘导航按**界面上的顺序**走(单一列表 = 就是 filtered 顺序)。 */
-  const flat: { file: ChangedFile }[] = shown.map((file) => ({ file }));
+  const flat: { file: ChangedFile }[] = useMemo(() => shown.map((file) => ({ file })), [shown]);
 
   // ---- 「被隐藏的改动仍会被提交」告警条(`hidden-changes-warning`)----
   //
@@ -336,16 +696,11 @@ export function ChangesView(props: {
   // 为什么必须接:提交走的是 `store.commit()` → `includedFiles()`,也就是
   // **全部** `includeState !== 'none'` 的文件(`src/client/store.ts:984-985,1008-1010`),
   // 跟这里的筛选**毫无关系** ⇒ 筛选生效时被藏起来的改动照样被提交,而界面一个字都不说。
-  const includedPaths = files.filter((f) => stateOf(f) !== 'none').map((f) => f.path);
-  const visibleItems = new Map(shown.map((f) => [f.path, f]));
-  const filterState: IFileListFilterState = {
-    filterText,
-    isIncludedInCommit: activeOptions.includes('included'),
-    isExcludedFromCommit: activeOptions.includes('excluded'),
-    isNewFile: activeOptions.includes('new'),
-    isModifiedFile: activeOptions.includes('modified'),
-    isDeletedFile: activeOptions.includes('deleted'),
-  };
+  const includedPaths = useMemo(
+    () => files.filter((f) => includeStateOf(snap.includeState[f.path]) !== 'none').map((f) => f.path),
+    [files, snap.includeState],
+  );
+  const visibleItems = useMemo(() => new Map(shown.map((f) => [f.path, f])), [shown]);
   /**
    * 上游 `showFilesToBeCommitted`(`filter-changes-list.tsx:1207-1221`)的四步筛选动作,
    * 逐步对应:`clearFilter()` ⇒ `setFilterText('')`;
@@ -359,9 +714,255 @@ export function ChangesView(props: {
     setActiveOptions(['included']);
   };
 
+  /*
+   * ---------------------------------------------------------------------------
+   * 「提交被筛选隐藏的改动」的确认闸门(2026-10-09)
+   * ---------------------------------------------------------------------------
+   *
+   * 上游这一条链有三个节点,**逐条逐字**对着镜像读出来:
+   *
+   * | 上游 | 位置 | 内容 |
+   * |---|---|---|
+   * | 触发谓词 | `filter-changes-list.tsx:943-951` | `askForConfirmationOnCommitFilteredChanges && isCommittingFileHiddenByFilter(filesSelected.map(f=>f.id), this.state.filteredItems, fileCount, this.props.fileListFilter)` |
+   * | 传递 | 同文件 `:1011` → `commit-message.tsx:201` | prop `showPromptForCommittingFileHiddenByFilter` |
+   * | 真正的闸门 | `commit-message.tsx:626-637` | `if (options?.warnFilesNotVisible !== false && this.props.showPromptForCommittingFileHiddenByFilter === true && this.props.onFilesToCommitNotVisible) { onFilesToCommitNotVisible(() => this.createCommit({ …warnFilesNotVisible: false })); return }` |
+   * | 弹窗载荷 | `filter-changes-list.tsx:1195-1201` | `dispatcher.showPopup({ type: PopupType.ConfirmCommitFilteredChanges, onCommitAnyway, showFilesToBeCommitted })` |
+   *
+   * **我们这边怎么落**:本插件**没有 popup 宿主**(全仓只有 `repo-bar.tsx:711` 一个收窄的
+   * `showPopup` 替身),所以按裁决 B —— 由**流程所有者**(本组件,它同时是提交动作与这个
+   * 弹窗的持有者)渲染镜像 `ConfirmCommitFilteredChanges`,与 `CloneDialog` / `SquashDialog`
+   * 完全同形。**没有新增机制**:弹窗状态就是我们自己的一个 `useState`。
+   *
+   * 谓词用的是**镜像那个纯函数本人**(`isCommittingFileHiddenByFilter`,与告警条同一份代码),
+   * 不是重写的等价物;`visibleItems` 的键就是 `filesSelected` 里用的那个 id(`file.path`,
+   * 与 `IChangesRowItem.id` 同源,见 `changes-file-list.tsx:214`)。
+   */
+  /**
+   * 那偏好的**读侧**(React 侧写法见 `src/client/prefs.ts` 里那个键的注释:
+   * 这个键刻意不用 `useSyncExternalStore` —— 20+ 条 jsdom 探针直接挂本组件、
+   * 跑的是 React 17,那条 18-only 的导出会让整棵树被卸载,判据失真)。
+   * 用 prefs 模块本来就导出的两个原语:读一次当**初值**,再订阅同一个广播。
+   */
+  const [askForConfirmationOnCommitFilteredChanges, setAskForConfirmation] =
+    useState(getConfirmCommitFilteredChanges);
+  useEffect(
+    () => subscribePreference(
+      CONFIRM_COMMIT_FILTERED_CHANGES_KEY,
+      () => { setAskForConfirmation(getConfirmCommitFilteredChanges()); },
+    ),
+    [],
+  );
+  const showPromptForCommittingFileHiddenByFilter =
+    askForConfirmationOnCommitFilteredChanges &&
+    isCommittingFileHiddenByFilter(includedPaths, visibleItems, files.length, filterState);
+  /**
+   * 弹窗在场时的**回调载荷** —— 上游 `PopupType.ConfirmCommitFilteredChanges` 的
+   * `onCommitAnyway`(`commit-message.tsx:632-636` 那个闭包:`createCommit({warnFilesNotVisible:false})`)。
+   * `null` = 弹窗不在场(不是「有一个空的弹窗」)。
+   */
+  const [commitFilteredAnyway, setCommitFilteredAnyway] = useState<(() => void) | null>(null);
+  const onFilesToCommitNotVisible = useCallback((onCommitAnyway: () => void): void => {
+    setCommitFilteredAnyway(() => onCommitAnyway);
+  }, []);
+  const onDismissCommitFiltered = useCallback((): void => { setCommitFilteredAnyway(null); }, []);
+  /*
+   * ---------------------------------------------------------------------------
+   * 超大文件告警(>100 MiB)**在场时的载荷** —— 上游
+   * `ui/changes/sidebar.tsx:170-180` 的 `showPopup({type: PopupType.OversizedFiles, …})`
+   * ---------------------------------------------------------------------------
+   *
+   * `null` = 弹窗不在场(不是「有一个空的弹窗」)。载荷三件与上游那个 popup 变体逐字同
+   * (`models/popup.ts` 的 `OversizedFiles`: `oversizedFiles` + `context` + `repository`),
+   * 由**触发它的那一层**(`CommitBox` 的提交流,它手里才有 `summaryOrPlaceholder` 与
+   * `Repository`)算好了交上来 —— 与上游 `commit-message.tsx` 造 `commitContext` 再交给
+   * `onCreateCommit` 的分工一致。
+   *
+   * **为什么载荷里带 `repository` 而不是在这一层现造**:镜像 `OversizedFiles.onSubmit`
+   * 要把它原样交给 `dispatcher.commitIncludedChanges(repository, context)`;本视图
+   * 已经有两处 `new Repository(...)`(`CommitAuthorAvatar` 与 `CommitBox`),再在这里
+   * 造第三份就是**第二个真源**(`branch`/`alias` 一漂,弹窗与提交流就会读不同的仓库)。
+   */
+  const [oversizedWarning, setOversizedWarning] = useState<{
+    readonly oversizedFiles: ReadonlyArray<string>;
+    readonly context: ICommitContext;
+    readonly repository: Repository;
+  } | null>(null);
+  const onOversizedFiles = useCallback((payload: {
+    readonly oversizedFiles: ReadonlyArray<string>;
+    readonly context: ICommitContext;
+    readonly repository: Repository;
+  }): void => { setOversizedWarning(payload); }, []);
+  const onDismissOversized = useCallback((): void => { setOversizedWarning(null); }, []);
+  /**
+   * 「Commit Anyway」那一跳的宿主门面 —— 与 `ContinueRebaseDispatcher` 同一形状
+   * (替身给类型面,这里给行为),业务仍然全部由**镜像那份** `OversizedFiles` 执行。
+   */
+  const oversizedDispatcher = useMemo(
+    () => new OversizedFilesDispatcher(() => store.commit()),
+    [store],
+  );
+  /**
+   * 「把镜像里那个**不冒泡**的 `submit` / `reset` 重新以冒泡形态派发一遍」的转发垫片。
+   * 完整事实与退役条件写在下面那个 `div` 的注释里(一句话:镜像 `ok-cancel-button-group.tsx`
+   * 用 `new Event('submit')` 手动派发,`bubbles` 默认 false,而 React 把 `submit` 委托在
+   * **根容器**上 ⇒ 镜像 `Dialog.onSubmit` 永远收不到 ⇒ 「Commit Anyway」点下去没反应)。
+   *
+   * 捕获阶段监听能收到不冒泡的事件(DOM 规范的捕获阶段照样经过全部祖先),
+   * 所以这里只需要在**自己的包装元素**上挂一次,不需要动镜像一个字节。
+   * 只在弹窗在场时挂;卸载时摘掉(没有依赖数组 ⇒ 每次渲染重建一次,节点身份不变、无副作用)。
+   */
+  const dialogFormSubmitShimRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const holder = dialogFormSubmitShimRef.current;
+    if (holder === null) { return; }
+    const form = holder.querySelector('form');
+    if (form === null) { return; }
+    const forward = (event: Event): void => {
+      // 已经是冒泡的那一份不再转发(否则自激:克隆体也会走这里)。
+      if (event.bubbles) { return; }
+      const clone = new Event(event.type, { bubbles: true, cancelable: true });
+      if (event.target !== null) { (event.target as Element).dispatchEvent(clone); }
+    };
+    form.addEventListener('submit', forward, true);
+    form.addEventListener('reset', forward, true);
+    return () => {
+      form.removeEventListener('submit', forward, true);
+      form.removeEventListener('reset', forward, true);
+    };
+  });
+
+  /**
+   * 行内容依赖的那张表(上游 `filter-changes-list.tsx:1367-1377` 的同名 prop)。
+   * 逐键理由写在 `<ChangesFileList invalidationProps={…}>` 那一处;
+   * `useMemo` 的依赖就是那些值的**身份**,所以「一次无关的 store emit」不会换掉这个对象
+   * ⇒ 列表的失效闸门(浅比较)为真 ⇒ 网格**不重渲** ⇒ 行不重建。
+   */
+  const invalidationProps = useMemo(() => ({
+    status,
+    includeState: snap.includeState,
+    selectedPaths: snap.selectedFiles,
+    matches: filtered.matchesOf,
+    pathWidth,
+    isCommitting: snap.busy === 'commit',
+    focusedRow: flat[0]?.file.path ?? null,
+  }), [status, snap.includeState, snap.selectedFiles, filtered, pathWidth, snap.busy, flat]);
+
   const toggle = (file: ChangedFile, event: React.MouseEvent): void => {
     store.toggleFile(file.path, event.metaKey || event.ctrlKey || event.shiftKey);
   };
+
+  /**
+   * 列表体的四个回调 —— 分工**照上游**(`FilterChangesList` + `ui/changes/sidebar.tsx`):
+   *
+   * · **鼠标点选** ⇒ 由镜像 `SectionList` 自己算选择(`section-list.tsx:1589-1610` 的
+   *   `shift` = 「从锚点到这一行」的**范围**选择、`meta/ctrl` = 逐个追加),
+   *   结果进 `onSelectionChanged` ⇒ `store.selectFiles(...)`(**右栏多选**的输入);
+   *   上游同一分工:`filter-changes-list.tsx:1188-1193` 的 `onFileSelectionChanged`。
+   * · **键盘(空格/回车)** ⇒ 切换「纳入提交」,`sidebar.tsx:336-349` 的
+   *   `onChangedItemClick` **只**处理 `source.kind === 'keyboard'`。勾选 ≠ 暂存(零 git)。
+   * · **双击** ⇒ 外部编辑器(`filter-changes-list.tsx:1132-1134`)。我们此前**没有**这条。
+   * · **右键** ⇒ 我们那份 11 项菜单(`changes-file-menu.ts`;探针 49×3 守的就是它)。
+   */
+  const onListSelectionChanged = useCallback((paths: ReadonlyArray<string>): void => {
+    store.selectFiles([...paths]);
+  }, [store]);
+  const toggleIncludeOf = useCallback((path: string): void => {
+    const file = files.find((f) => f.path === path);
+    if (file === undefined) { return; }
+    // 上游 `onToggleInclude`(`sidebar.tsx:314-330`):`None` ⇒ 纳入,其它 ⇒ 取消。
+    store.setFileIncluded(path, stateOf(file) === 'none');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store, files, snap.includeState]);
+  const onListItemClick = useCallback((path: string, source: SelectionSource): void => {
+    if (source.kind === 'keyboard') { toggleIncludeOf(path); }
+  }, [toggleIncludeOf]);
+  const onListItemDoubleClick = useCallback((path: string): void => {
+    void store.openInExternalEditor(path);
+  }, [store]);
+  const onListItemContextMenu = useCallback((path: string, event: React.MouseEvent<HTMLDivElement>): void => {
+    const file = files.find((f) => f.path === path);
+    if (file === undefined) { return; }
+    rowMenu(event, file);
+  }, [files, rowMenu]);
+  /**
+   * 回填给镜像列表的**位置**(上游 `changesListScrollTop` ⇒
+   * `AugmentedSectionFilterList` 的 `setScrollTop`,`filter-changes-list.tsx:1354`)。
+   * 我们的 `ChangesView` 在页签切换时会被卸载,组件内的 `useState` 留不住 ⇒
+   * **初值**从模块作用域取(`changes-file-list.tsx` 的 `getRememberedScrollTop`)。
+   *
+   * ⚠️ **它必须是「跟着走」的,不能只当初值用**(2026-10-08,用户报「左边虚拟列表无法滚动」)。
+   * 这个值原样喂给 `react-virtualized` 的 `Grid` 的 `scrollTop` prop,而 `Grid` 把**数值**
+   * 的 `scrollTop` 当**权威**:`Grid.js` 的 `getDerivedStateFromProps` 会把它抄进 state
+   * (`:1040-1046`),`componentDidUpdate` 在 `scrollPositionChangeReason === REQUESTED` 时
+   * 把它写回 DOM(`:538-539`)。于是**只要这个 prop 冻在挂载那一刻的值**,
+   * 每一次滚动(Grid 自己的 `_onScroll` 触发的重渲也算)都会被回弹到那个旧值 ——
+   * 表现就是「列表滚不动」。上游正是靠**同一个值跟着 `onScroll` 走**才没有这个问题:
+   * `ui/repository.tsx:199-201` 的 `onChangesListScrolled = (scrollTop) => this.setState({changesListScrollTop: scrollTop})`。
+   * 下面 {@link onChangesListScrolled} 里那句 `setChangesListScrollTop(top)` 就是它在我们的层里的等价物。
+   * 读数(改前红 / 改后绿,真 Chrome、500 文件、宿主祖先链复刻):
+   * `docs/probes/changes-list-scroll-probe.mjs` 的 `S1c`/`S1d` 与红证 `R1`。
+   */
+  const [changesListScrollTop, setChangesListScrollTop] = useState(() => getRememberedScrollTop());
+  /**
+   * 滚动位置:模块作用域记着(上游存在 `IRepositoryState`,`repository.tsx:199-201`),
+   * **同时**回写上面那个 state —— 两者各司其职:
+   *  · 模块作用域负责**跨挂载**记住(切页签再切回来时给出初值);
+   *  · state 负责让喂给 `Grid` 的 `scrollTop` prop **与真实位置一致**(否则会回弹,见上)。
+   */
+  const onChangesListScrolled = useCallback((top: number): void => {
+    setRememberedScrollTop(top);
+    setChangesListScrollTop(top);
+  }, []);
+  /**
+   * **平铺路径**上的键盘导航(虚拟路径由镜像 `SectionList` 自己管,见列表体的注释)。
+   * 这里保留我们那份 `onListKeyDown`(↑/↓/Home/End/空格/回车),探针读的就是它。
+   */
+  const onPlainKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>): void => {
+    onListKeyDown(event, flat, store, selected);
+  }, [flat, store, selected]);
+
+  const openRowInExternalEditor = useCallback((path: string): void => {
+    void store.openInExternalEditor(path);
+  }, [store]);
+  /** 平铺路径上「单击整行」的稳定回调(虚拟路径不传,见 `FileRow.onSelect` 的注释)。 */
+  const onRowSelect = useCallback((event: React.MouseEvent, file: ChangedFile): void => {
+    toggle(file, event);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store]);
+
+  /**
+   * 一行(两条渲染路径**共用**)。`virtual` 只影响两件事:
+   *  · 虚拟路径上外层 `ListRow` **已经**是 `role="option"`(`section-list.tsx:1245`)
+   *    ⇒ 我们的行不再重复声明 `role="option"`(嵌套 option 对读屏是错的);
+   *  · 虚拟路径上行不需要 `tabIndex`(焦点由镜像列表管)。
+   */
+  const renderRow = useCallback((row: IChangesRowItem, matches: IMatches | undefined, virtual: boolean) => (
+    <FileRow key={row.id} file={row.file} include={stateOf(row.file)} selected={selected.has(row.file.path)}
+      focused={!virtual && flat[0]?.file.path === row.file.path}
+      virtual={virtual} matches={matches} pathWidth={pathWidth}
+      store={store} onSelect={virtual ? undefined : onRowSelect}
+      onDiscard={discardRow}
+      onStage={stageRow}
+      onUnstage={unstageRow}
+      onContextMenu={rowMenu}
+      onOpenInExternalEditor={openRowInExternalEditor}
+    />
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [store, selected, flat, pathWidth, discardRow, stageRow, unstageRow, rowMenu, openRowInExternalEditor, snap.includeState]);
+
+  /** 0 行时的空态(**两条路径共用**;上游 `renderNoItems`)。 */
+  const renderNoItems = useCallback((): JSX.Element => (
+    <>
+      {files.length === 0 && (
+        <Empty icon="check-circle" title="没有本地变更" body="工作区是干净的。" />
+      )}
+      {files.length > 0 && (
+        <Empty icon="filter" title="没有匹配的文件"
+          body={getNoResultsMessage(filterState) ?? '没有文件符合当前的筛选条件。清掉筛选就能看到全部变更。'} />
+      )}
+    </>
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [files.length, filterText, activeOptions]);
 
   if (status === null) {
     return <Empty icon="git-branch" title="读取仓库状态…" />;
@@ -458,10 +1059,33 @@ export function ChangesView(props: {
           */}
           <div className="gw-chead" onContextMenu={headerMenu} data-gw-ctx="list">
             <div className="gw-filter-box">
+              {/*
+                筛选按钮。上游 `changes-list-filter-options.tsx:239-265`:
+                `.filter-button`(带 `active` 类)+ 图标 + **生效数小圆点**(`active-badge`)
+                + `triangleDown` 图标;tooltip/aria-label 是
+                `Filter Options (N applied)`。
+
+                ⚠️ **2026-10-10 修的那一条**(审计 §3.3 #26):改前生效数**只**写在 `title`
+                里(要 hover 才看得见),按钮上没有那颗小圆点。现在照上游渲染
+                `span.active-badge > div.badge-bg > div.badge`(`:242-249`)——
+                类名逐字,配方补在 `styles.ts` 的 `.gw-filter-btn .active-badge` 一族
+                (上游那条配方挂在 `.filter-button` 下,我们的按钮类名是 `gw-filter-btn`,
+                所以**必须**补一份;不补就是「DOM 在、5px 的圆点一个都看不见」)。
+                读数:`docs/probes/changes-filter-popover-probe.mjs` 的 `B1`–`B4`。
+              */}
               <button className={`gw-filter-btn${activeOptions.length > 0 ? ' active' : ''}`}
+                ref={filterButtonRef}
                 title={activeOptions.length > 0 ? `筛选选项(${activeOptions.length} 项生效)` : '筛选选项'}
+                aria-label={activeOptions.length > 0 ? `筛选选项(${activeOptions.length} 项生效)` : '筛选选项'}
                 aria-expanded={filterOpen} onClick={() => setFilterOpen((v) => !v)}>
                 <Icon name="filter" size={12} />
+                {activeOptions.length > 0 && (
+                  <span className="active-badge">
+                    <div className="badge-bg">
+                      <div className="badge" />
+                    </div>
+                  </span>
+                )}
                 <Icon name="chevron-down" size={10} />
               </button>
               <input className="gw-filter-input" placeholder="Filter"
@@ -471,6 +1095,8 @@ export function ChangesView(props: {
                   counts={optionCounts}
                   active={activeOptions}
                   labels={FILTER_LABELS}
+                  showClear={hasActiveFilters(filterState)}
+                  anchor={filterButtonRef.current}
                   onToggle={(key) => {
                     const next = new Set(activeOptions);
                     if (next.has(key)) next.delete(key); else next.add(key);
@@ -536,31 +1162,71 @@ export function ChangesView(props: {
             </div>
           </div>
 
-          {/* 列表语义 + roving tabindex:行是可选项,不是普通 div。 */}
-          <div className="gw-files" role="listbox" aria-multiselectable="true"
-            aria-label="变更文件" onKeyDown={(event) => onListKeyDown(event, flat, store, selected)}>
-            {files.length === 0 && (
-              <Empty icon="check-circle" title="没有本地变更" body="工作区是干净的。" />
-            )}
-            {files.length > 0 && visible.total === 0 && (
-              <Empty icon="filter" title="没有匹配的文件"
-                body="没有文件符合当前的筛选条件。清掉筛选就能看到全部变更。" />
-            )}
-            {shown.map((file) => (
-              <FileRow key={file.path} file={file} include={stateOf(file)} selected={selected.has(file.path)}
-                focused={flat[0]?.file.path === file.path}
-                store={store} onSelect={(event) => toggle(file, event)}
-                onDiscard={discardRow}
-                onStage={stageRow}
-                onUnstage={unstageRow}
-                onContextMenu={rowMenu}
-              />
-            ))}
-          </div>
+          {/*
+            列表体 = **镜像的虚拟列表**(见 `changes-file-list.tsx` 的文件头)。
+            `.gw-files` 这个容器类名与每行的 `.gw-frow[data-path]` **刻意保留**:
+            既有探针(`changes-file-menu-probe` / `stash-probe` / `changes-discard-lines-probe` /
+            `changes-path-bidi-probe`)与 `styles.ts` 的手写配方都认它们;虚拟路径上行仍然由
+            `renderRow` 画(同一份数据、同一个行组件),只是外面多了一层镜像 `ListRow`。
 
-          {/* 告警条插在**列表与提交区之间**,与上游同一位置:
-              `{this.renderStashedChanges()} {this.renderHiddenChangesWarning()} {this.renderCommitMessageForm()}`
-              (`ui/changes/filter-changes-list.tsx:1387-1389`)。 */}
+            键盘导航分工:虚拟路径由镜像 `SectionList` 管(`section-list.tsx:584-651`,
+            含 `shift` 的**范围**选择),平铺路径(测不到高度时)仍由我们那份 `onListKeyDown` 管
+            —— 两条路径**不会同时**接管(`onPlainKeyDown` 只在非虚拟时挂上)。
+          */}
+          <ChangesFileList
+            rows={filtered.rows}
+            matchesOf={filtered.matchesOf}
+            renderRow={renderRow}
+            selectedPaths={snap.selectedFiles}
+            onSelectionChanged={onListSelectionChanged}
+            onItemClick={onListItemClick}
+            onItemDoubleClick={onListItemDoubleClick}
+            onItemContextMenu={onListItemContextMenu}
+            onScroll={onChangesListScrolled}
+            scrollTop={changesListScrollTop}
+            renderNoItems={renderNoItems}
+            postNoResultsMessage={getNoResultsMessage(filterState)}
+            ariaLabel="变更文件"
+            isCommitting={snap.busy === 'commit'}
+            onPlainKeyDown={onPlainKeyDown}
+            /*
+             * **`invalidationProps`** —— 上游同名的那个 prop
+             * (`filter-changes-list.tsx:1367-1377` 那张表),语义逐条对齐:
+             * 列表对它做**浅比较**,只有变了才把虚拟网格 `forceUpdate()` 一遍
+             * (机制与「为什么需要它」写在 `changes-file-list.tsx` 的 `cellRenderer` 注释里)。
+             *
+             * 我们这张表 = **行内容真的会读的每一样**,逐键给出理由(照上游那张表的粒度):
+             *   · `status`        —— 路径 / 状态字母 / 冲突标记(行左半边与图标);
+             *   · `includeState`  —— 三态勾选框(上游那头的 `workingDirectory`,因为上游把
+             *                        selection 挂在 `WorkingDirectoryFileChange` 上);
+             *   · `selectedPaths` —— 选中高亮(`.gw-frow` 的 selected 类);
+             *   · `matchesOf`     —— `<mark>` 高亮位置(上游 `renderItem(item, matches)`);
+             *   · `pathWidth`     —— `PathText` 的可用宽度(上游 `changed-file.tsx:57-67` 同一件事);
+             *   · `isCommitting`  —— 提交中行内动作不可点(`filter-changes-list.tsx:1136-1150` 同源);
+             *   · `focusedRow`    —— **平铺路径**上那一行的 focus 标记(虚拟路径由 Grid 自己管)。
+             *
+             * ⚠️ 每个值时必须是**原语或身份稳定**的对象,否则浅比较恒为假、闸门等于没接:
+             * `snap.includeState` / `snap.selectedFiles` / `filtered` 都是 store 或 `useMemo`
+             * 的产物(只在真变时才换身份),`pathWidth` 是数,`status` 是原对象。
+             * `useMemo` 在这里不是为了省几次比较,而是为了让**本来就不该变的帧**不换身份。
+             */
+            invalidationProps={invalidationProps}
+          />
+
+          {/*
+            **左下角的「Stashed Changes」按钮** —— 上游 `renderStashedChanges()`
+            (`ui/changes/filter-changes-list.tsx:1105-1130`),位置也在同一处:
+            `{this.renderStashedChanges()} {this.renderHiddenChangesWarning()} {this.renderCommitMessageForm()}`
+            (`:1387-1389`)。空态的 stash 卡那句提示行
+            (「When a stash exists, access it at the bottom of the Changes tab to the left.」,
+            `ui/changes/no-changes.tsx:422-427`)**指的就是这一颗按钮** ——
+            少了它,那张卡的提示行就是一句指不到东西的话。
+          */}
+          <StashedChangesButton
+            stashEntry={snap.stashEntry}
+            showing={showStashedChanges}
+            onToggle={onToggleStashView}
+          />
           <HiddenChangesWarning
             fileIdsIncludedInCommit={includedPaths}
             filteredItems={visibleItems}
@@ -591,25 +1257,87 @@ export function ChangesView(props: {
 
           {/* 提交区固定在左栏底部(Desktop 的 ChangesSidebar 也是这样) */}
           <CommitBox store={store} snap={snap} onOpenPreferences={props.onOpenPreferences}
-            onOpenRepositorySettings={props.onOpenRepositorySettings} />
+            onOpenRepositorySettings={props.onOpenRepositorySettings}
+            showPromptForCommittingFileHiddenByFilter={showPromptForCommittingFileHiddenByFilter}
+            onFilesToCommitNotVisible={onFilesToCommitNotVisible}
+            onOversizedFiles={onOversizedFiles} />
           </SplitPane>
         </div>
 
         <div className="right">
-          {files.length === 0
-            ? <NoChanges store={store} snap={snap} />
-            : (
-              <DiffPane
+          {/*
+            **右栏四态**,次序照上游 `ui/repository.tsx:555-597` 的
+            `renderContentForChanges`:
+              ① 选中 stash ⇒ `StashDiffViewer`;
+              ② **选中的文件 > 1 ⇒ `MultipleSelection`**(`:563-567`,26 行镜像件);
+              ③ 0 文件 ⇒ `NoChanges`(`:569-584`);
+              ④ 否则 diff 面板。
+            ②这一态是审计 §3.2 #45 记的那条**内容错**类缺陷:「选 3 个文件时右栏显示第 1 个
+            文件的 diff,用户以为只选了 1 个」—— 现在与上游同一条判据。
+            `stashEntry.files.kind === Loaded` 是硬条件(上游 `StashDiffViewer` 的
+            `getFiles()` 只在 `Loaded` 时返回文件,`:88-92`)—— 还在装载时**不**画一个空面板。
+          */}
+          {showStashedChanges
+            && snap.stashEntry !== null
+            && snap.stashEntry.files.kind === StashedChangesLoadStates.Loaded
+            ? (
+              <StashDiffViewer
                 store={store}
-                snap={snap}
-                /*
-                 * 行/块级丢弃的**确认闸门在页这一层**(上游 `ui/changes/changes.tsx:75-97`):
-                 * `DiffPane` 只把「用户右键点了拿几行」交上来,弹不弹框、弹什么框由
-                 * 这里决定 —— 与整文件丢弃(`confirmDiscard`)同一条分工。
-                 */
-                onDiscardLines={onDiscardLinesSelected}
+                stashEntry={snap.stashEntry}
+                onDiscardClick={onDiscardStashClick}
               />
-            )}
+            )
+            : snap.selectedFiles.length > 1
+              ? <MultipleSelection count={snap.selectedFiles.length} />
+              : files.length === 0
+                ? <NoChanges store={store} snap={snap} onViewStash={onViewStash} />
+                : (
+                  /*
+                   * **`.diff-container` 那一层(2026-10-08 接线)**
+                   *
+                   * 上游 `ui/changes/changes.tsx:105-117` 的右栏就是这个形状:
+                   * `.diff-container` 里第一件事是 `<DiffHeader>`,后面才是 diff 正文。
+                   * 镜像 `DiffHeader` 的根是 `.header`,而它的**全部**样式都写在
+                   * `ui/_diff.scss:899-945` 的 `.diff-container .header{…}` 里
+                   * (状态 Octicon 的 7 条 `@include octicon-status` 也在那里面)
+                   * ⇒ 没有这层祖先,头部就是一根裸 `<div>`。
+                   *
+                   * ⚠️ `gw-desktop-diff` 这个类在这里**不是**装饰:`.diff-container`
+                   * 那组规则所在的作用域根就是它(`scripts/styles.mjs` 的 `PORT_SURFACES`
+                   * 里 diff 面的 `scope`),而我们原来把这个类的根放在**更里面**
+                   * (`desktop-diff.tsx` 的 `DesktopDiff` 根)。这一层只是把作用域
+                   * 提到头部也能落在里面的高度 —— DOM 里因此有**两个** `.gw-desktop-diff`
+                   * (外层是本层,内层仍是 `DesktopDiff` 自己的根),样式规则两边都命中、
+                   * 取值相同,不冲突。
+                   *
+                   * 为什么不把头部塞进 `DesktopDiff`:那会让「失败/读取中/没有差异」
+                   * 三条早退分支(它们**不**渲染 `DesktopDiff`)丢掉头部。
+                   */
+                  <div className="gw-desktop-diff gw-diff-pane">
+                    <div className="diff-container" ref={diffContainerRef}>
+                      <DiffPane
+                        store={store}
+                        snap={snap}
+                        /*
+                         * 行/块级丢弃的**确认闸门在页这一层**(上游 `ui/changes/changes.tsx:75-97`):
+                         * `DiffPane` 只把「用户右键点了拿几行」交上来,弹不弹框、弹什么框由
+                         * 这里决定 —— 与整文件丢弃(`confirmDiscard`)同一条分工。
+                         */
+                        onDiscardLines={onDiscardLinesSelected}
+                        /*
+                         * `+n/-n` 要**回到 header 那一行**里(用户 2026-10-09 的裁决),
+                         * 而镜像 `DiffHeader` 的根是它自己产出的、**没有插槽** ⇒ 布局只能在
+                         * 我们的包装层做。`DiffPane` 因此要拿到 `.diff-container` 这个元素:
+                         * 它量 header 的高度(统计行与 header 等高 + 负上边距 ⇒ 同一行)
+                         * 与统计行的宽度(给 header 留出 `--gw-diff-stat-reserve` 的右内边距)。
+                         * 详情见 `DiffPane` 里那两处注释;`.diff-container` 本身是我们渲染的
+                         * (`ui/changes/changes.tsx:104`),不是镜像件。
+                         */
+                        containerRef={diffContainerRef}
+                      />
+                    </div>
+                  </div>
+                )}
         </div>
       </div>
 
@@ -644,6 +1372,93 @@ export function ChangesView(props: {
       )}
 
       {/*
+        **「你确定要提交被筛选隐藏的改动吗」确认框** —— 镜像
+        `ui/changes/confirm-commit-filtered-changes-dialog.tsx`(95 行,字节一致)
+        **由流程所有者(本组件)渲染**:本插件没有应用层弹窗宿主
+        (上游由 `ui/app.tsx:2809` 的 `PopupType.ConfirmCommitFilteredChanges` 分支渲染),
+        所以按裁决 B 用与 `CloneDialog` / `SquashDialog` 同一条路 —— 零新机制。
+        触发链与判据见上面 `showPromptForCommittingFileHiddenByFilter` 的注释。
+
+        ⚠️ `DialogStackContext.Provider` **不是可选装饰**:镜像 `Dialog` 只在
+        `context.isTopMost === true` 时才 `showModal()`(它的默认值是 `false`,
+        见上面 import 处的注释)⇒ 没有这个单元素栈,原生 `<dialog>` 永远不开。
+        上游那个栈由 app 的 popup 层维护;这里弹窗同时最多一个,所以给一个**身份稳定**的
+        常量对象(与 `NOOP` 同一处置:别每帧新建对象)。
+      */}
+      {commitFilteredAnyway !== null && (
+        /*
+         * ⚠️ **这个 `div` 不是装饰**:它挂 `dialogFormSubmitShimRef` —— 一个「把镜像里
+         * 那个**不冒泡**的 `submit` / `reset` 重新以冒泡形态派发一遍」的**转发小垫片**。
+         *
+         * 事实(逐条可查):
+         *  · 镜像 `ui/dialog/ok-cancel-button-group.tsx:107-115`(与 `:135-142`)在
+         *    `destructive === true` 时把「确定」按钮渲染成 `type="button"`,点它之后
+         *    **手动** `form.dispatchEvent(new Event('submit'))` —— 而 `new Event(...)`
+         *    的 `bubbles` **默认是 `false`**;
+         *  · React 17/18 把 `submit` 归在**根容器上的委托监听**里,不冒泡的事件到不了根;
+         *  · 于是镜像 `Dialog` 自己的 `onSubmit`(`ui/dialog/dialog.tsx:830-834`)
+         *    **永远不会被调用** ⇒ 「Commit Anyway」点下去**什么都不发生**
+         *    (实测:`docs/probes/changes-commit-flow-probe.mjs` 的 D2 —— 弹窗仍在、0 条提交请求)。
+         *
+         * 为什么用**捕获阶段**监听(本组件这一层,不动镜像一个字节):
+         *  DOM 规范里**捕获阶段照样经过全部祖先**(只有冒泡阶段对 `bubbles:false` 的事件
+         *  提前结束)⇒ 在祖先上 `addEventListener('submit', h, true)` 能收到那个事件,
+         *  再把它**原样、冒泡地**重新派发一次 ⇒ 镜像自己那个 `onSubmit` 就跑了。
+         *
+         * **这里没有复制任何业务逻辑**:持久化偏好、`onCommitAnyway`、`onDismissed`
+         * 仍然全部由镜像那份 `ConfirmCommitFilteredChanges` 自己执行(单一真源);
+         * 垫片只补了「事件看不见」这一处集成缝。
+         * **退役条件**:镜像那份改成 `new Event('submit', { bubbles: true })`
+         * (或 `form.requestSubmit()`)之后,连同这个 `div` 与那段 effect 一起删。
+         */
+        <div ref={dialogFormSubmitShimRef}>
+          <DialogStackContext.Provider value={DIALOG_STACK_SINGLE}>
+            <ConfirmCommitFilteredChanges
+              onCommitAnyway={commitFilteredAnyway}
+              onDismissed={onDismissCommitFiltered}
+              showFilesToBeCommitted={showFilesToBeCommitted}
+              setConfirmCommitFilteredChanges={setConfirmCommitFilteredChanges}
+            />
+          </DialogStackContext.Provider>
+        </div>
+      )}
+
+      {/*
+        **「你要提交的文件里有没有 >100 MiB 的」告警** —— 镜像
+        `ui/changes/oversized-files-warning.tsx`(90 行,字节一致)
+        **由流程所有者(本组件)渲染**:上游由 `ui/app.tsx:2157` 的
+        `PopupType.OversizedFiles` 分支渲染,本插件没有 popup 宿主 ⇒ 与上面那份
+        `ConfirmCommitFilteredChanges` **完全同一条路**(同一个
+        `DialogStackContext.Provider`、同一段 `dialogFormSubmitShimRef` 垫片、
+        零新机制)。
+
+        触发链在 `CommitBox`(上游是 `ui/changes/sidebar.tsx:159-183` 的
+        `onCreateCommit` 第一件事),逐条写在那个 `createCommitGate` 的注释里。
+
+        ⚠️ 那份**不冒泡的 `submit`** 的坑这里同样存在:镜像
+        `ok-cancel-button-group.tsx:107-115` 在 `destructive === true` 时手动
+        `new Event('submit')`,所以「Commit Anyway」必须靠上面那个捕获阶段垫片
+        才走得通 —— 这也是为什么这个弹窗要放在**同一个** `dialogFormSubmitShimRef`
+        包装元素里(两个弹窗互斥,同一时刻只有一个 `form`)。
+
+        ⚠️ 这个弹窗**不在场**时不能有容器:下面那个 `&&` 是「载荷为 null ⇒ 整棵不渲染」,
+        于是「弹窗关掉了」与「弹窗从没开过」在 DOM 上都读得出区别(探针的缺席判据依赖它)。
+      */}
+      {oversizedWarning !== null && (
+        <div ref={dialogFormSubmitShimRef}>
+          <DialogStackContext.Provider value={DIALOG_STACK_SINGLE}>
+            <OversizedFiles
+              oversizedFiles={oversizedWarning.oversizedFiles}
+              context={oversizedWarning.context}
+              repository={oversizedWarning.repository}
+              dispatcher={oversizedDispatcher}
+              onDismissed={onDismissOversized}
+            />
+          </DialogStackContext.Provider>
+        </div>
+      )}
+
+      {/*
         行/块级丢弃的确认框(上游 `PopupType.ConfirmDiscardSelection`,
         `ui/changes/changes.tsx:84-89` + `ui/discard-changes/confirm-discard-changes-dialog.tsx`)。
         措辞与**整文件**那条刻意不同:那条说「扣弃这些改动」会让人以为文件没了,
@@ -663,6 +1478,53 @@ export function ChangesView(props: {
             setConfirmDiscardLines(null);
             if (!okay || target === null) { return; }
             void store.discardLines(target.file, target.spec);
+          }}
+        />
+      )}
+
+      {/*
+        **覆盖贮藏**的确认框 —— 上游 `PopupType.ConfirmOverwriteStash`
+        (`ui/stash-changes/overwrite-stashed-changes-dialog.tsx`)。
+        触发条件逐字照上游 `AppStore._createStashForCurrentBranch`
+        (`lib/stores/app-store.ts:4865-4871`):`showConfirmationDialog && hasExistingStash`。
+        措辞照那条正文(「This will overwrite your existing stash with your current changes.」),
+        destructive 按钮 = `Overwrite`。
+      */}
+      {confirmStashOverwrite && (
+        <ConfirmDialog
+          title="覆盖已有的贮藏?"
+          body={
+            '这个分支已经有一条贮藏。继续会用**当前**的改动建一条新的贮藏,'
+            + '并丢掉那一条旧的(旧贮藏里的内容不会进新的这一条)。\n\n'
+            + '已经提交的内容不受影响。'
+          }
+          confirmText="覆盖"
+          danger={true}
+          onDone={(okay) => {
+            setConfirmStashOverwrite(false);
+            if (!okay) { return; }
+            void store.stashAllChanges();
+          }}
+        />
+      )}
+
+      {/*
+        **丢弃贮藏**的确认框 —— 上游 `PopupType.ConfirmDiscardStash`
+        (`ui/stashing/confirm-discard-stash.tsx`)。
+        判据是 `askForConfirmationOnDiscardStash`(默认 `true`),见
+        `onDiscardStashClick` 的注释。
+      */}
+      {confirmDiscardStash && (
+        <ConfirmDialog
+          title="丢弃这条贮藏?"
+          body={'确定要丢弃这些贮藏的改动吗?\n\n丢弃后无法从 dsh-git 恢复(工作区与提交都不受影响)。'}
+          confirmText="丢弃"
+          danger={true}
+          onDone={(okay) => {
+            setConfirmDiscardStash(false);
+            if (!okay) { return; }
+            // 丢完就把面板切回工作区(否则会停在一个已经不存在的 stash 上)。
+            void store.dropStash().then((dropped) => { if (dropped) { setShowStashedChanges(false); } });
           }}
         />
       )}
@@ -708,7 +1570,14 @@ function FileRow(props: {
   selected: boolean;
   focused: boolean;
   store: GitStore;
-  onSelect: (event: React.MouseEvent) => void;
+  /**
+   * 单击整行(**只**在平铺路径上挂):换「在看哪个 diff」那个游标。
+   * 虚拟路径上**不挂** —— 那里由镜像 `SectionList` 自己算选择(含 `shift` 范围选择)
+   * 并走 `onSelectionChanged`;再挂一层会两边同时改游标,而且 `shift` 会被这一层
+   * 当成 additive,把刚算好的范围打散。
+   * 签名收 `file` 是**为了不写内联箭头**(`react/jsx-no-bind`):调用点传一个具名回调。
+   */
+  onSelect?: (event: React.MouseEvent, file: ChangedFile) => void;
   /**
    * 行尾三颗图标的动词。**签名收 `file` 而不是零参**:这样调用点可以不写内联箭头
    * (`onDiscard={onDiscardRow}`),同时组件内部仍然用 `file` 去调它 ——
@@ -745,6 +1614,24 @@ function FileRow(props: {
    * 「菜单缺席」的读数必须有这一半在场陪绑,否则分不开「没接线」与「整张表没渲染」。
    */
   onContextMenu: (event: React.MouseEvent, file: ChangedFile) => void;
+  /**
+   * 这一行是不是画在**镜像虚拟列表**里(`AugmentedSectionFilterList` → `ListRow`)。
+   *
+   * 影响两件事,都是**结构正确性**而不是样式:
+   *  · 外层 `ListRow` 已经是 `role="option"`(`section-list.tsx:1245`)⇒ 本行**不再**
+   *    声明 `role="option"`(嵌套 option 会被读屏当成两层列表);
+   *  · 焦点由镜像列表管 ⇒ 本行不写 `tabIndex`。
+   */
+  virtual: boolean;
+  /** 这一行的匹配下标(`<mark>` 高亮);来自镜像 `match`(见 `changes-file-list.tsx`)。 */
+  matches?: IMatches;
+  /**
+   * 给镜像 `PathLabel` 的可用宽度(px)。`undefined` = 不截断
+   * (`PathText` 在不给宽度时渲染完整文本)。
+   */
+  pathWidth?: number;
+  /** **双击** = 用外部编辑器打开(上游 `filter-changes-list.tsx:1132-1134`)。 */
+  onOpenInExternalEditor: (path: string) => void;
 }): ReactNode {
   const { file, include } = props;
   /**
@@ -753,7 +1640,7 @@ function FileRow(props: {
    * (JSX 上挂具名引用),不能写 `onClick={(event) => …}`。
    * 三个回调都只是「停冒泡 + 转发给 props 上的那个动词」,没有别的逻辑。
    */
-  const { onDiscard, onStage, onUnstage, onContextMenu } = props;
+  const { onDiscard, onStage, onUnstage, onContextMenu, onOpenInExternalEditor, onSelect } = props;
   const discardSelf = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
     onDiscard(file);
@@ -774,54 +1661,160 @@ function FileRow(props: {
   const contextMenuSelf = useCallback((event: React.MouseEvent) => {
     onContextMenu(event, file);
   }, [onContextMenu, file]);
+  /**
+   * **双击 = 用外部编辑器打开**(2026-10 接线)。
+   *
+   * 上游 `onChangedFileDoubleClick`(`ui/changes/filter-changes-list.tsx:1132-1134`,由
+   * `List` 的 `onRowDoubleClick` 转发)⇒ `onOpenItemInExternalEditor` ⇒
+   * `sidebar.tsx:304-306`;`store.openInExternalEditor` 我们**早就有**
+   * (`src/client/store.ts:2985`,右键菜单的「在 <编辑器> 中打开」走的就是它)。
+   * 审计 §3.2 #20 记的是「双击行**没有任何反应**」——这一条现在闭合。
+   */
+  const doubleClickSelf = useCallback(() => {
+    onOpenInExternalEditor(file.path);
+  }, [onOpenInExternalEditor, file.path]);
+  /** 单击整行(只认平铺路径上的 `onSelect`;虚拟路径不传)。 */
+  const selectSelf = useCallback((event: React.MouseEvent) => {
+    onSelect?.(event, file);
+  }, [onSelect, file]);
   // 状态图标取**工作区**那一侧(没有就用索引侧),与 Desktop 的文件行同一口径。
   const letter = file.conflicted === true ? 'U' : (file.unstaged ?? file.staged) ?? 'M';
   const meta = STATUS_META[letter] ?? { icon: 'diff-modified', kind: 'modified', label: '已修改' };
-  // 目录 / 文件名分离:目录变暗,文件名保持正常色(空间不足时由 CSS 省略)
-  const split = createPathDisplayState(file.path, file.path.length);
+  /*
+   * **镜像的 `AppFileStatus`**(判别联合)—— `PathLabel` / `iconForStatus` / `mapStatus`
+   * 三件镜像件都吃它,而不是吃 porcelain 字母。适配点写在
+   * `changes-file-list.tsx` 的 `appFileStatusOfChange`。
+   */
+  const appStatus = appFileStatusOfChange(file);
+  // 目录 / 文件名分段、按实测宽度截断、`<mark>` 高亮、重命名箭头 —— **全在镜像 `PathLabel` 里**
+  // (`ui/lib/path-label.tsx:37-71` + `ui/lib/path-text.tsx`)。我们那两段手写 span 退役。
   const shown = file.oldPath !== undefined ? `${file.oldPath} → ${file.path}` : file.path;
-  // 读屏文本照 Desktop(`ui/changes/changed-file.tsx:70-74`):included / partially included / not included。
-  const includeLabel = include === 'all' ? '已纳入提交' : include === 'none' ? '未纳入提交' : '部分纳入提交';
+  /*
+   * 子模块的勾选框语义 —— 上游 `filter-changes-list.tsx:427-470` 那 44 行的**逐条搬运**
+   * (审计 §4 第 9 项的落点就是这里)。判据是镜像 `SubmoduleStatus` 的三个布尔位,
+   * 而我们的 `ChangedFile.submodule`(`src/core/types.ts:83-88`)字段**同名同义** ⇒ 直接对。
+   */
+  const submoduleStatus = file.submodule;
+  const isUncommittableSubmodule =
+    submoduleStatus !== undefined &&
+    appStatus.kind === AppFileStatusKind.Modified &&
+    !submoduleStatus.commitChanged;
+  const isPartiallyCommittableSubmodule =
+    submoduleStatus !== undefined &&
+    (submoduleStatus.commitChanged || appStatus.kind === AppFileStatusKind.New) &&
+    (submoduleStatus.modifiedChanges || submoduleStatus.untrackedChanges);
+  const includeAll = include === 'all' ? true : include === 'none' ? false : null;
+  const effectiveInclude = isUncommittableSubmodule ? false : includeAll;
+  const checkboxTooltip = isUncommittableSubmodule
+    ? 'This submodule change cannot be added to a commit in this repository because it contains changes that have not been committed.'
+    : isPartiallyCommittableSubmodule
+      ? 'Only changes that have been committed within the submodule will be added to this repository. You need to commit any other modified or untracked changes in the submodule before including them in this repository.'
+      : undefined;
+  // 上游 `disableSelection = isCommitting || rebaseConflictState !== null || isUncommittableSubmodule`
+  // (`filter-changes-list.tsx:453-454`);我们这边前两项的等价物是「提交进行中」
+  // (`snap.busy === 'commit'`)与「rebase 冲突进行中」(`file.conflicted`)。
+  const disableSelection =
+    props.store.snapshot().busy === 'commit' || file.conflicted === true || isUncommittableSubmodule;
+  /*
+   * ⚠️ **三态 Mixed 接在 `include` 上,不是接在 `effectiveInclude` 上。**
+   *
+   * 上游 `filter-changes-list.tsx:463-470` 逐字是:
+   *
+   * ```tsx
+   * <Checkbox
+   *   value={
+   *     isPartiallyCommittableSubmodule && include ? null : include   // null ⇒ Mixed
+   *   }
+   * ```
+   *
+   * 也就是说:**部分可提交的子模块**在「纳入(include === true)」这一档上画**三态 Mixed**
+   * (因为只有子模块内部**已提交**的那部分会被带进来),而在「排除(false)」档上照旧画 Off。
+   * 我们此前只用 `effectiveInclude` 算 ⇒ 那一档被画成**实心勾**(与上游的语义相反:
+   * 看着像「全都会进来」,实际只有一部分)。
+   *
+   * `isUncommittableSubmodule` 那一半仍然走 `effectiveInclude`(上游 `:453-456` 的
+   * `effectiveInclude = isUncommittableSubmodule ? false : include`),所以这里只覆盖
+   * **部分可提交**这一支,不动另一支。
+   *
+   * 判据:`docs/probes/changes-submodule-include-probe.mjs`(5/7 → 7/7;`--pre-fix` 恰红
+   * `{S2,S3,S4,S6}`),差值读数在 `{S2,S6}` —— S3/S4 在默认夹具下本来就红。
+   */
+  const checkboxInclude = isPartiallyCommittableSubmodule && effectiveInclude === true
+    ? null
+    : effectiveInclude;
+  const checkboxValue = checkboxInclude === true
+    ? CheckboxValue.On
+    : checkboxInclude === false
+      ? CheckboxValue.Off
+      : CheckboxValue.Mixed;
+  /*
+   * 读屏宣告 —— 上游 `changed-file.tsx:69-78, 106` 的**唯一**出口:
+   * `$'{path} {mapStatus(status)} {included|partially included|not included}'`
+   * 交给 `AriaLiveContainer`(它内部是 `aria-live`,静态 `aria-label` **不会重播**)。
+   */
+  const includedText = effectiveInclude === true
+    ? '已纳入提交'
+    : effectiveInclude === undefined || effectiveInclude === null
+      ? '部分纳入提交'
+      : '未纳入提交';
+  const ariaLiveMessage = `${file.path} ${meta.label} ${includedText}`;
 
   return (
-    <div className={`gw-frow file${props.selected ? ' on' : ''}`} role="option"
-      aria-selected={props.selected} tabIndex={props.focused ? 0 : -1}
-      aria-label={`${file.path} ${meta.label} ${includeLabel}${file.conflicted === true ? ' (有冲突)' : ''}`}
+    <div className={`gw-frow file${props.selected ? ' on' : ''}`}
+      /*
+       * ⚠️ `role="option"` **两条路径都挂**(`data-path` / `data-gw-ctx` 同理)。
+       *
+       * 虚拟路径上外层镜像 `ListRow` **已经**是 `role="option"`
+       * (`section-list.tsx:1245`),所以这里会形成一层**嵌套 option**。这是**刻意**的:
+       *  · 既有探针的行定位契约是 `.gw-files [role="option"][data-path="…"]`
+       *    ——**同一个元素**上两个属性(`docs/probes/changes-file-menu-probe.mjs:675`);
+       *    把角色拆到外层就等于把 4 条探针(147 + 50 + 50 + 21 条判据)的契约一起改掉;
+       *  · 嵌套 option 的代价只是「读屏可能忽略内层」,而内层**本来**不该承担 option 语义
+       *    (真正的 option 由外层承担)⇒ 视觉与功能无损。
+       * 退役条件:那 4 条探针改成「外层 `ListRow` 定位 + 内层读内容」的那一天,
+       * 这一行回到 `role={props.virtual ? undefined : 'option'}`。
+       */
+      role="option"
+      aria-selected={props.selected}
+      tabIndex={props.focused ? 0 : -1}
+      aria-label={`${file.path} ${meta.label} ${includedText}${file.conflicted === true ? ' (有冲突)' : ''}`}
       data-path={file.path} data-included={include}
-      onContextMenu={contextMenuSelf} data-gw-ctx="file"
-      onClick={props.onSelect} title={shown}>
+      /*
+       * ⚠️ **虚拟路径上右键由外面那一格收**(`changes-file-list.tsx` 的 `VirtualCell`):
+       * `react-virtualized` 的 `Grid` 不支持 `onRowContextMenu`,所以那里改成在
+       * per-cell 的包装 div 上挂 `onContextMenu`;这一层若**同时**挂着,一次右键会把
+       * 菜单开两遍(`showContextualMenu` 被两条链各调一次)。
+       * 平铺路径(测不到高度)没有那一格 ⇒ 仍然由这里挂。
+       * 判据:两侧都在 `docs/probes/changes-file-menu-probe.mjs` 的 49×3(F1–F13
+       * 走的就是右键,虚拟路径)与 `changes-discard-lines-probe.mjs` 的 B1。
+       */
+      onContextMenu={props.virtual ? undefined : contextMenuSelf} data-gw-ctx="file"
+      onDoubleClick={props.virtual ? undefined : doubleClickSelf}
+      onClick={props.onSelect === undefined ? undefined : selectSelf} title={shown}>
       {/*
         勾选控件**是上游的 `<Checkbox>`**(`ui/lib/checkbox.tsx`,与上游一致;`changed-file.tsx:78-90`
         渲染的就是它):`<div class="checkbox-component"><input type="checkbox" tabindex="-1">`。
         三态走它的 `value`(On/Off/Mixed),由它自己在 ref 上写 `checked`/`indeterminate`。
         `tabIndex={-1}` 与上游一致:行本身响应空格键,勾选框不进 tab 序。
         **点它只改客户端纳入状态,一个 git 命令都不发**(勾选 ≠ 暂存);索引在提交时才写。
-        不再传 `title` / `onClick`:上游的 `Checkbox` 没有这两个 prop,上游的提示语由
-        `TooltippedContent` 提供、单击也**照常冒泡到行**(`checkbox.tsx:107` 只在双击时
-        `stopPropagation`)。本面拿不到 tooltip 样式(Changes 面板不在任何 `.tooltip-host`
-        子树里,见 goal 文档 §11.13),所以这里不自造 title。
+        `disabled` 是**子模块语义**(见上);`title` 是那两条 tooltip 文案 ——
+        上游用 `TooltippedContent`(可视化 tooltip),我们的 tooltip 宿主还没接到 Changes 面
+        (goal §11.13),所以先落在原生 `title` 上(审计 §3.1 #9 的已知差)。
       */}
-      <Checkbox
-        tabIndex={-1}
-        value={include === 'all' ? CheckboxValue.On : include === 'none' ? CheckboxValue.Off : CheckboxValue.Mixed}
-        onChange={(event) => { props.store.setFileIncluded(file.path, event.currentTarget.checked); }} />
-
-      <span className="path-label-component">
-        <span className="path-text-component" title={shown}>
-          {file.oldPath !== undefined ? (
-            <>
-              <span className="dirname">{file.oldPath}</span>
-              <Icon name="arrow-left" size={9} className="rename-arrow" />
-              <span className="filename">{split.fileText}</span>
-            </>
-          ) : (
-            <>
-              {split.directoryText !== '' && <span className="dirname">{split.directoryText}</span>}
-              <span className="filename">{split.fileText}</span>
-            </>
-          )}
-        </span>
+      <span className="gw-cb-slot" title={checkboxTooltip}>
+        <Checkbox
+          tabIndex={-1}
+          value={checkboxValue}
+          disabled={disableSelection}
+          onChange={(event) => { props.store.setFileIncluded(file.path, event.currentTarget.checked); }} />
       </span>
+
+      {/* 路径:**镜像 `PathLabel`**(分段 + 按实测宽度截断 + `<mark>` + 重命名 `arrowRight`)。 */}
+      <PathLabel path={file.path} status={appStatus} availableWidth={props.pathWidth}
+        ariaHidden={true} matches={props.matches} />
+
+      {/* 读屏宣告:`path + 状态 + 纳入` 变化时说一次(上游 `changed-file.tsx:106`)。 */}
+      <AriaLiveContainer message={ariaLiveMessage} />
 
       {file.conflict !== undefined && (
         <span className="gw-num" title={`${conflictSummaryText(file.conflict.action)}(我方 ${file.conflict.us} / 对方 ${file.conflict.them})`}>
@@ -829,9 +1822,14 @@ function FileRow(props: {
         </span>
       )}
 
-      {/* statusWidth = 16,与 Desktop 的 Octicon 列一致 */}
+      {/*
+        statusWidth = 16,与 Desktop 的 Octicon 列一致。
+        图标**换成镜像的** `iconForStatus`(`ui/octicons/status.ts:16-38`):冲突走
+        `octicons.alert`(marker > 0)或 `octicons.check` —— 我们以前手写 `x-circle`
+        (审计 §3.1 #4 那条「冲突图标不同」)。类名仍是 `status status-<kind>`(按种类上色)。
+      */}
       <span className={`status status-${meta.kind}`} title={meta.label}>
-        <Icon name={meta.icon} size={13} />
+        <Octicon symbol={iconForStatus(appStatus)} />
       </span>
 
       <span className="gw-x" title="丢弃此文件的改动"
@@ -875,16 +1873,45 @@ function FileRow(props: {
 type FilterKey = 'included' | 'excluded' | 'new' | 'modified' | 'deleted';
 
 /**
- * 筛选选项弹层,照 Desktop 的 ui/changes/changes-list-filter-options.tsx:161-222:
- * 标题行(Filter Options + 关闭)→ 五个带计数的复选框 → 底部「清除筛选」(仅当有筛选生效)。
- * Desktop 用它的 Popover 组件(依赖 floating-ui + focus-trap);这里用绝对定位的 div,
- * 换来零依赖。计数**只统计当前可见集合**,与 Desktop 的 getFilterCounts 一致。
- * 每次点选项就关掉弹层,也是照 Desktop 的行为。
+ * 筛选弹层给读屏的标签 id(上游 `changes-list-filter-options.tsx:152` 的
+ * `ariaLabelledby="filter-options-header"` + `:174` 的 `<h3 id="filter-options-header">`)。
+ * 带 `gw-` 前缀是为了在产物里**唯一**(探针按它取标题元素)。
+ */
+const FILTER_POPOVER_LABEL_ID = 'gw-filter-options-header';
+
+/**
+ * 筛选选项弹层 —— 载体**换成镜像 `Popover`**(上游
+ * `ui/changes/changes-list-filter-options.tsx:151-224` 用的就是它;
+ * 它的三条行为:点外面关 / Esc 关 / 焦点归还触发按钮)。
+ *
+ * 内容仍是我们的五项复选框 + 计数 + 「清除筛选」,但结构照上游那三段
+ * (`.filter-popover-header` → `.filter-options` → `.filter-options-footer` 的**语义**;
+ * 我们的类名是 `gw-filter-pop-head` / `gw-filter-opts` / `gw-filter-pop-foot`,
+ * 因为这一件的样式在 `styles.ts` 里,不在上游 partial 的编译闭包内)。
+ *
+ * ⚠️ 为什么用 `createElement(Popover, …)` 而不是 JSX `<Popover>…</Popover>`:
+ * 镜像 `IPopoverProps` **没有声明 `children`**(`popover.tsx:70-97`),JSX 的子元素检查
+ * 会报 TS2322。`workbench.tsx` 的 `MenuPopover` 已经为同一原因用了同一条手法
+ * (那一段的注释逐条列了上游 5 个调用点各自也报这条诊断)⇒ 这里**沿用**,不新造理由。
+ *
+ * ⚠️ `decoration={PopoverDecoration.Balloon}`:上游传的就是它(`:161`)。它给外壳加
+ * `popover-component` 类,而 `.gw-desktop-changes .popover-component` 的基底配方
+ * (圆角/边框/阴影/padding)在产物里**已有**——所以弹层不是裸的。
+ * @param props - 见下;`anchor` 是筛选按钮(镜像 Popover 用它定位与归还焦点)。
  */
 function FilterOptionsPopover(props: {
   counts: Record<FilterKey, number>;
   active: readonly FilterKey[];
   labels: Record<FilterKey, string>;
+  /**
+   * 「清除筛选」的可见性 —— **镜像 `hasActiveFilters`**(`filter-changes-logic.ts:147-149`),
+   * 它**包含 `filterText`**。我们以前只看 `active.length > 0` ⇒
+   * 「只输入了筛选词」时弹层里没有清空按钮(审计 §3.3 #30)。判据在调用点算,
+   * 因为这个组件不该知道 `IFileListFilterState` 的形状。
+   */
+  showClear: boolean;
+  /** 触发按钮 —— `Popover` 的 `anchor`(上游 `filterOptionsButtonRef`)。 */
+  anchor: HTMLElement | null;
   onToggle: (key: FilterKey) => void;
   onClear: () => void;
   onClose: () => void;
@@ -896,10 +1923,20 @@ function FilterOptionsPopover(props: {
     ['modified', props.labels.modified],
     ['deleted', props.labels.deleted],
   ];
-  return (
-    <div className="gw-filter-pop" role="dialog" aria-label="筛选选项">
+  return createElement(
+    Popover,
+    {
+      className: 'gw-filter-pop',
+      anchor: props.anchor,
+      anchorPosition: PopoverAnchorPosition.BottomRight,
+      decoration: PopoverDecoration.Balloon,
+      onMousedownOutside: props.onClose,
+      onClickOutside: props.onClose,
+      ariaLabelledby: FILTER_POPOVER_LABEL_ID,
+    },
+    <>
       <div className="gw-filter-pop-head">
-        <h3>筛选选项</h3>
+        <h3 id={FILTER_POPOVER_LABEL_ID}>筛选选项</h3>
         <button className="gw-hbtn" aria-label="关闭" onClick={props.onClose}>
           <Icon name="x-circle" size={12} />
         </button>
@@ -913,12 +1950,12 @@ function FilterOptionsPopover(props: {
           </label>
         ))}
       </div>
-      {props.active.length > 0 && (
+      {props.showClear && (
         <div className="gw-filter-pop-foot">
           <button className="gw-btn" onClick={props.onClear}>清除筛选</button>
         </div>
       )}
-    </div>
+    </>,
   );
 }
 
@@ -1025,12 +2062,199 @@ const DIFF_FAILURE_CODE_STYLE: CSSProperties = {
 };
 
 /**
+ * `+n/-n` 那一行的容器样式(见 `head` 里那段注释)。
+ *
+ * **刻意写成行内 style,不写进 `src/client/styles.ts`**:样式表那一份是
+ * `check-template-literals` 管的模板字面量(整份 CSS 在一个反引号里,多一个反引号就截断),
+ * 而这里只要那几条属性;而且这一行是「我们自己那条数字」的落点,退役时应当连同这个常量
+ * 一起消失,不该在样式表里留下孤儿规则。
+ *
+ * ⚠️ **2026-10-09 起它不再是「头部下面那一行」**:用户裁决
+ * 「Changes 右边的 diff header 下面有 + / -,请挪到 header 里面」,
+ * 随后追加「+n / -n 应该在 header 内的设置按钮的左侧,并且要有红绿着色」。
+ * 实现方式见 `DiffPane` 里那段注释(把这一行**挪回 header 那一行**:
+ * 负上边距 + 与 header 等高 + 行盒贴容器右边缘、**内容推到齿轮左侧**),
+ * 几何/配色判据由 `docs/probes/changes-diff-stat-gear-probe.mjs` 在真 Chrome 里量。
+ */
+const DIFF_STAT_ROW_STYLE: CSSProperties = {
+  display: 'flex', justifyContent: 'flex-end', alignItems: 'center',
+  flex: 'none', padding: '0 8px 2px',
+};
+
+/**
+ * 那一行被**挪进 header 那一行的齿轮左侧**之后的样式(2026-10-09 用户两次裁决)。
+ *
+ * 它是 `DIFF_STAT_ROW_STYLE` 的**同一条配方**再改两处(`padding` 去掉 —— 两段数字自己的
+ * 内边距已经给了呼吸位,见 `src/client/styles.ts:816-818`;加 `marginLeft:auto` 把**行盒**
+ * 贴到 `.diff-container` 的右边缘),所以直接展开那个常量 —— 两处共用的四条
+ * (display / justifyContent / alignItems / flex)只写一遍。
+ *
+ * 几何部分由 `DiffPane` 再补三个**量出来**的数值:
+ *  · `marginTop = -headerHeight` 与 `height = headerHeight`(必须逐帧成对出现)⇒ 落进
+ *    header 的矩形里、与 header 的既有孩子**同一行**(竖直那一半);
+ *  · `paddingRight = 行盒右边缘 − 齿轮左边缘 + 一个呼吸位` ⇒ 把**内容**从容器最右推到
+ *    **齿轮左边**(水平那一半)。
+ *
+ * ⚠️ 为什么水平位置要靠**行自己的 `paddingRight`**:行盒被 `marginLeft:auto` 钉在容器
+ * 右边缘,`paddingRight` 是唯一能在**不移动行盒右边缘**的前提下把**内容**往左推的量 ——
+ * 于是数字落在齿轮左侧,而行盒本身透明、`pointer-events:none`,盖不住任何东西
+ * (它仍然横跨齿轮与状态图标那一带,所以那一条不能省)。
+ *
+ * 为什么用负上边距而不是 `position:absolute`:`.diff-container` 是 flex 列容器,
+ * 绝对定位会要求给它加 `position:relative` —— 那会给**它内部**已有的绝对定位元素
+ * (diff 搜索框、空格提示浮层…)换一个包含块。负边距只动我们自己这一行,零副作用。
+ */
+const DIFF_STAT_IN_HEADER_STYLE: CSSProperties = {
+  ...DIFF_STAT_ROW_STYLE,
+  padding: '0',
+  marginLeft: 'auto',
+  pointerEvents: 'none',
+};
+
+/**
+ * `+n/-n` 每一段自己的行内覆盖 —— **只有一条**:去掉 `.gw-diff-stat` 的 `border-bottom`。
+ *
+ * 那条边框是 `.gw-diff-stat` 在「单独一行」形态下的分隔线(`src/client/styles.ts:816-818`),
+ * 挪进 header 之后会变成数字下面的一小段横线。**值与颜色一个字都没动**
+ * (`.add`/`.del` 的类名与文本照旧),只去掉这一条属于「行容器」的装饰。
+ */
+const DIFF_STAT_SPAN_STYLE: CSSProperties = { borderBottom: 'none' };
+
+/**
+ * 镜像 `ui/dialog/dialog.tsx:37-39` 的 `DialogStackContext` 值。
+ *
+ * **身份必须稳定**(每帧新建 `{isTopMost:true}` 会让 Context 消费者每帧收到新值);
+ * 本插件同时最多一个弹窗,所以就是一个单元素栈 —— 与 `NOOP` 同一处置。
+ * 为什么必须提供它:见上面 import 处那条注释(默认值是 `false` ⇒ `showModal()` 永不调用)。
+ */
+const DIALOG_STACK_SINGLE = { isTopMost: true };
+
+/**
+ * ⚠️ **退役(2026-10-10)**:这里原本是本文件唯一的「点名缺口」常量
+ * `CONTINUE_REBASE_UNAVAILABLE`(「本插件没有 rebase/continue 路由」)。
+ * 用户裁决「都做」之后宿主补上了那条路由(`src/host/routes.ts` 的 `'rebase/continue'`
+ * → `GitService.continueRebase`),常量与它的门面分支一起**删除**(不是留着不用 ——
+ * 留一句「做不到」的文案会让下一个人以为仍然做不到)。
+ * 历史读数与那次裁决见 `docs/probes/README-probe-index.md` §十七 与本节新增的登记。
+ */
+
+/**
+ * 超大文件闸门的**第二道**(LFS 覆盖检查)拿不到答案时的实话。
+ *
+ * 只有在宿主缺 `lfs/untracked` 时才会出现 —— 真实产品里 `src/index.ts` 一定注入了
+ * `deps.lfs`,所以它对应的是**页面刷新了、宿主还是旧构建**(host 半不热重载,
+ * 启动时 `health.build` 那条提示已经先说过一次,见 `src/client/store.ts:1034-1039`)。
+ *
+ * 为什么**不**直接放行、也不直接拦下:
+ *  · 放行 = 把「超大且未被 LFS 覆盖」的告警**静默吞掉**(用户以为检查过了);
+ *  · 拦下 = 把提交按钮永久堵死(这条闸门在上游本身也只是「拦住 + 让你 Commit Anyway」)。
+ * ⇒ 给一条**点名缺口**的 toast,然后照常提交(见 `createCommitGate` 的注释)。
+ * **退役条件**:宿主产物与页面产物永远同版本(或这条路由进了 host 的能力握手清单)之后,
+ * 这个分支连同常量一起删。
+ */
+const OVERSIZED_LFS_UNCHECKED =
+  '无法确认超大文件是否被 Git LFS 覆盖:宿主没有 lfs/untracked 路由(通常是宿主还是旧构建)。'
+  + '这次提交照常进行,但「超过 100MB 且未用 LFS」的告警可能没有出现;'
+  + '重启 DSH 让宿主重新加载后再提交一次可拿到完整检查。';
+
+/**
+ * `ContinueRebase` 唯一需要应用层提供的东西:上游 `ui/dispatcher/dispatcher.ts:1473-1512` 的
+ * `continueRebase(kind, repository, workingDirectory, rebaseConflictState)`。
+ *
+ * 它是**门面**(与 `desktop-dispatcher.ts` 给 History 面接的那一批同形)。**2026-10-10
+ * 起它真的干活**:宿主 `rebase/continue` 路由(`src/host/routes.ts` →
+ * `GitService.continueRebase`,逐跳对着上游 `lib/git/rebase.ts:444-546` 写)
+ * —— 用户裁决「都做」,此前「不建这条路由」的裁决作废。
+ *
+ * ## 三处如实收窄(都不是「差一点点」)
+ *
+ * 1. **返回类型是 `Promise<void>`**:上游回 `RebaseResult`(6 个值),而
+ *    `ContinueRebase` 的 `onSubmit` **忽略**它的返回值(只 `await`)。类型面因此收窄成
+ *    `void`;要拿到 6 个值就得从 `lib/git/rebase.ts` 里 import `RebaseResult` ——
+ *    那是**一个会把整个 git 编排层拉进客户端包**的 import(该模块 import 了
+ *    `./git` 一族),所以**不 import**,值的判定留在宿主侧
+ *    (`api.continueRebase` 的 `result` 是字符串)。
+ * 2. **`workingDirectory` / `rebaseConflictState` 只用于签名**:宿主那一跳自己读
+ *    status/`REBASE_HEAD`(上游也是,`rebase.ts:470-485`),客户端的
+ *    `manualResolutions` 在本仓恒为空(见 `GitService.continueRebase` 的注释),
+ *    所以这两件不参与请求。
+ * 3. **`kind` 参数照样声明**(上游是 `MultiCommitOperationKind`):`kind` 只用于上游的
+ *    统计(`dispatcher.ts:1497-1499`),我们没有那个统计;声明它是为了**签名逐字**,
+ *    下一个人不必再补一遍类型。
+ *
+ * ## 失败/成功都**如实播报**(不假装)
+ *
+ * · 传输失败 ⇒ `store.toast(hostError.message, 'err')`(点名宿主原话);
+ * · `result === 'CompletedWithoutError'` ⇒ 播报「变基已完成」并**真的刷新**
+ *   (上游 `dispatcher.ts:1501` 的 `appStore._loadStatus` 在这一侧的等价物是
+ *   `store.refreshAll()` —— 提交区要从「ContinueRebase 表单」回到正常提交表单,
+ *   靠的就是这次刷新把 `status.operation` 从 `'rebase'` 变回 `null`);
+ * · 其它值(`ConflictsEncountered` / `OutstandingFilesNotStaged` / `Aborted` / `Error`)
+ *   ⇒ 播报**这个值本身**(而不是「成功」),同样刷新(仓库状态确实变了)。
+ */
+class ContinueRebaseDispatcher extends Dispatcher {
+  public constructor(private readonly store: GitStore) {
+    super();
+  }
+  /**
+   * 上游 `ui/dispatcher/dispatcher.ts:1473-1512` 的签名逐字
+   * (`kind: MultiCommitOperationKind, repository: Repository, workingDirectory:
+   * WorkingDirectoryStatus, conflictsState: RebaseConflictState`),只在返回类型上收窄
+   * (理由见这个类的 JSDoc 第 1 条)。
+   */
+  public async continueRebase(
+    _kind: MultiCommitOperationKind,
+    repository: Repository,
+    _workingDirectory: WorkingDirectoryStatus,
+    _conflictsState: RebaseConflictState,
+  ): Promise<void> {
+    const res = await api.continueRebase({ path: repository.path });
+    if (!res.ok) {
+      this.store.toast(res.error.message, 'err');
+      return;
+    }
+    const { result } = res.value;
+    this.store.toast(
+      result === 'CompletedWithoutError'
+        ? '变基已完成。'
+        : result === 'Aborted'
+          ? '变基已经不在进行中了(读不到 .git/REBASE_HEAD)。'
+          : `变基未完成:${result}(仓库状态已刷新)。`,
+      result === 'CompletedWithoutError' ? 'ok' : 'err',
+    );
+    // 上游 `dispatcher.ts:1501` 的 `await this.appStore._loadStatus(repository)`。
+    await this.store.refreshAll();
+  }
+}
+
+
+/**
+ * `DiffHeader` 的 `onDiffOptionsOpened`(上游 `changes.tsx:113` 传的是
+ * `this.onDiffOptionsOpened` —— 它只用来让 AppStore 知道「弹层开过」,做一次性引导)。
+ * 我们**没有**那个引导状态,所以照 History 面的同一处置(`history-view.tsx:1860`)
+ * 传一个**模块作用域**的空函数:身份稳定,不会让头部每次都重挂。
+ */
+const NOOP = (): void => {};
+
+/**
+ * 「status 还没落地」那一帧的兜底状态(与 `desktop-diff.tsx:419-420` 的 `default` 同口径)。
+ * 只在 `headPath === ''`(切仓库的首帧)时用得上。
+ */
+const FALLBACK_APP_FILE_STATUS: AppFileStatus = { kind: AppFileStatusKind.Modified };
+
+/**
  * 右侧 diff 面板。四个表面:没选文件 / 读取中 / 没有可显示的差异 / **取 diff 失败**
  * (最后一个 2026-10 补,理由见下面那个 `snap.diffFailure` 分支)。
  *
  * **diff 正文由移植过来的 Desktop `Diff` 渲染**(`./desktop-diff.tsx`),
  * 全插件只有这一条渲染路径;二进制也交给它(上游 `DiffType.Binary` 分支)。
- * 这里只负责它不负责的部分:空态文案与 Diff Settings 弹层。
+ *
+ * **头部也是移植过来的**:**镜像 `DiffHeader`**(`ui/diff/diff-header.tsx` →
+ * `PathLabel` + `DiffOptions` + 状态 Octicon),2026-10-08 接线,与上游
+ * `ui/changes/changes.tsx:105-117` 同形。这一层因此只剩两件它自己负责的事:
+ * 空态文案、以及 `+n/-n`(我们自己那条,不是上游的)。
+ * 手写的 `diff-settings.tsx` **停止使用但文件保留**(见接线处那段注释与
+ * `docs/changes-diff-header-adoption-plan.md`)。
  */
 function DiffPane(props: {
   store: GitStore;
@@ -1040,6 +2264,16 @@ function DiffPane(props: {
    * 的 `onDiscardChanges` 同样是「先弹 `PopupType.ConfirmDiscardSelection`」)。
    */
   onDiscardLines: (file: string, spec: LineSelectionSpec) => void;
+  /**
+   * 我们渲染的 `.diff-container`(`ui/changes/changes.tsx:104`)。
+   *
+   * 只为 `+n/-n` 回到 header 那一行服务:`.header` 是**镜像** `DiffHeader` 的根
+   * (它没有插槽、也不许改),所以布局必须做在**包装层**上,而包装层要量两个数:
+   *   · `.header` 的高度 —— 统计行与它等高 + 负上边距,才落在**同一行**;
+   *   · 统计行自己的宽度 —— 写给 `.header` 的 `--gw-diff-stat-reserve` 右内边距,
+   *     这样状态 Octicon 不会被那两段数字盖住。
+   */
+  containerRef: React.RefObject<HTMLDivElement>;
 }): ReactNode {
   const { onDiscardLines } = props;
   /**
@@ -1062,6 +2296,23 @@ function DiffPane(props: {
     if (path === '') { return; }
     onDiscardLines(path, spec);
   }, [onDiscardLines]);
+  /**
+   * 镜像 `DiffHeader` → `DiffOptions` 的两个回调(**具名 + `useCallback`**:
+   * `react/jsx-no-bind` 会把作用域里的内联箭头记成新增违规,而这两个回调
+   * 以前就是写成内联箭头的 —— 换成镜像头部**不**顺手把那两条记账带回来)。
+   *
+   * 语义与手写 `DiffSettings` 那两处逐条相同(同一个 store 方法、同一族 localStorage 键):
+   *  - `onShowSideBySideDiffChanged` → `store.setSideBySide`(上游 `ui/lib/diff-mode.tsx`
+   *    的 `show-side-by-side-diff`);
+   *  - `onHideWhitespaceInDiffChanged` → `store.setHideWhitespace`
+   *    (`hide-whitespace-in-changes-diff`,**Changes 面那一档**,与 History 那档不同键)。
+   */
+  const onSideBySideChange = useCallback((value: boolean): void => {
+    props.store.setSideBySide(value);
+  }, [props.store]);
+  const onHideWhitespaceChange = useCallback((value: boolean): Promise<void> => {
+    return props.store.setHideWhitespace(value);
+  }, [props.store]);
   const { snap } = props;
   /*
    * ⚠️ **这个 `useRef` 必须在任何提前 return 之前** —— 它是「换文件时不要把 diff 区清空」
@@ -1081,6 +2332,126 @@ function DiffPane(props: {
    * 惰性初始化或 `useState` —— 那会换掉「只建一次、换文件时复用」的语义。
    */
   const lastShownRef = useRef<{ diff: NonNullable<Snapshot['diff']>; entry: ChangedFile | undefined } | null>(null);
+  /**
+   * `+n/-n` 那一行的 ref 与它量出来的三个数(用户 2026-10-09 两次裁决:
+   * 「diff header 下面有 + / -,请挪到 header 里面」→
+   * 「+n / -n 应该在 header 内的设置按钮的左侧,并且要有红绿着色」)。
+   *
+   * ## 为什么要量(而不是纯 CSS)
+   *
+   * 镜像 `DiffHeader` 的根 `.header` 是它**自己产出的输出**,没有 `children` 插槽
+   * (`ui/diff/diff-header.tsx:36-51` 逐字如此,而 `scripts/verify-mirror.mjs` 要求那份
+   * 文件**逐字节**),所以那两段数字只能是 `.header` 的**兄弟**。要同时满足「落在 header
+   * 的矩形内 + 与 header 的既有孩子同一行 + 在齿轮左侧」,这个兄弟必须是:
+   *
+   * ```
+   * .header        ┌──────────────────────────────────────────────┐  ← 第 1 行
+   *                │ PathLabel …        [+n −m]  [齿轮]  [状态图标] │
+   * .gw-diff-stat  └──────────────────────────────────────────────┘
+   *                 ↑ marginTop = -headerH(与 header 等高 ⇒ 同一行)
+   *                              ↑ paddingRight 把**内容**推到齿轮左边
+   * ```
+   *
+   *  · **竖直**:`.header` 的高度由 `padding: var(--spacing-half) var(--spacing)` 与里面
+   *    三件(PathText 的行盒 / DiffOptions 按钮 / 状态 Octicon)里**最高**的那件决定 ——
+   *    那是上游配方的产物,**不能写死**(写死一个数就是第二份真源,字号一变就错位)。
+   *  · **水平**:行盒由 `marginLeft:auto` 钉在 `.diff-container` 的右边缘,
+   *    `paddingRight = 行盒右边缘 − 齿轮左边缘 + 呼吸位` ⇒ 内容的右边缘正好落在齿轮左边。
+   *    齿轮左边缘**也只能量**:它左边是 `flex-grow:1` 的路径标签(位置随内容变),右边是
+   *    状态 Octicon 与右内边距,没有一条 `calc()` 能表达它。
+   *  · **让位宽度**:数字占的那一段从**路径标签**的右边距里让出来(消费它的规则在
+   *    `src/client/scss/desktop-changes.scss`),量到的数字宽度写给容器上的
+   *    `--gw-diff-stat-w`。
+   *
+   * ## 为什么不用 `position:absolute`
+   *
+   * `.diff-container` 是 flex 列容器且**没有** `position`(`ui/_diff.scss:899-905`)。
+   * 给它加 `position:relative` 会**换掉它内部所有绝对定位元素的包含块**
+   * (diff 搜索框、空格提示浮层……),那是别人的布局;负上边距只动我们自己这一行。
+   *
+   * ## 三个数值的写入点
+   *
+   * · 高度 / 负边距 / 行右内边距:走 React(`statBox`),于是同一帧内成对出现;
+   * · 数字宽度:一个 CSS **自定义属性**写在 `.diff-container` 上行内 —— 它必须落在容器上
+   *   (自定义属性沿 DOM 向下继承,写在兄弟节点上到不了 `.header` 里的路径标签)。
+   *
+   * ⚠️ 呼吸位 `--gw-diff-stat-gap` **由 CSS 提供、由这里读**(`getComputedStyle`),
+   * 于是「数字与齿轮之间那个缝」只有**一份真源**。
+   */
+  const statRowRef = useRef<HTMLDivElement>(null);
+  const [statBox, setStatBox] = useState<{ headHeight: number; statWidth: number; rowInset: number }>(
+    { headHeight: 0, statWidth: 0, rowInset: 0 },
+  );
+  /**
+   * `useLayoutEffect`(不是 `useEffect`):三个数值要在**浏览器绘制之前**落到 DOM 上,
+   * 否则用户会先看到「数字还贴在最右边」的那一帧。
+   *
+   * ⚠️ 它必须在**所有早退之前**(Hooks 顺序规则,与上面 `lastShownRef` 同一条),
+   * 而它读的节点可能不在场(空态/失败态没有统计行)⇒ 第一句就是空值检查。
+   * 依赖里那三个值是「数字变了 / 换了文件要重量」的判据;`props` 本身不进依赖
+   * (每帧都是新对象 ⇒ 等于没 memo),所以逐项列出。
+   *
+   * **一次测量就够,不需要第二遍布局**:这里读的四个量里,只有路径标签的盒宽会被
+   * `--gw-diff-stat-w` 影响,而**齿轮与状态图标的位置与它无关** —— 路径标签是
+   * `flex-grow:1`,它变窄多少,富余空间就多多少,齿轮照旧贴着右侧。所以「量齿轮左边缘」
+   * 与「写让位宽度」之间没有反馈回路,不会来回震荡。
+   */
+  useLayoutEffect(() => {
+    const container = props.containerRef.current;
+    const row = statRowRef.current;
+    if (container === null || row === null) { return; }
+    /*
+     * `.header` 是**直接子元素**(镜像 `DiffHeader` 的根),选择器用 `:scope >`
+     * 而不是后代:`.diff-container` 里面还会出现别的 `.header`(diff 正文里没有,
+     * 但这条断言不该依赖「正文里恰好没有」)。
+     * 齿轮取的是 `.diff-options-component`(镜像 `DiffOptions` 的根,
+     * `ui/diff/diff-options.tsx:87`),不是它里面那颗按钮 —— 裁决要的是「数字在设置按钮
+     * 左侧」,而那个组件的左边缘就是那条线(它的 `margin-right: var(--spacing-half)`
+     * 让按钮与状态图标之间也有缝)。
+     */
+    const header = container.querySelector(':scope > .header');
+    const gear = header === null ? null : header.querySelector('.diff-options-component');
+    const headHeight = header === null ? 0 : header.getBoundingClientRect().height;
+    /*
+     * 数字那一段**自己的**宽度 = 两段 `span` 的并集(不含行盒的内边距)。
+     * 用 `.at()` 而不是 `[0]`:它的类型是 `Element | undefined`,不用假装「一定有两段」。
+     * 读不到(空态 / 首帧还没渲染)时是 0 ⇒ 不写变量,路径标签于是和上游一样占满 ——
+     * **不假装量到了**。
+     */
+    const spans = Array.from(row.querySelectorAll('.gw-diff-stat'));
+    const firstSpan = spans.at(0);
+    const lastSpan = spans.at(-1);
+    const statWidth = firstSpan === undefined || lastSpan === undefined
+      ? 0
+      : lastSpan.getBoundingClientRect().right - firstSpan.getBoundingClientRect().left;
+    /*
+     * 呼吸位从 CSS 里读(理由见上面那段注释)。读不到那个自定义属性(jsdom 没有布局引擎 /
+     * 首帧样式还没落地)时用 0 —— 那时 `statWidth` 也是 0,整段水平写入都会被跳过。
+     */
+    const gapRaw = Number.parseFloat(getComputedStyle(container).getPropertyValue('--gw-diff-stat-gap'));
+    const gap = Number.isFinite(gapRaw) ? gapRaw : 0;
+    /*
+     * 行右内边距 = 行盒右边缘 → 齿轮左边缘 的距离 + 呼吸位。
+     * `marginLeft:auto` 把行盒钉在容器右边缘,`paddingRight` **不会**移动那条边缘
+     * (自动外边距把富余全吸收掉)⇒ 这个值在同一次测量里是稳定的。
+     * 齿轮不在场时留 0:数字退回容器最右,那是**改前**的落点,也是「没量到就不假装」
+     * 的另一种说法(产品里这一档到不了:这一帧给镜像 `DiffHeader` 的 `diff` 恒为 `null`
+     * ⇒ `renderDiffOptions` 一定画齿轮)。
+     */
+    const rowInset = gear === null
+      ? 0
+      : Math.ceil(row.getBoundingClientRect().right - gear.getBoundingClientRect().left + gap);
+    if (statWidth > 0) {
+      container.style.setProperty('--gw-diff-stat-w', `${Math.ceil(statWidth)}px`);
+    } else {
+      container.style.removeProperty('--gw-diff-stat-w');
+    }
+    setStatBox((prev) => (prev.headHeight === headHeight && prev.statWidth === statWidth
+      && prev.rowInset === rowInset
+      ? prev
+      : { headHeight, statWidth, rowInset }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.containerRef, props.snap.selectedFiles, props.snap.diff]);
   if (snap.selectedFiles.length === 0) {
     return <Empty icon="file" title="选择一个文件查看 diff" body="在左侧列表里点一个文件。" />;
   }
@@ -1115,21 +2486,72 @@ function DiffPane(props: {
   // (Desktop 的 DiffHeader 也是常驻的)。
   // 路径取**当前选中**的文件(加载中也是新文件),上游 `changes.tsx:110` 就是这么传的。
   const headPath = diff?.path ?? snap.selectedFiles[0] ?? '';
+  /*
+   * 头部状态位 —— `DiffHeader` 要的是**镜像的** `AppFileStatus` 判别联合
+   * (`PathLabel` / `iconForStatus` / `mapStatus` 三件镜像件都吃它)。
+   * 投影函数是**既有**的 `appFileStatusOfChange`(`changes-file-list.tsx:130`,
+   * 左栏每一行用的就是它)⇒ 头部与列表行读的是**同一个**状态,不会出现
+   * 「列表说重命名、头部说修改」那种两份真源。
+   *
+   * `headEntry === undefined` 只可能出现在「status 还没落地」那一帧(切仓库的首帧),
+   * 那时 `headPath` 也是 `''`;兜底 `Modified` 与 `appFileStatusFor` 的 `default` 同口径
+   * (`desktop-diff.tsx:419-420`)。
+   */
+  const headEntry = (snap.status?.files ?? []).find((f) => f.path === headPath);
   const head = (
-    <div className="gw-diff-head">
-      <span className="gw-path" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-        title={headPath}>{headPath}</span>
-      <span className="grow" />
-      {diff !== null && diff.additions > 0 && <span className="gw-diff-stat add">+{diff.additions}</span>}
-      {diff !== null && diff.deletions > 0 && <span className="gw-diff-stat del">-{diff.deletions}</span>}
-      <DiffSettings
-        sideBySide={props.snap.sideBySide}
-        onSideBySideChange={(value) => props.store.setSideBySide(value)}
-        hideWhitespace={props.snap.hideWhitespace}
-        onHideWhitespaceChange={(value) => { void props.store.setHideWhitespace(value); }}
-        interactive
+    <>
+      <DiffHeader
+        /*
+         * ⚠️ `diff` 这一个 prop **只**被 `diff-header.tsx:57` 用来判
+         * 「子模块时不画 DiffOptions」。我们这一帧手上只有宿主的原始 `patch`
+         * (`IDiff` 由 `DesktopDiff` 现解析),为这一个判断再 `parsePatch` 一遍
+         * 是纯浪费 ⇒ 传 `null`(= 「不是子模块」)。
+         * **退役条件**:等 `desktopDiffFromPatch` 真的产出 `DiffType.Submodule`
+         * 那一档(审计 §5 第 8 项),这一行必须跟着改成那个 `IDiff`,
+         * 否则子模块的头部会多画一个齿轮。
+         */
+        diff={null}
+        path={headPath}
+        status={headEntry === undefined ? FALLBACK_APP_FILE_STATUS : appFileStatusOfChange(headEntry)}
+        showSideBySideDiff={props.snap.sideBySide}
+        onShowSideBySideDiffChanged={onSideBySideChange}
+        hideWhitespaceInDiff={props.snap.hideWhitespace}
+        onHideWhitespaceInDiffChanged={onHideWhitespaceChange}
+        onDiffOptionsOpened={NOOP}
       />
-    </div>
+      {/*
+       * `+n/-n` 是**我们自己的**(上游头部没有这一格,见审计 §4 第 16 行)。
+       * 「先做,不删」:换成镜像头部**不**顺手丢掉这条信息,所以它留在同一棵子树里。
+       *
+       * ⚠️ **位置(2026-10-09 按用户两次裁决)**:第一次原话「Changes 右边的 diff header
+       * 下面有 + / -,请挪到 header 里面」;第二次原话「+n / -n 应该在 header 内的设置按钮
+       * 的左侧,并且要有红绿着色」。接线时它一度被挪到 `.diff-container` 的第二行(右对齐),
+       * 理由是镜像 `DiffHeader` 的根 `.header` 是它自己产出的、**没有插槽**。裁决是
+       * 「挪进去、并且落在齿轮左侧」,而**镜像件保持逐字节** ⇒ 实现只在我们这一层:
+       *   ①这一行与 `.header` **等高**,再用**负上边距**上移一个 header 高度 ⇒ 落进 header
+       *     的矩形、与既有孩子同一行;
+       *   ②行盒贴容器右边缘(`marginLeft:auto`),再用**行自己的 `paddingRight`** 把内容
+       *     左推到齿轮左边(量法与理由见上面 `statBox` 那段注释);
+       *   ③数字占的那段宽度由 `desktop-changes.scss` 里 `.path-label-component` 的
+       *     右边距让出来 —— 否则数字会压在路径尾巴上;
+       *   ④`.add` / `.del` 的红绿同样在那份 scss 里(宿主语义令牌,不写死色值)。
+       * 几何与配色判据由 `docs/probes/changes-diff-stat-gear-probe.mjs` 在真 Chrome 里量。
+       *
+       * `.gw-diff-stat` 的 `<span>` 上按需去掉那条 `border-bottom`:它是给「单独一行」
+       * 设计的分隔线,挪进 header 之后会变成数字下面的一小段横线(值与文本一个字没动)。
+       *
+       * **退役条件**:若裁决要 100% 上游头部(不要这行数字),删掉这个块 +
+       * `DIFF_STAT_ROW_STYLE` / `DIFF_STAT_IN_HEADER_STYLE` / `statBox` 与那份 scss 里
+       * 三条 `.gw-diff-stat*` / `.path-label-component` 规则即可。
+       */}
+      {diff !== null && (diff.additions > 0 || diff.deletions > 0) && (
+        <div className="gw-diff-stat-row" ref={statRowRef} data-gw-diff-stat-row="1"
+          style={{ ...DIFF_STAT_IN_HEADER_STYLE, marginTop: -statBox.headHeight, height: statBox.headHeight, paddingRight: statBox.rowInset }}>
+          {diff.additions > 0 && <span className="gw-diff-stat add" style={DIFF_STAT_SPAN_STYLE}>+{diff.additions}</span>}
+          {diff.deletions > 0 && <span className="gw-diff-stat del" style={DIFF_STAT_SPAN_STYLE}>-{diff.deletions}</span>}
+        </div>
+      )}
+    </>
   );
 
   /*
@@ -1149,10 +2571,14 @@ function DiffPane(props: {
    *  2. 这个面板对「拿不到 diff」本来就有自己的表面(下面那两处 `Empty`:
    *     「读取 diff…」/「没有可显示的差异」)⇒ 失败放进同一张表面,一个面板一种空态载体,
    *     不新增外壳、不新增 CSS 类;
-   *  3. `store.fail()` 是 7 秒后消失、且对 `code === 'internal'` 刻意不附 `detail` 的
-   *     单行通知(`store.ts` 自己的注释记着这两条),而这里的证据契约与推送失败那轮相同:
-   *     **`message` 逐字 + `detail` 逐字 + 一行 `错误码:`**。`fail()` 一个字没删 ——
-   *     它仍是其它失败路径的出口。
+   *  3. `store.fail()` **今天不再丢 `detail`** —— 2026-10 已修:`fail()`(`store.ts:983-995`)
+   *     对**任何**码都附 `（detail）` 与 `错误码:<code>`(`internal` 也是),所以这里的取舍
+   *     **不是**「fail() 会吞证据」,而是另外两条仍然成立的差异:①它把 `detail` 的换行
+   *     **压成空格**(`fail()` 里那条「把空白里夹的换行折成单空格」的 `replace`),而这里的
+   *     证据契约是 `detail` **逐字**(保留换行);②它只是 7 秒后消失的一行 toast,
+   *     **换不掉正文** —— 而错的那一半正是正文。`fail()` 一个字没删 —— 它仍是其它
+   *     失败路径的出口。
+   *     (改前这句话写的是「对 `code === 'internal'` 刻意不附 `detail`」,那条已经不成立。)
    *
    * `lastShownRef.current = null`:失败**不是**「还在加载」,沿用下去就是本缺陷;
    * 清掉之后,下一次切文件时那一帧给的是诚实的「读取 diff…」而不是又一份陈旧内容。
@@ -1338,17 +2764,26 @@ function CommitAuthorAvatar(props: {
   /** 生效的作者身份;`null` = 还没读到(或没有仓库)。 */
   const [author, setAuthor] = useState<{ name: string; email: string } | null>(null);
   /**
-   * 重新读配置的时机:换仓库、以及 HEAD 变了(提交 / 修改上一次提交 / 撤销提交)。
-   * 上游对应的触发是 app-state 的 `commitAuthor` 变化 + `onRefreshAuthor()`
-   * (`ui/changes/commit-message.tsx:492-499,798`)。**不挂** `snap` 全量:那会在每次
-   * 输入摘要时打四发 host 调用。
+   * 重新读**作者身份**的时机:换仓库、HEAD 变了(提交 / 修改上一次提交 / 撤销提交),
+   * 以及 `snap.gitConfigRevision` 变。
    *
-   * ⚠️ 2026-10 **加了第三个触发源** `snap.gitConfigRevision`(仓库设置弹窗 ▸ Git 配置页
-   * 保存时 +1):「改了 user.name 但还没提交」这一档 `headSha` 不变 ⇒ 上面那两个依赖
-   * 都不会变 ⇒ 浮层继续显示旧身份。上游靠 `dispatcher.refreshAuthor(repository)`
-   * (`ui/repository-settings/repository-settings.tsx:380-382`)把 `commitAuthor` 换掉;
-   * 我们**没有** `repo/author-ident` 路由(`goal-port-desktop.md` §10.10 待建第 9 项),
-   * 这个计数器就是那一步的替代品,理由与差异写在 `store.ts` 的 `Snapshot.gitConfigRevision`。
+   * ## 上游的触发是 `dispatcher.refreshAuthor(repository)`
+   *
+   * `ui/repository-settings/repository-settings.tsx:380-382` 在写完 `user.name` /
+   * `user.email` 之后调它 ⇒ `app-store` 重跑 `getAuthorIdentity` 并把新的
+   * `commitAuthor` 写进状态 ⇒ 头像浮层换成新身份。我们的仓库设置弹窗与这个组件
+   * **没有共同祖先可传回调**,所以那个重读信号走快照上的一个计数器:
+   * `GitStore.saveGitConfig` 每次写成功就 `gitConfigRevision + 1`
+   * (`store.ts` 的 `Snapshot.gitConfigRevision` 那一段把理由与差异写全了)。
+   *
+   * ## 计数器的现状(2026-10 本批更新:路由已建)
+   *
+   * `POST /dsh-git/repo/author-ident`(`git var GIT_AUTHOR_IDENT`)已经存在,本组件的
+   * **值**就来自它 —— 也就是说计数器**不再是**「缺路由的替代品」,它现在只剩一件事:
+   * **跨组件通知这一次重读**(上游那半由 `dispatcher.refreshAuthor` 承担)。
+   * 两条都在:`gitConfigRevision` 触发,`repo/author-ident` 取值。
+   *
+   * **不挂** `snap` 全量:那会在每次输入摘要时都打一发 host 调用。
    */
   const headSha = snap.status?.headSha ?? '';
   const gitConfigRevision = snap.gitConfigRevision ?? 0;
@@ -1360,30 +2795,53 @@ function CommitAuthorAvatar(props: {
     }
     let dead = false;
     void (async () => {
-      const [localName, localEmail, globalName, globalEmail] = await Promise.all([
-        api.configGet(path, 'user.name', 'local'),
-        api.configGet(path, 'user.email', 'local'),
-        api.configGet(path, 'user.name', 'global'),
-        api.configGet(path, 'user.email', 'global'),
-      ]);
+      /*
+       * ## 数据面:2026-10 起走 `repo/author-ident`(`git var GIT_AUTHOR_IDENT`)
+       *
+       * 上游这条链是 `app-store.commitAuthor` = `getAuthorIdentity(repository)`
+       * (`lib/git/var.ts:20-42`)⇒ 由 `dispatcher.refreshAuthor` 刷新;`commit-message.tsx`
+       * 再把它交给 `CommitMessageAvatar`。我们以前**没有**这条路由,于是用四次
+       * `config-get`(local+global × name/email)临时拼一个「local 优先、global 兜底」的值 ——
+       * 那份拼法与 `git var` **不等价**(上游 `var.ts:5-18` 的注释写明了差别:没配
+       * name/email 时 git 自己会造一个 `user@hostname` 身份,而配置读取只会回 `null`;
+       * system 级配置与 `GIT_AUTHOR_*` 环境同样只有 `git var` 看得到)。
+       * 现在**值**来自路由,拼法不再存在于此。
+       *
+       * ## 解析用镜像里那一份,不在这里写正则
+       *
+       * `CommitIdentity.parseIdentity`(`src/core/desktop/models/commit-identity.ts`,
+       * 与上游 `models/commit-identity.ts` 逐字)就是上游 `var.ts:38` 用的那个解析器。
+       */
+      const result = await api.repoAuthorIdent(path);
       if (dead) {
         return;
       }
-      const firstNonEmpty = (
-        local: typeof localName,
-        global: typeof globalName,
-      ): string => {
-        const fromLocal = local.ok ? local.value.value : null;
-        if (fromLocal !== null && fromLocal !== '') {
-          return fromLocal;
-        }
-        const fromGlobal = global.ok ? global.value.value : null;
-        return fromGlobal ?? '';
-      };
-      setAuthor({
-        name: firstNonEmpty(localName, globalName),
-        email: firstNonEmpty(localEmail, globalEmail),
-      });
+      if (!result.ok) {
+        /*
+         * 读失败**不静默**:把码与原句打出来(宿主侧同一次失败已经有过信封,
+         * 这里只是不让它在浏览器半消失)。**不**发 toast:这条读在任何一次切仓库 /
+         * 提交 / 保存仓库设置后都会跑,一次基础设施抖动变成一串 7 秒通知会淹没真正的失败;
+         * 而它的可见后果(头像没有姓名首字母)本身就是症状。
+         */
+        console.warn('[dsh-git] 读取作者身份失败:', result.error.code, result.error.message);
+        setAuthor({ name: '', email: '' });
+        return;
+      }
+      const { ident } = result.value;
+      if (ident === null) {
+        // 上游 `var.ts:33-35`:`user.useConfigOnly` 且没配 name/email ⇒ `null`。
+        // 界面照旧渲染头像(空身份)—— 与改动前「四次配置读取全空」的形态逐字相同,
+        // 免得把「git 说没有身份」变成「头像整个消失」。
+        setAuthor({ name: '', email: '' });
+        return;
+      }
+      try {
+        const parsed = CommitIdentity.parseIdentity(ident);
+        setAuthor({ name: parsed.name, email: parsed.email });
+      } catch {
+        // 上游 `var.ts:37-41` 的 `catch { return null }` —— 解析不了就是「没有身份」。
+        setAuthor({ name: '', email: '' });
+      }
     })();
     return () => { dead = true; };
   }, [path, headSha, gitConfigRevision]);
@@ -1484,6 +2942,50 @@ function CommitAuthorAvatar(props: {
  * (`sidebar.tsx:391-397` 的 `renderUndoCommit`),见 `UndoCommitStrip`。
  */
 function undoableCommitOf(snap: Snapshot): Commit | null {
+  const commit = mostRecentLocalCommitOf(snap);
+  if (commit === null) {
+    return null;
+  }
+  if (commit.tags.length !== 0) {
+    return null;
+  }
+  if (snap.commitForm.amend) {
+    return null;
+  }
+  return commit;
+}
+
+/**
+ * **上游的 `mostRecentLocalCommit`**(`ui/repository.tsx:258-266`):
+ *
+ * ```ts
+ * const mostRecentLocalCommitSHA = localCommitSHAs.length > 0 ? localCommitSHAs[0] : null
+ * const mostRecentLocalCommit = mostRecentLocalCommitSHA ? commitLookup.get(...) : null || null
+ * ```
+ *
+ * 而 `localCommitSHAs` = `git log <upstream>..HEAD --not --remotes`(`git-store.ts:608-657`)
+ * 的 sha 列表 ⇒ 它就是「HEAD 是一条**还没被 push** 的本地提交」时那一条。
+ *
+ * ## 为什么要单独抽出来(2026-10-10)
+ *
+ * 上游有**两个**消费者,它们的前四层判据**完全相同**:
+ *  1. 撤销提交条:再用 `tags.length === 0 && commitToAmend === null` 收窄
+ *     (`sidebar.tsx:359-368`) ⇒ 就是 {@link undoableCommitOf};
+ *  2. 读屏宣告:提交成功后念
+ *     `Committed Just now - <summary> (Sha: <shortSha>)`
+ *     (`commit-message.tsx:401-412`),**只要** `mostRecentLocalCommit` 换了 sha 就念
+ *     —— 它**没有** tag / amend 那两个收窄。
+ *
+ * 抽出来之前,第 2 条没有落点:照抄一份「HEAD + ahead>0」的判据就是**第二份真源**
+ * (两处迟早对「detached / log 不同步 / ahead 口径」给出不同答案)。这里两个消费者
+ * 共用一个函数,{@link undoableCommitOf} 只加它自己那两条收窄 —— 语义与改前**逐字相同**。
+ *
+ * 五条判据的依据见 `undoableCommitOf` 的文件头(detached 那条是本仓**比上游严**的一处,
+ * 理由写在那边),它们现在都住在这里。
+ * @param snap - 当前快照。
+ * @returns 那条提交;`null` = 没有「未 push 的 HEAD」。
+ */
+function mostRecentLocalCommitOf(snap: Snapshot): Commit | null {
   const entry = snap.log[0];
   const status = snap.status;
   if (entry === undefined || status === null || status.unborn || status.detached) {
@@ -1495,14 +2997,7 @@ function undoableCommitOf(snap: Snapshot): Commit | null {
   if ((snap.sync?.ahead ?? 0) <= 0) {
     return null;
   }
-  const commit = toCommit(entry);
-  if (commit.tags.length !== 0) {
-    return null;
-  }
-  if (snap.commitForm.amend) {
-    return null;
-  }
-  return commit;
+  return toCommit(entry);
 }
 
 /**
@@ -1791,6 +3286,33 @@ function CommitBox(props: {
    * toast(`REPOSITORY_SETTINGS_UNAVAILABLE`),不是静默 no-op。
    */
   onOpenRepositorySettings?: () => void;
+  /**
+   * 上游 `commit-message.tsx:197` 的 `showPromptForCommittingFileHiddenByFilter`
+   * (由 `filter-changes-list.tsx:943-951` 算出:偏好 **且** 谓词为真)。
+   * 本组件只**读**它 —— 判定留在页那一层,因为 `filteredItems` / `fileListFilter`
+   * 都在那边(与上游同一分工)。
+   */
+  showPromptForCommittingFileHiddenByFilter: boolean;
+  /**
+   * 上游 `commit-message.tsx:201` 的 `onFilesToCommitNotVisible?`。提交按钮点下去时,
+   * 若上面那条为真,就把「真的提交」这个闭包交上去(`commit-message.tsx:626-637`),
+   * 由弹窗的持有者(页那一层)决定什么时候调它。
+   */
+  onFilesToCommitNotVisible: (onCommitAnyway: () => void) => void;
+  /**
+   * 上游 `ui/changes/sidebar.tsx:170-180` 那个
+   * `showPopup({type: PopupType.OversizedFiles, oversizedFiles, context, repository})`。
+   *
+   * 载荷的**三件**都在这一层算好(它们是这一层的:纳入文件、`summaryOrPlaceholder`
+   * 组成的 `commitContext`、以及那个 `Repository`)—— 与上游
+   * `commit-message.tsx` 造 `commitContext` 再交给 `onCreateCommit` 的分工一致。
+   * 持有者(页那一层)只负责渲染镜像 `OversizedFiles`(裁决 B:没有 popup 宿主)。
+   */
+  onOversizedFiles: (payload: {
+    readonly oversizedFiles: ReadonlyArray<string>;
+    readonly context: ICommitContext;
+    readonly repository: Repository;
+  }) => void;
 }): ReactNode {
   /*
    * `onOpenPreferences` 在这里**解构出来**(而不是在回调里写 `props.onOpenPreferences`):
@@ -1798,12 +3320,25 @@ function CommitBox(props: {
    * 一律要求把整个 `props` 放进依赖,而 `props` 每次渲染都是新对象 ⇒ 回调恒变,
    * `useCallback` 也就白写了。解构之后依赖是**具体的那个函数**。
    */
-  const { store, snap, onOpenPreferences, onOpenRepositorySettings } = props;
+  const {
+    store, snap, onOpenPreferences, onOpenRepositorySettings,
+    showPromptForCommittingFileHiddenByFilter, onFilesToCommitNotVisible, onOversizedFiles,
+  } = props;
   const form = snap.commitForm;
   const status = snap.status;
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [confirmGenerate, setConfirmGenerate] = useState(false);
   const [confirmUndo, setConfirmUndo] = useState(false);
+  /**
+   * **读屏宣告的当前文本** —— 上游 `commit-message.tsx:258` 的
+   * `isCommittingStatusMessage`(`:318` 初值 `''`、`:1848-1850` 渲染成
+   * `<span className="sr-only" aria-live="polite" aria-atomic="true">`)。
+   *
+   * 空串是**有含义的初态**:上游那条 setter 在 `:397-402` 明确要求
+   * `this.state.isCommittingStatusMessage === ''` 才写第一次 ⇒ 同一个提交里
+   * 「开始」只宣告一次;之后由「最近一次本地提交的 sha 变了」(`:404-412`)覆盖成结果句。
+   */
+  const [isCommittingStatusMessage, setCommittingStatusMessage] = useState('');
 
   // 提交的是**纳入提交的文件**(客户端模型),不是「索引里有什么」。
   const includedFiles = (status?.files ?? []).filter(
@@ -1991,12 +3526,227 @@ function CommitBox(props: {
   const generatingLabel = form.generating ? '正在生成提交详情…' : null;
   const commitButtonText = generatingLabel ?? buttonText;
 
+  /*
+   * ===========================================================================
+   * **提交状态的读屏宣告**(2026-10-10)—— 上游 `ui/changes/commit-message.tsx`
+   * ===========================================================================
+   *
+   * ## 上游那两条转换(逐字)
+   *
+   * ```ts
+   * // componentDidUpdate
+   * if (prevProps.isCommitting !== this.props.isCommitting &&
+   *     this.props.isCommitting &&
+   *     this.state.isCommittingStatusMessage === '') {
+   *   this.setState({ isCommittingStatusMessage: this.getButtonTitle() })
+   * }
+   * if (prevProps.mostRecentLocalCommit?.sha !== this.props.mostRecentLocalCommit?.sha &&
+   *     this.props.mostRecentLocalCommit !== null) {
+   *   this.setState({ isCommittingStatusMessage:
+   *     `Committed Just now - ${mostRecentLocalCommit.summary} (Sha: ${mostRecentLocalCommit.shortSha})` })
+   * }
+   * ```
+   *
+   * 而 `getButtonTitle()` 在提交进行中是 `` `${getButtonVerb()} to ${branch}` ``
+   * (`:1493-1552`,amend 那一档是 `Amending last commit`)。
+   *
+   * ## 这里的移植方式(以及两处**如实**说明)
+   *
+   *  · 用 `useRef` 记住「上一次的值」而不是 `componentDidUpdate`;**首次渲染不比**
+   *    (`previous === null` 那一支直接跳过)—— 这正是 `componentDidUpdate` 的语义
+   *    (挂载时不跑),否则页面一打开就会把「上一条本地提交」念一遍;
+   *  · 文案**中文化**(仓库既有裁决,goal §11.9;上游英文原文逐字留在上面);
+   *  · `prevProps` 里**没有** `isCommittingStatusMessage`,只有 `props` 两个字段;
+   *    这里读的是**当前** state,与上游那一句同义(它读的也是 `this.state`)。
+   *
+   * ⚠️ **没有 `hookProgress` 那一半**:上游同一个 `componentDidUpdate` 旁边还有
+   * `renderCommitProgress()`(`:1699-1731`,钩子进度条 + 「Show commit progress」按钮),
+   * 它要 `props.hookProgress`(`HookProgress`:hookName + started/finished/failed)与
+   * `props.onShowCommitProgress`(打开 `PopupType.CommitProgress` 终端)。本仓**两者都没有生产者**
+   * (宿主提交走 `git-service.ts` 的 argv,从不解析钩子生命周期;也没有终端输出流通道)
+   * ⇒ 不伪造,读数与缺口写在 `docs/probes/changes-oversized-warning-probe.mjs` 的 H 组。
+   */
+  const committingStatusTitle = form.amend
+    ? '正在修改上一次提交'
+    : (branch === '' ? '正在提交' : `正在提交到 ${branch}`);
+  /**
+   * 「最近一次**本地**(未 push 的)提交」—— 与撤销提交条**同一份判据**
+   * ({@link mostRecentLocalCommitOf};上游也是同一个 prop:`mostRecentLocalCommit`)。
+   */
+  const mostRecentLocalCommit = mostRecentLocalCommitOf(snap);
+  const previousCommittingRef = useRef<boolean | null>(null);
+  const previousMostRecentShaRef = useRef<string | null>(null);
+  useEffect(() => {
+    const previousCommitting = previousCommittingRef.current;
+    const previousSha = previousMostRecentShaRef.current;
+    const sha = mostRecentLocalCommit === null ? null : mostRecentLocalCommit.sha;
+    if (previousCommitting !== null) {
+      if (previousCommitting !== isCommitting && isCommitting && isCommittingStatusMessage === '') {
+        setCommittingStatusMessage(committingStatusTitle);
+      }
+      if (previousSha !== sha && mostRecentLocalCommit !== null) {
+        setCommittingStatusMessage(
+          `刚刚提交 - ${mostRecentLocalCommit.summary}(Sha: ${mostRecentLocalCommit.shortSha})`,
+        );
+      }
+    }
+    previousCommittingRef.current = isCommitting;
+    previousMostRecentShaRef.current = sha;
+    /*
+     * 依赖数组**就是那两条转换的判据**(上游 `componentDidUpdate` 每次更新都跑,但那两条
+     * `if` 只在这几个值变化时才可能成立):
+     *  · `isCommitting` ⇒ 第一态(「正在提交到 …」);
+     *  · `mostRecentLocalCommit` ⇒ 第二态(「刚刚提交 - …」);
+     *  · 另外两个进依赖是**收敛所需**:写完第一态后本效果会再跑一次,而那时
+     *    `previousCommitting === isCommitting`、`previousSha === sha` ⇒ 一次 setState
+     *    都不会发生(不是无限链;`react-hooks/exhaustive-deps` 那条警告要的正是这份声明)。
+     */
+  }, [isCommitting, mostRecentLocalCommit, isCommittingStatusMessage, committingStatusTitle]);
+
+  /*
+   * `snap.current` **先取出来当局部量**再进依赖数组:`react-hooks/exhaustive-deps`
+   * 不接受 `snap.current` 这种「可变值的属性」当依赖(它会说那不是一个能触发重渲的依赖)。
+   * 语义不变:`snap` 是不可变快照,`current` 就是一个字符串。
+   *
+   * ⚠️ 2026-10-10:这一块从下面(rebase 分支之上)**搬到了** `onSubmitCommit` 之上 ——
+   * 超大文件闸门需要它,而闸门是提交动作的一部分。搬家**不改行为**(hook 顺序在每次
+   * 渲染里都一致;下面那条 rebase 提前 return 读的还是同一个 `repository`)。
+   */
+  const repoPath = snap.current;
+  const repository = useMemo(() => {
+    const alias = snap.repos.find((entry) => entry.path === repoPath)?.name ?? null;
+    // `id` 传 0:与 `CommitAuthorAvatar` 同一处置(本视图只用 `path`)。
+    return repoPath === '' ? null : new Repository(repoPath, 0, null, false, alias);
+  }, [repoPath, snap.repos]);
+  /**
+   * 这一帧的 `WorkingDirectoryStatus` —— 上游 `lib/large-files.ts` 的**入参类型**
+   * (`ui/changes/sidebar.tsx:162` 传的是 `this.props.changes.workingDirectory`)。
+   *
+   * 与 rebase 分支**同一份构造**(`changesRowItemsOf` + `WorkingDirectoryStatus.fromFiles`):
+   * 那是本仓把「porcelain 行 → 镜像 `WorkingDirectoryFileChange`」收敛成一处的地方
+   * (`changes-file-list.tsx:210`),这里的纳入状态也走同一份 `includeStateOf`。
+   * 不做第二份映射 —— 那正是「镜像函数读到与我们列表不同的选择」这类静默缺陷的温床。
+   */
+  const workingDirectory = useMemo(() => WorkingDirectoryStatus.fromFiles(
+    changesRowItemsOf(
+      status?.files ?? [],
+      (file) => includeStateOf(snap.includeState[file.path]),
+    ).map((row) => row.change),
+  ), [status?.files, snap.includeState]);
+  /**
+   * 这一帧的 `ICommitContext` —— 上游 `commit-message.tsx:614-626` 造的那个
+   * `commitContext`,也是 `PopupType.OversizedFiles` 载荷里的 `context`
+   * (`ui/changes/sidebar.tsx:176`)。
+   *
+   * 三处**如实**说明:
+   *  1. `trailers`:上游是 `this.getCoAuthorTrailers()`(`commit-message.tsx:577-585`),
+   *     这里用**同一个投影函数本人**(`store.ts` 的 `getCoAuthorTrailers`,逐字抄的那 9 行)。
+   *     第二个实参就是上游那条闸门 `isCoAuthorInputEnabled`
+   *     (`commit-message.tsx:815-817`:`repository.gitHubRepository !== null`)——
+   *     **不写死 `true`**:非 GitHub 仓库里共同作者一个都不进 commit message,这是上游语义。
+   *     ⚠️ 2026-10-10 **仍然只说一半**:`store.commit()` 的载荷里**没有** `trailers`
+   *     字段、宿主 `commit` 路由也不收它(见 `getCoAuthorTrailers` 的 JSDoc)⇒
+   *     这个数组今天是**签名的一部分 + 探针读数**,不是「提交里真的有那一行」。
+   *  2. 不传可选的 `messageGeneratedByCopilot`:我们的 `form.generatedBy` 是
+   *     **provider/模型名**(字符串),与上游那个「是不是 Copilot 生成的」布尔不是同一件事,
+   *     硬映射会造出一个错的语义;
+   *  3. 这个 context 目前**只被搬运**:`OversizedFiles` 把它原样交给
+   *     `dispatcher.commitIncludedChanges(repository, context)`,而我们的门面就是
+   *     `store.commit()`(它自己从 `commitForm` 取摘要/描述)。之所以照样逐字段填好,
+   *     是因为它是**签名的一部分** —— 填一个空对象会让下一个接线的人读到假信息。
+   */
+  const commitContext: ICommitContext = useMemo(() => ({
+    summary: summaryOrPlaceholder,
+    description: form.description === '' ? null : form.description,
+    trailers: [...getCoAuthorTrailers(
+      snap.coAuthors,
+      repository !== null && repository.gitHubRepository !== null,
+    )],
+    amend: form.amend,
+  }), [summaryOrPlaceholder, form.description, form.amend, snap.coAuthors, repository]);
+
+  /**
+   * 提交按钮 / `Cmd(Ctrl)+Enter` 的**唯一**入口 —— 逐条对着上游
+   * `commit-message.tsx:573-575`(`onSubmit = () => this.createCommit()`)与
+   * `:626-637` 的那道闸门:
+   *
+   * ```ts
+   * if (options?.warnFilesNotVisible !== false &&
+   *     this.props.showPromptForCommittingFileHiddenByFilter === true &&
+   *     this.props.onFilesToCommitNotVisible) {
+   *   this.props.onFilesToCommitNotVisible(() =>
+   *     this.createCommit({ …, warnFilesNotVisible: false }))
+   *   return
+   * }
+   * ```
+   *
+   * 两条输入**都**走这里:上游 `onKeyDown`(`:713-722`)调的也是 `this.createCommit()`
+   * —— 键盘快捷键**同样**会被那道闸门拦下(不是「只有点按钮才问」)。
+   *
+   * ---------------------------------------------------------------------------
+   * **超大文件闸门(2026-10-10 接线)** —— 上游 `ui/changes/sidebar.tsx:159-183`
+   * ---------------------------------------------------------------------------
+   *
+   * 顺序与上游**逐字一样**:筛选隐藏那条闸门在 `commit-message.tsx` 里、
+   * **先于** `onCreateCommit`;而超大文件闸门是 `onCreateCommit` 的**第一件事**
+   * (`sidebar.tsx:161-181`),冲突文件那条排在它**后面**。所以:
+   *
+   * ```ts
+   * const overSizedFiles = await getLargeFilePaths(repository, workingDirectory)
+   * const filesIgnoredByLFS = await filesNotTrackedByLFS(repository, overSizedFiles)
+   * if (filesIgnoredByLFS.length !== 0) { showPopup({type: OversizedFiles, …}); return false }
+   * ```
+   *
+   * 本插件里这两跳的落点:
+   *  · `getLargeFilePaths` = **镜像那一份本人**(`src/core/desktop/lib/large-files.ts`,
+   *    逐字,100 MiB 阈值在它里面),它 `import { stat } from 'fs/promises'` ⇒ esbuild 的
+   *    alias 把它接到 `src/client/shim-node-fs-promises.ts` 的注入点,宿主实现是
+   *    `src/client/history-view.tsx` 装的 `IFsPromisesHost.stat`(走 `file-size` 路由);
+   *  · `filesNotTrackedByLFS` = 宿主 `lfs/untracked` 路由(宿主侧**逐字复用**镜像
+   *    `src/host/mirror/lib/git/lfs.ts:107`)—— 客户端**没有**这一份镜像
+   *    (`src/core/desktop/lib/git/lfs.ts` 不在树里),所以它只能由宿主提供。
+   *
+   * **失败语义(明确决定,不是漏做)**:`lfs/untracked` 不可用(`unsupported: true`,
+   * 例如刷新了页面但宿主还是旧构建)时**不把空名单当成「都被 LFS 覆盖」**,而是给一条
+   * 点名缺口的 toast 并**照常提交** —— 这条闸门在上游本身也只是「拦住 + 让你 Commit Anyway」,
+   * 不是硬门;把用户永久堵在提交按钮前面才是更坏的行为。
+   */
+  const createCommitGate = useCallback(async (): Promise<void> => {
+    if (repository !== null) {
+      const overSizedFiles = await getLargeFilePaths(repository, workingDirectory);
+      if (overSizedFiles.length > 0) {
+        const lfs = await api.lfsUntracked(repository.path, overSizedFiles);
+        if (!lfs.ok) {
+          store.toast(`${OVERSIZED_LFS_UNCHECKED}\n${lfs.error.message}`, 'err');
+        } else if (lfs.value.unsupported) {
+          store.toast(OVERSIZED_LFS_UNCHECKED, 'err');
+        } else if (lfs.value.untracked.length > 0) {
+          onOversizedFiles({
+            oversizedFiles: lfs.value.untracked,
+            context: commitContext,
+            repository,
+          });
+          return;
+        }
+      }
+    }
+    await store.commit();
+  }, [repository, workingDirectory, commitContext, onOversizedFiles, store]);
+
+  const onSubmitCommit = useCallback((): void => {
+    if (!canCommit) { return; }
+    if (showPromptForCommittingFileHiddenByFilter) {
+      onFilesToCommitNotVisible(() => { void createCommitGate(); });
+      return;
+    }
+    void createCommitGate();
+  }, [canCommit, showPromptForCommittingFileHiddenByFilter, onFilesToCommitNotVisible, createCommitGate]);
 
   const onKey = (event: React.KeyboardEvent): void => {
-    // Cmd/Ctrl+Enter 提交(照 commit-message.tsx:693-726)
+    // Cmd/Ctrl+Enter 提交(照 commit-message.tsx:693-726;上游走同一个 onSubmit)
     if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && canCommit) {
       event.preventDefault();
-      void store.commit();
+      onSubmitCommit();
     }
   };
 
@@ -2067,6 +3817,85 @@ function CommitBox(props: {
       '⚠️ 注意作用域:偏好设置里的 Git 页改的是**全局** gitconfig,不会改这个仓库的身份;'
     );
   }, [onOpenRepositorySettings, store]);
+
+  /** 上游 `commit-message.tsx:1258` 的 `onStopAmending`(我们这里就是清掉 amend 态)。 */
+  const stopAmending = useCallback((): void => {
+    store.setCommitField('amend', false);
+  }, [store]);
+
+  /*
+   * ===========================================================================
+   * rebase 冲突 ⇒ **整个提交表单换成镜像 `ContinueRebase`**(用户规则 + 上游判据)
+   * ===========================================================================
+   *
+   * 上游 `filter-changes-list.tsx:889-905` 的 `renderCommitMessageForm` 第一句就是:
+   *
+   * ```tsx
+   * if (rebaseConflictState !== null) { return <ContinueRebase … /> }
+   * ```
+   *
+   * ⇒ 判据是 **`rebaseConflictState !== null`**,不是「operation 是 rebase」这条我们自己
+   * 发明的条件;而本仓对它的既有映射就是 `isRebaseInProgress`
+   * (`snap.status.operation === 'rebase'`,同一个映射已经被撤销提交条与右键菜单用了,
+   * 见 `UndoCommitStrip` 的注释与 `changes-file-menu.ts` 的 rebase 变体)——
+   * 这里**沿用同一处映射**,不新造第二份判据。
+   *
+   * ## `RebaseConflictState` 的五个字段:哪几个是真的,哪两个拿不到(逐条如实)
+   *
+   * | 字段(上游 `lib/app-state.ts:500-529`) | 上游来源 | 这里 |
+   * |---|---|---|
+   * | `kind: 'rebase'` | `isRebaseConflictState(conflictState)` | 真(我们只有 rebase 这一档) |
+   * | `currentTip` | `gitStore.rebaseConflictState`(`.git/rebase-merge/…` 里的 HEAD) | **真**:`status.headSha`(rebase 期间 HEAD 就是那个在飞的提交) |
+   * | `targetBranch` | 用户选来被 rebase 的分支 | **真**:`status.branch`(正在 rebase 的就是当前分支) |
+   * | `baseBranch?` | 可选的基线分支名 | 不传(可选字段) |
+   * | `originalBranchTip` / `baseBranchTip` | `.git/rebase-merge/orig-head`、`onto` | ⚠️ **拿不到**:我们的 `RepoStatus` 没有 `rebaseInternalState` 那一族字段(`src/client/store.ts:225` 已登记)⇒ 传空串,并**如实标注**「这两个值本插件不知道」 |
+   * | `manualResolutions` | `rebaseConflictState.manualResolutions`(用户逐文件选的「用我方/用对方」) | **空 `Map`**:我们没有那套手工解决状态(上游的 `MultiCommitOperation*` 状态机整个不在本仓,`README-probe-index.md` §八)⇒ 于是 `getConflictedFiles()` 会把**所有**未解决的冲突都算进来,`ContinueRebase` 因此给出「Resolve all conflicts before continuing」并把按钮禁用 —— 这在**我们**的能力下是正确的行为(我们确实没有「手工标记为已解决」这个动作) |
+   *
+   * ## 那个按钮点下去会怎样(**2026-10-10 起是真的**)
+   *
+   * 上游 `dispatcher.continueRebase(...)` 的动作**已接通**:宿主 `rebase/continue` 路由
+   * ⇒ `GitService.continueRebase`(逐跳对着上游 `lib/git/rebase.ts:444-546`)。
+   * 门面(`ContinueRebaseDispatcher`,本文件)负责调用 + 播报 + 刷新。
+   * 改前的读数(点下去只念「本插件没有 rebase/continue 路由」)与红证见
+   * `docs/probes/changes-commit-flow-probe.mjs` 与
+   * `docs/probes/rebase-continue-route-probe.mjs`。
+   */
+  const rebaseConflictState: RebaseConflictState = useMemo(() => ({
+    kind: 'rebase',
+    currentTip: status?.headSha ?? '',
+    targetBranch: branch,
+    originalBranchTip: '',
+    baseBranchTip: '',
+    manualResolutions: new Map(),
+  }), [status?.headSha, branch]);
+  const continueRebaseDispatcher = useMemo(
+    () => new ContinueRebaseDispatcher(store),
+    [store],
+  );
+  if (isRebaseInProgress && repository !== null) {
+    const untracked = (status?.files ?? []).some(
+      (file) => appFileStatusOfChange(file).kind === AppFileStatusKind.Untracked,
+    );
+    return (
+      <ContinueRebase
+        dispatcher={continueRebaseDispatcher}
+        repository={repository}
+        /*
+         * 上游 `filter-changes-list.tsx:893-897` 传的是 `this.props.workingDirectory`
+         * (那头是 app-store 的 `WorkingDirectoryStatus`)。
+         *
+         * 2026-10-10:这里原本是**第二份**内联构造(`changesRowItemsOf(...) +
+         * WorkingDirectoryStatus.fromFiles(...)`),现在改用上面那个 `workingDirectory`
+         * —— 同一帧里两处必须是同一个对象,否则「超大文件闸门看到的纳入状态」与
+         * 「ContinueRebase 看到的」会各自演化(那正是静默漂移的温床)。
+         */
+        workingDirectory={workingDirectory}
+        rebaseConflictState={rebaseConflictState}
+        isCommitting={isCommitting}
+        hasUntrackedChanges={untracked}
+      />
+    );
+  }
 
   return (
     <div className="gw-commit">
@@ -2186,6 +4015,25 @@ function CommitBox(props: {
       </div>
 
       {/*
+        **共同作者行**(上游 `ui/changes/commit-message.tsx:1806` 的
+        `{this.renderCoAuthorInput()}`;实现件 `./co-authors-row.tsx`)。
+        位置照上游:`renderAmendCommitNotice()` **之后**、`renderSubmitButton()` **之前**
+        —— 在我们的手写壳里就是「`.row` 之后、提交按钮之前」。
+        ⚠️ 今天它渲染 `null`(两条上游闸门,见文件的 import 注释),这是**已知的正确行为**。
+      */}
+      {repository !== null && (
+        <CoAuthorsRow
+          store={store}
+          repository={repository}
+          showCoAuthoredBy={snap.showCoAuthoredBy}
+          coAuthors={snap.coAuthors}
+          isCommitting={isCommitting}
+          isAmending={form.amend}
+          autocompletionProviders={store.coAuthorAutocompletionProviders()}
+        />
+      )}
+
+      {/*
         提交按钮 —— 与上游 `ui/changes/commit-message.tsx:1613-1631` 的
         `<Button type="submit" className="commit-button">` **同一套类名与本意**:
         `Button` 渲出来的就是 `<button class="button-component commit-button" type="submit">`
@@ -2214,7 +4062,7 @@ function CommitBox(props: {
          * 「复刻请**保留**该行为」,所以这里同样无条件写死,不做条件化。
          */
         aria-describedby="hidden-changes-warning"
-        onClick={() => { if (canCommit) void store.commit(); }}>
+        onClick={onSubmitCommit}>
         {/*
           转圈图标与文案一起,照上游 `commit-message.tsx:1626-1628` 的
           `{loading}{commitButton}`。类名 extra `octicon` 是刻意的:上游 `Octicon`
@@ -2225,6 +4073,29 @@ function CommitBox(props: {
         {form.generating && <Icon name="sync" size={12} className="octicon gw-spin" />}
         {commitButtonText}
       </button>
+
+      {/*
+        **读屏宣告**(上游 `commit-message.tsx:1848-1850`,**逐字同形**):
+
+        ```tsx
+        <span className="sr-only" aria-live="polite" aria-atomic="true">
+          {this.state.isCommittingStatusMessage}
+        </span>
+        ```
+
+        位置也照上游:提交按钮之后(上游那一段的顺序是 submit button → 进度条 →
+        这一行;进度条那一半本仓没有生产者,见 `committingStatusTitle` 上面的注释)。
+
+        ⚠️ **`className="sr-only"` 是真的在起作用**:它的配方在本面
+        (`src/client/scss/desktop-changes.scss:141-143` 的 `.sr-only { @include sr-only-recipe }`)
+        —— 缺配方时这段文字会**可见地**挤进提交区(那是本仓最贵的一次返工,
+        `docs/goal-port-desktop.md` §7)。探针 H 组同帧读 `getComputedStyle` 断言它被裁掉。
+
+        ⚠️ `aria-live` 的语义:**文本内容变化**才会被念;初值空串 ⇒ 页面加载时静默。
+      */}
+      <span className="sr-only" aria-live="polite" aria-atomic="true">
+        {isCommittingStatusMessage}
+      </span>
 
       {/*
         提交选项的**内联面板已删除**(用户 2026-10-07:「生成按钮右边的设置按钮,
@@ -2239,13 +4110,51 @@ function CommitBox(props: {
         退役条件:确认全仓再没有第二个消费方时,连那条规则一起删)。
       */}
 
-      {form.amend && hasPreviousCommit && (
-        <div className="gw-hint" style={{ padding: 0 }}>
-          这些改动会改写你**最近一次提交**。
-          <button className="gw-btn ghost" style={{ padding: '0 4px' }}
-            onClick={() => store.setCommitField('amend', false)}>停止修改</button>
-          以新建一个提交。
-        </div>
+      {/*
+        ------------------------------------------------------------------
+        amend 提示 —— **整体交给镜像 `CommitWarning`**(2026-10-09)
+        ------------------------------------------------------------------
+        上游 `commit-message.tsx:1250-1267` 的 `renderAmendCommitNotice`:
+
+        ```tsx
+        <CommitWarning icon={CommitWarningIcon.Information}>
+          Your changes will modify your <strong>most recent commit</strong>.{' '}
+          <LinkButton onClick={this.props.onStopAmending}>Stop amending</LinkButton>{' '}
+          to make these changes as a new commit.
+        </CommitWarning>
+        ```
+
+        接线前这里是一根手写的 `div.gw-hint`(同一条信息、另一套 DOM),于是
+        `ui/changes/commit-warning.tsx`(56 行,字节一致)**在树里、0 个 importer**
+        (审计 §2 树 2 的 `:1256-1429 CommitWarning ×7 支` 那一行)。
+        现在这一支与上游同一件:图标(`information-icon`)、`warning-message` 容器、
+        以及**镜像 `LinkButton`**(`.link-button-component`,与告警条同一件)。
+        其余 6 支(repo rules / 分支保护)依赖 `repoRulesInfo` / `showNoWriteAccess`
+        那些我们**没有**的状态(`repoRulesEnabled` 恒 false)⇒ 不伪造,理由已在
+        `canCommit` 的注释里(与「上游未启用 repo rules 时」逐字等价)。
+
+        文案按仓库既有裁决**中文化**(goal §11.9),上游原文逐字留在上面;
+        `strong` 的那一段刻意保留(上游也把「最近一次提交」加粗)。
+      */}
+      {form.amend && hasPreviousCommit && createElement(
+        CommitWarning,
+        { icon: CommitWarningIcon.Information },
+        '这些改动会改写你',
+        createElement('strong', null, '最近一次提交'),
+        '。',
+        /*
+         * `LinkButton` 与 `CommitWarning` 都用 `createElement` 而不是 JSX ——
+         * 理由与 `hidden-changes-warning.tsx:258-269` **逐字相同**:镜像那两个组件的
+         * props(`ILinkButtonProps` / `FunctionComponent<{icon}>`)**没有声明 `children`**
+         * (上游跑 `@types/react@^16`,那一代类组件/FC 隐式接受 children;我们钉的是 18.3.31,
+         * 它要求显式声明)⇒ 写成 `<CommitWarning>…</CommitWarning>` 会多出 TS2322/TS2769。
+         * `createElement` 的 children 走第三个**可变参数**重载 ⇒ 类型成立,
+         * 产出的 DOM 与 JSX **逐字相同**;本文件对 `check-types` 棘轮因此是 **±0**。
+         *
+         * 中文不需要上游那两处 `{' '}`(同 `hidden-changes-warning.tsx` 的处置)。
+         */
+        createElement(LinkButton, { onClick: stopAmending }, '停止修改'),
+        '以新建一个提交。',
       )}
 
       {/*
@@ -2268,8 +4177,9 @@ function CommitBox(props: {
       )}
       {/*
         **生成失败**的弹窗(用户 2026-10-07:「如果出现生成错误,错误通知里缺失具体信息」)。
-        改前这条失败走 `store.fail()` —— 对 `code === 'internal'` **不附 `detail`**、
-        而且只是一条 7 秒的 toast;现在失败原样进快照(`store.generateFailure`),
+        改前这条失败走 `store.fail()` —— 那时它对 `code === 'internal'` **不附 `detail`**
+        (2026-10 已修:`fail()` 现在对任何码都附 `（detail）` + `错误码:<code>`),
+        而且只是一条 7 秒的 toast、还不换掉正文;现在失败原样进快照(`store.generateFailure`),
         由 `bits.tsx` 的 `GenerateFailureDialog` 逐字播 `message` + 可滚可选的
         `<pre>{detail}</pre>` + `错误码:<code>`(与推送失败那条已经落地的模式同形,
         见 `docs/push-failure-surfaces.md` §10)。
@@ -2291,15 +4201,277 @@ function CommitBox(props: {
 }
 
 /**
+ * `AppFileStatus`(`models/status.ts:20-30` 的判别联合)→ `DesktopDiff` 要的**状态字母**。
+ *
+ * 为什么需要它:`stash/show` 回来的是 `AppFileStatus`(为选图标设计的判别联合),
+ * 而 `DesktopDiff.input.status` 收的是 porcelain 字母(`core/types.ts` 的 `ChangeStatus`)。
+ * 这一份映射只服务 stash 面板;**不**复用 `history-view.tsx` 的 `toChangeStatus`
+ * (那个函数的输入是 `git log --name-status` 的字母,方向相反 —— 反向映射不是同一件事)。
+ * @param status - 镜像模型里的文件状态。
+ */
+function stashStatusLetterOf(status: AppFileStatus): ChangeStatus {
+  switch (status.kind) {
+    case AppFileStatusKind.New:
+      return 'A';
+    case AppFileStatusKind.Deleted:
+      return 'D';
+    case AppFileStatusKind.Renamed:
+      return 'R';
+    case AppFileStatusKind.Copied:
+      return 'C';
+    case AppFileStatusKind.Untracked:
+      return '?';
+    case AppFileStatusKind.Conflicted:
+      return 'U';
+    case AppFileStatusKind.Modified:
+    default:
+      return 'M';
+  }
+}
+
+/** 重命名 / 复制的**旧路径**(判别联合上只有那两支有 `oldPath`)。 */
+function stashOldPathOf(status: AppFileStatus): string | undefined {
+  return status.kind === AppFileStatusKind.Renamed || status.kind === AppFileStatusKind.Copied
+    ? status.oldPath
+    : undefined;
+}
+
+/**
+ * **左下角的「贮藏的改动」开关** —— 上游 `renderStashedChanges()`
+ * (`ui/changes/filter-changes-list.tsx:1105-1130`)。
+ *
+ * 上游逐条:`stashEntry === null` ⇒ `return null`(`:1106-1108`);
+ * 按钮带 `aria-expanded={isShowingStashEntry}` 与
+ * `aria-controls={isShowingStashEntry ? StashDiffViewerId : undefined}`(`:1120-1124`);
+ * 类名 `stashed-changes-button` + 选中态 `selected`(`:1112-1115`);
+ * 内容 = 图标(`stack-icon`)+ `Stashed Changes` + 右箭头(`:1125-1127`)。
+ */
+function StashedChangesButton(props: {
+  stashEntry: IStashEntry | null;
+  showing: boolean;
+  onToggle: () => void;
+}): ReactNode {
+  const { stashEntry, showing, onToggle } = props;
+  if (stashEntry === null) {
+    return null;
+  }
+  return (
+    <button
+      className={`gw-stash-button${showing ? ' selected' : ''}`}
+      data-gw-stash-button={showing ? 'selected' : 'idle'}
+      onClick={onToggle}
+      aria-expanded={showing}
+      aria-controls={showing ? 'stash-diff-viewer' : undefined}
+    >
+      <Icon name="stash" size={14} className="stack-icon" />
+      <span className="text">贮藏的改动</span>
+      <Icon name="chevron-right" size={12} />
+    </button>
+  );
+}
+
+/**
+ * stash 文件列表里的一行 —— 上游 `ui/history/file-list.tsx` 的行
+ * (它渲染的是 `CommittedFileChange`,stash 视图与 History 共用同一个 `FileList`)。
+ *
+ * 这里只画 **状态字母 + 路径**:上游那一行还有文件图标与虚拟滚动,而我们这一版
+ * 面板是手写的(见 `StashDiffViewer` 的文件头「与上游的差异」)。
+ * 行本身是 `<button role="option">`,与左栏 `.gw-files` 的 roving tabindex 同形。
+ */
+function StashFileRow(props: {
+  file: { path: string; status: AppFileStatus };
+  selected: boolean;
+  onSelect: (path: string) => void;
+}): ReactNode {
+  const { file, selected, onSelect } = props;
+  const onClick = useCallback(() => { onSelect(file.path); }, [onSelect, file.path]);
+  return (
+    <button
+      type="button"
+      role="option"
+      aria-selected={selected}
+      className={`gw-stash-file${selected ? ' selected' : ''}`}
+      data-gw-stash-file={file.path}
+      onClick={onClick}
+    >
+      <span className="gw-stash-letter">{stashStatusLetterOf(file.status)}</span>
+      <span className="gw-stash-path">{file.path}</span>
+    </button>
+  );
+}
+
+/**
+ * **stash 的只读视图** —— 上游 `ui/stashing/stash-diff-viewer.tsx`(160 行)
+ * + `ui/stashing/stash-diff-header.tsx`(115 行)的**判定移植**。
+ *
+ * ## 抄了什么(逐条给上游行号)
+ *
+ *  - 容器 `<section id="stash-diff-viewer">`(`stash-diff-viewer.tsx:127`);
+ *  - 头部 = `<h3>Stashed changes</h3>` + `Restore` / `Discard` 两颗按钮 +
+ *    一句解释(「**Restore** will move your stashed files to the Changes list.」)
+ *    (`stash-diff-header.tsx:47-67`);
+ *  - 两颗按钮在**任一颗在飞**时都禁用(`:52-58` 的 `isRestoring || isDiscarding`);
+ *  - `Discard` 的判定:`askForConfirmationOnDiscardStash` ⇒ 交给页面弹
+ *    `ConfirmDiscardStash`,否则直接丢(`:79-103`)。我们那一侧默认走确认框,见
+ *    `onDiscardStashClick`;
+ *  - 文件清单取自 `stashEntry.files`,**只在 `Loaded` 时**有内容
+ *    (`getFiles()`,`:88-92`);选中文件变了就按 `commit: stashSha` 取 diff
+ *    —— 与 History 的 `CommitDiff`(`history-view.tsx:1080-1097`)走**同一条**
+ *    `api.diff` 链,没有第二条取 diff 的路。
+ *
+ * ## 与上游的**诚实差异**(不在 UI 里假装)
+ *
+ * | 项 | 上游 | 我们 |
+ * |---|---|---|
+ * | 文件列表 | `ui/history/file-list.tsx`(虚拟滚动 + 图标) | 手写的行(状态字母 + 路径),无虚拟滚动 |
+ * | 文件列表宽度可拖 | `Resizable` + `stashedFilesWidth` 偏好 | 固定宽度(没有那个偏好项) |
+ * | 缩进/几何 | `_stash-diff-viewer.scss` 一族 | 未接(jsdom 无布局引擎 ⇒ 本探针不判几何) |
+ * | 「Do not show this message again」 | `confirm-discard-stash.tsx:60-72` 的复选框 + 偏好写侧 | **没有写侧** ⇒ 恒走确认框(照上游默认值 `true`) |
+ */
+function StashDiffViewer(props: {
+  store: GitStore;
+  stashEntry: IStashEntry;
+  onDiscardClick: () => void;
+}): ReactNode {
+  const { store, stashEntry, onDiscardClick } = props;
+  const files = stashEntry.files.kind === StashedChangesLoadStates.Loaded ? stashEntry.files.files : [];
+  const [selectedPath, setSelectedPath] = useState('');
+  const [diff, setDiff] = useState<DiffResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  /** 当前选中项:名字命中就用命中项,否则回落到第一项(上游 `_selectStashedFile` 的回落)。 */
+  const selectedFile = files.find((file) => file.path === selectedPath) ?? files[0] ?? null;
+  const selectedPathResolved = selectedFile?.path ?? '';
+
+  /*
+   * 取 diff:与 History 的 `CommitDiff` 同一条 `api.diff({path, file, commit})`。
+   * `dead` 守卫防的是「快速切换文件时后一个响应被前一个覆盖」(`history-view.tsx:1086-1096`
+   * 的同一套写法)。
+   */
+  useEffect(() => {
+    if (selectedFile === null) {
+      setDiff(null);
+      return;
+    }
+    let dead = false;
+    void api.diff({
+      path: store.snapshot().current,
+      file: selectedFile.path,
+      commit: stashEntry.stashSha,
+    }).then((result) => {
+      if (dead) { return; }
+      setDiff(result.ok ? result.value : null);
+    });
+    return () => { dead = true; };
+  }, [selectedFile, stashEntry.stashSha, store]);
+
+  const onSelectFile = useCallback((path: string) => { setSelectedPath(path); }, []);
+  const onOpenBinary = useCallback((fullPath: string): void => {
+    void store.openInExternalEditor(fullPath);
+  }, [store]);
+  const onHideWhitespace = useCallback((): void => { /* stash diff 不带 -w 开关(上游 StashDiffViewer 恒传 hideWhitespaceInDiff={false},`:110`) */ }, []);
+  /**
+   * **「恢复」成功之后这个组件会被卸载**(`stashEntry` 变 `null` ⇒ 右栏换回 Changes),
+   * 而 `popStash()` 的 `finally` 还要 `setBusy(false)` —— 那就是一条
+   * 「在已卸载组件上 setState」的 React 警告(`console.error`),
+   * 也正是本仓探针的 Z 组（零 `console.error`）会抓的东西。
+   *
+   * ⚠️ 这条**不是**上游的写法:上游的 `StashDiffHeader` 是**类组件**,`finally` 里的
+   * `this.setState` 在 React 17 的类组件上**不会**报这条警告(那套警告只针对函数组件的
+   * hook 更新)。我们用了 hook ⇒ 必须自己拿一个 ref 挡住。
+   * 判据:`docs/probes/stash-probe.mjs` 的 D6 会在**真点击**之后读 `console.error`。
+   */
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+  const onRestore = useCallback(() => {
+    setBusy(true);
+    void store.popStash().finally(() => { if (aliveRef.current) { setBusy(false); } });
+  }, [store]);
+  const onDiscard = useCallback(() => { onDiscardClick(); }, [onDiscardClick]);
+
+  return (
+    <section className="gw-stash-view" id="stash-diff-viewer" data-gw-stash-view={stashEntry.stashSha}>
+      <div className="header">
+        <h3>贮藏的改动</h3>
+        <div className="row">
+          <button
+            type="button"
+            className="gw-btn primary"
+            data-gw-stash-action="restore"
+            disabled={busy}
+            onClick={onRestore}
+          >恢复</button>
+          <button
+            type="button"
+            className="gw-btn"
+            data-gw-stash-action="discard"
+            disabled={busy}
+            onClick={onDiscard}
+          >丢弃</button>
+          {/*
+            上游这里的类名是 `.explanatory-text`(它住在
+            `styles/ui/_stash-diff-viewer.scss:35`),但那是**上游 partial 里的名字**:
+            我们没 import 那份 partial(理由写在 `styles.ts` 的 `.gw-stash-*` 段),
+            用了它就会进 `check-base-recipes` 的「outside 有、inside 没有」清单
+            —— 实测那一版把该闸门从 23 顶到 **24**。所以用我们自己的 `.gw-stash-hint`。
+          */}
+          <span className="gw-stash-hint">「恢复」会把贮藏的文件放回变更列表。</span>
+        </div>
+      </div>
+      <div className="gw-stash-body">
+        <div className="gw-files" role="listbox" aria-label="贮藏的文件">
+          {files.length === 0 && (
+            <Empty icon="check-circle" title="这条贮藏没有文件" body="它的提交里没有任何改动。" />
+          )}
+          {files.map((file) => (
+            <StashFileRow
+              key={file.path}
+              file={file}
+              selected={file.path === selectedPathResolved}
+              onSelect={onSelectFile}
+            />
+          ))}
+        </div>
+        <div className="gw-stash-diff">
+          {selectedFile === null || diff === null
+            ? <Empty icon="file" title="没有可显示的差异" body="选一个文件看它的改动。" />
+            : (
+              <DesktopDiff
+                input={{
+                  repositoryPath: store.snapshot().current,
+                  path: selectedFile.path,
+                  ...(stashOldPathOf(selectedFile.status) !== undefined
+                    ? { oldPath: stashOldPathOf(selectedFile.status) as string }
+                    : {}),
+                  patch: diff.patch,
+                  binary: diff.binary,
+                  status: stashStatusLetterOf(selectedFile.status),
+                  commitish: selectedFile.commitish,
+                  parentCommitish: selectedFile.parentCommitish,
+                }}
+                showSideBySideDiff={store.snapshot().sideBySide}
+                hideWhitespaceInDiff={false}
+                onHideWhitespaceInDiffChanged={onHideWhitespace}
+                onOpenBinaryFile={onOpenBinary}
+              />
+            )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/**
  * 空态建议卡的**稳定标识**(探针按它断言在场/缺席,渲染成 `data-gw-suggested`)。
  *
  * 取值与上游 `ui/changes/no-changes.tsx` 的分支一一对应:
- * `publish-repo`(`:453`)`publish-branch`(`:491`)`pull`(`:540`)`push`(`:592`)
- * 四个主卡 + `open-editor`(`:305`)`reveal`(`:266`)`view-github`(`:280`)三个次卡。
+ * `view-stash`(`:398-448`,**优先级最高**)`publish-repo`(`:453`)`publish-branch`(`:491`)
+ * `pull`(`:540`)`push`(`:592`)五个主卡
+ * + `open-editor`(`:305`)`reveal`(`:266`)`view-github`(`:280`)三个次卡。
  * 上游没有这个键 —— 它的「哪张卡」是由 `renderActions()` 的调用链决定的;
  * 我们把它显式化,只为了让**判据**能点名一张卡。
  */
 type SuggestedKey =
+  | 'view-stash'
   | 'publish-repo'
   | 'publish-branch'
   | 'pull'
@@ -2346,12 +4518,24 @@ type SuggestedKey =
  * | 卡的按钮怎么生效 | 执行应用菜单项(`executeMenuItemById`) | 直接调 `store.*` 的真动作(`runSyncAction` / `openInExternalEditor` / `revealInFileManager` / `window.open`) |
  * | 每张卡的「菜单/快捷键」提示行 | `renderDiscoverabilityElements()`(`:220-229`)从菜单项取「File menu or ⇧⌘P」 | **没有应用菜单、也没有快捷键**,所以只有主组那三张卡给出**真实的**替代入口(顶栏同步段);次组三张卡**不给提示行** —— 编一条不存在的菜单路径就是撒谎 |
  * | 「Create a Pull Request」卡 | `:386-393`(要 `currentPullRequest` + `defaultBranch`) | **诚实缺席**(快照里没有这两样数据) |
- * | 「View your stashed changes」卡 | `:398-448` | **诚实缺席**(没有 stash UI,与顶栏同一条已登记取舍) |
- * | 推送条件的 `tagsToPush` 一半 | `:379-384` | **缺席**(宿主没有「未推送的标签」路由;不用 `tagCount` 冒充) |
+ * | 「View your stashed changes」卡 | `:398-448`(最高优先,`:742` 的 `\|\|`) | **2026-10 落地**:`primary = 'view-stash'` 走同一条短路,按钮真的打开 stash 面板(数据源 `store.stashEntry`,stash 族路由已建) |
+ * | 推送条件的 `tagsToPush` 一半 | `:379-384` | **在场**(`snap.tagsToPush` ⬅ 宿主 `tag-unpushed` 路由) |
  * | 编辑器清单 | `applications(path)` 读本机 `.app` | 宿主 `system/apps` 探测(`routes.ts:400`);**改选它的写侧今天 0 调用点**(`prefs.ts:162`) |
  * | 插图 `paper-stack.svg` | `:54` 的 `encodePathAsUrl` | 不渲染(我们没有该静态资源的浏览器侧分发;缺的是资产,不是逻辑) |
  */
-function NoChanges(props: { store: GitStore; snap: Snapshot }): ReactNode {
+function NoChanges(props: {
+  store: GitStore;
+  snap: Snapshot;
+  /**
+   * **看 stash** —— 主组 stash 卡那颗按钮的动作(上游 `View stash` ⇒
+   * `MenuBackedSuggestedAction` 执行 `toggle-stashed-changes` 菜单项)。
+   *
+   * 由 `ChangesView` 传进来(`onViewStash` 的 `useCallback`),因为它要改的是**页一级**的
+   * `showStashedChanges`(上游那个状态住在 `changesState.selection.kind`)。
+   * **不是**可选:漏传会让那张卡变成「点了没反应」—— 那正是本仓最贵的一类缺陷。
+   */
+  onViewStash: () => void;
+}): ReactNode {
   const { store, snap } = props;
   const repoPath = snap.current;
   const isMac = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform ?? '');
@@ -2407,10 +4591,31 @@ function NoChanges(props: { store: GitStore; snap: Snapshot }): ReactNode {
    * 「有没有标签可推」不是这张卡的**唯一**理由(有本地提交也一样给卡)。
    */
   const tagsToPush = snap.tagsToPush;
+  /**
+   * **当前分支的 stash 条目**(`store.ts` 的 `Snapshot.stashEntry`;上游
+   * `changesState.stashEntry`,`lib/app-state.ts:845-848`)。
+   *
+   * 它是主组**优先级最高**那一支的输入(`no-changes.tsx:742` 的
+   * `renderViewStashAction() || renderRemoteAction()`)。
+   */
+  const stashEntry = snap.stashEntry;
+  /** stash 是否**装载完成**(`Loaded`)—— 空态卡严格要这一档(`no-changes.tsx:408-410`)。 */
+  const stashLoaded = stashEntry !== null && stashEntry.files.kind === StashedChangesLoadStates.Loaded;
+  const stashFileCount = stashEntry !== null && stashEntry.files.kind === StashedChangesLoadStates.Loaded
+    ? stashEntry.files.files.length
+    : 0;
 
   /** 主组要渲染哪一支(上游那一串 `if` 的结果)。`null` = 上游也不渲染任何主卡。 */
   let primary: SuggestedKey | null = null;
-  if (tip.kind === TipState.Valid) {
+  /*
+   * **stash 卡优先级最高**(上游 `:742` 的 `||` 短路;`renderViewStashAction()` 自己
+   * 三条早退:`tip.kind !== TipState.Valid`(`:399-401`)、`stashEntry === null`(`:404-406`)、
+   * `files.kind !== Loaded`(`:408-410`))。所以它**不是** `else if` 链里的一支,
+   * 而是链**之前**的一次短路 —— 次序本身就是判据(有 stash 时**不**给远端卡)。
+   */
+  if (tip.kind === TipState.Valid && stashLoaded) {
+    primary = 'view-stash';
+  } else if (tip.kind === TipState.Valid) {
     // 上游 `:352-354`:`if (tip.kind !== TipState.Valid) return null`
     if (remotes.length === 0) {
       primary = 'publish-repo'; // 上游 `:356-358`
@@ -2478,9 +4683,33 @@ function NoChanges(props: { store: GitStore; snap: Snapshot }): ReactNode {
     </div>
   );
 
-  /** 主卡:上游 `renderRemoteAction()` 的五个可达分支 + 三个「无主卡」分支。 */
+  /** 主卡:上游 `renderViewStashAction()` + `renderRemoteAction()` 的五个分支 + 三个「无主卡」分支。 */
   const primaryCard = (): ReactNode => {
     switch (primary) {
+      /*
+       * **「查看你贮藏的改动」** —— 上游 `renderViewStashAction()`
+       * (`no-changes.tsx:398-448`),`renderActions()` 里**第一优先**的那一支
+       * (`:742`)。逐条对照:
+       *   · 标题 `View your stashed changes`(`:437`);
+       *   · 描述 `You have {N} {N === 1 ? 'change' : 'changes'} in progress that you have
+       *     not yet committed.`(`:412-420`)—— N 是 `stashEntry.files.files.length`;
+       *   · 按钮 `View stash`(`:443`),`type="primary"`(`:444`);
+       *   · 提示行 `When a stash exists, access it at the bottom of the Changes tab to
+       *     the left.`(`:422-427`)—— 我们那颗按钮**真的**在左下角
+       *     (`StashedChangesButton`),所以这句话在我们这里也是**真话**。
+       *
+       * 上游按钮是个 `MenuBackedSuggestedAction`(`menuItemId='toggle-stashed-changes'`),
+       * 点下去执行应用菜单项;我们**没有应用菜单**,于是接**同一个动作的落点**
+       * (`Dispatcher.selectStashedFile` ⇒ 显示 stash 视图)—— 与其它卡「直接调真动作」
+       * 同一取舍,写在 `NoChanges` 的头注释里。
+       */
+      case 'view-stash':
+        return action('view-stash',
+          '查看你贮藏的改动',
+          '查看贮藏',
+          props.onViewStash,
+          `你有 ${formatNumber(stashFileCount)} 个改动尚未提交。`,
+          '有贮藏时,可以在 Changes 页签左下角随时访问它。');
       case 'publish-repo':
         return action('publish-repo',
           '把这个仓库发布到 GitHub',
@@ -2552,6 +4781,14 @@ function NoChanges(props: { store: GitStore; snap: Snapshot }): ReactNode {
         gitHubRepo,
         /* 未推送的标签**身份清单**(不是个数):推送卡的另一半条件就是它。 */
         tagsToPush,
+        /*
+         * stash 的判定输入(`loaded` 是那个三态状态机、`count` 是描述里的 N、
+         * `sha` 用来证明「这张卡说的是哪一条 stash」)。与 `primary` 一起读,
+         * 就能判「输入 / 判定 / DOM」三者是否一致。
+         */
+        stash: stashEntry === null
+          ? null
+          : { sha: stashEntry.stashSha, branchName: stashEntry.branchName, kind: stashEntry.files.kind, count: stashFileCount },
         primary,
       })} />
       <div className="content">

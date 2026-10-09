@@ -88,6 +88,29 @@ const SYMBOLS: Record<string, OcticonSymbol> = {
   'x-circle': octicons.xCircle,
   'check-circle': octicons.checkCircle,
   'dot-fill': octicons.dotFill,
+  /*
+   * **stash 的图标** —— 上游把它**内联**在 `ui/changes/filter-changes-list.tsx:86-98`
+   * 的 `const StashIcon: OcticonSymbolVariant`(不在 `octicons.generated.ts` 里),
+   * 只被 `renderStashedChanges()` 那一颗按钮用(`:1125` 的
+   * `<Octicon className="stack-icon" symbol={StashIcon} />`)。
+   * 这里把那个字面量**逐字搬过来**(路径字符串一个字没改),
+   * 因为「按名字查表」是本文件唯一的取图标方式 —— 不搬就只剩
+   * `SYMBOLS[name] ?? dot-fill` 的静默兜底(那会画出一个**错的**图标,而且不报错)。
+   */
+  stash: {
+    w: 16,
+    h: 16,
+    p: [
+      'M10.5 1.286h-9a.214.214 0 0 0-.214.214v9a.214.214 0 0 0 .214.214h9a.214.214 0 0 0 '
+        + '.214-.214v-9a.214.214 0 0 0-.214-.214zM1.5 0h9A1.5 1.5 0 0 1 12 1.5v9a1.5 1.5 0 0 1-1.5 '
+        + '1.5h-9A1.5 1.5 0 0 1 0 10.5v-9A1.5 1.5 0 0 1 1.5 0zm5.712 7.212a1.714 1.714 0 1 '
+        + '1-2.424-2.424 1.714 1.714 0 0 1 2.424 2.424zM2.015 12.71c.102.729.728 1.29 1.485 '
+        + '1.29h9a1.5 1.5 0 0 0 1.5-1.5v-9a1.5 1.5 0 0 0-1.29-1.485v1.442a.216.216 0 0 1 '
+        + '.004.043v9a.214.214 0 0 1-.214.214h-9a.216.216 0 0 1-.043-.004H2.015zm2 2c.102.729.728 '
+        + '1.29 1.485 1.29h9a1.5 1.5 0 0 0 1.5-1.5v-9a1.5 1.5 0 0 0-1.29-1.485v1.442a.216.216 0 0 1 '
+        + '.004.043v9a.214.214 0 0 1-.214.214h-9a.216.216 0 0 1-.043-.004H4.015z',
+    ],
+  },
 };
 
 export type IconName = keyof typeof SYMBOLS | string;

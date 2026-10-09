@@ -100,6 +100,8 @@ import type { AppFileStatus } from '../core/desktop/models/status.ts';
 import type { Emoji } from '../core/desktop/lib/emoji.ts';
 import type { IChangesetData } from '../core/desktop/lib/git/index.ts';
 import { CommitList } from '../core/desktop/ui/history/commit-list.tsx';
+import { getSquashedCommitDescription } from '../core/desktop/lib/squash/squashed-commit-description.ts';
+import { SquashDialog } from './squash-dialog.tsx';
 import { ExpandableCommitSummary } from '../core/desktop/ui/history/expandable-commit-summary.tsx';
 import { FileList } from '../core/desktop/ui/history/file-list.tsx';
 import { DiffHeader } from '../core/desktop/ui/diff/diff-header.tsx';
@@ -206,9 +208,9 @@ async function treeFilesFor(root: string): Promise<Set<string> | null> {
 const accessCache = new Map<string, { exists: boolean; at: number }>();
 const ACCESS_TTL_MS = 30_000;
 
-/** 造一个 `ENOENT`,与 node 的 `fs.promises.access` 同名同 `code`。 */
-function enoent(path: string): Error & { code: string } {
-  const error = new Error(`ENOENT: no such file or directory, access '${path}'`) as Error & {
+/** 造一个 `ENOENT`,与 node 的 `fs.promises.access` / `fs.promises.stat` 同名同 `code`。 */
+function enoent(path: string, op: 'access' | 'stat' = 'access'): Error & { code: string } {
+  const error = new Error(`ENOENT: no such file or directory, ${op} '${path}'`) as Error & {
     code: string;
   };
   error.code = 'ENOENT';
@@ -277,6 +279,43 @@ function installHostFileHooks(): void {
       const result = await api.fileText(split.root, split.relative);
       accessCache.set(key, { exists: result.ok, at: now });
       if (!result.ok) throw enoent(absolutePath);
+    },
+    /**
+     * 上游 `fs/promises` 的 `stat` —— 走宿主 `file-size` 路由(**一个内容字节都不读**)。
+     *
+     * ## 谁在调它
+     *
+     * **逐字镜像**的上游 `lib/large-files.ts`(`src/core/desktop/lib/large-files.ts`):
+     * `stat(join(repository.path, file.path)).size > 100 MiB` ⇒ 超大文件告警
+     * (上游 `ui/changes/sidebar.tsx:159-183`)。这条通道此前**故意抛 ENOENT**
+     * (见 `src/client/shim-node-fs-promises.ts` 的 `stat` JSDoc:「宿主侧一旦提供
+     * `stat` 即可无改动接上」)—— 现在宿主真的提供了(`GitService.fileSize`)。
+     *
+     * ## 为什么复用 `splitRepoPath`(而不是让路由收绝对路径)
+     *
+     * 与 `access` 同一条守卫:绝对路径先在这里被拆成「**已登记**仓库根 + 相对路径」,
+     * 拆不出来一律 `ENOENT`(不猜仓库、也不把绝对路径交给宿主);宿主的
+     * `assertRepoRelativePath` 是第二道路径穿越闸(`..` / 绝对路径 / `.git/`)。
+     *
+     * ## 边界(如实记)
+     *
+     * · 宿主缺这条路由(旧 host)⇒ `size` 拿不到 ⇒ 抛 ENOENT ⇒ 镜像
+     *   `getLargeFilePaths` 的逐文件 `catch` 会**静默吞掉**它(那是上游自己的
+     *   `catch (error) { log.debug(...) }`)。真正挡住这种情况的是启动时那条
+     *   「host 半是旧构建 … 请重启 DSH」的提示(`src/client/store.ts:1034-1039`
+     *   对着 `health.build`),不是这里;
+     * · 目录/缺失 ⇒ 宿主回 `size: null` ⇒ 这里抛 ENOENT(与 node `fs.stat` 对缺失
+     *   文件的行为一致;对**目录** node 会成功回 size,但我们只服务「变更文件列表」,
+     *   列表里不会有目录)。
+     */
+    stat: async (absolutePath) => {
+      const split = await splitRepoPath(absolutePath);
+      if (split === null) { throw enoent(absolutePath, 'stat'); }
+      const result = await api.fileSize(split.root, split.relative);
+      if (!result.ok) { throw enoent(absolutePath, 'stat'); }
+      const size = result.value.size;
+      if (size === null) { throw enoent(absolutePath, 'stat'); }
+      return { size };
     },
   });
 }
@@ -987,6 +1026,24 @@ export function HistoryView(props: { store: GitStore; snap: Snapshot }): ReactNo
   const [checkoutTarget, setCheckoutTarget] = useState<Commit | null>(null);
   /** 「Create Tag…」的名字输入框;`annotated` 那一档见对话框里的说明(不可用)。 */
   const [tagFor, setTagFor] = useState<{ sha: string; name: string } | null>(null);
+  /**
+   * **多提交操作 · squash** 的对话框状态(2026-10)。
+   *
+   * 这是上游 `ui/history/compare.tsx:667-728` 的 `onSquash` 在**插件这一层**的
+   * 落点:上游在那里 `dispatcher.showPopup({type: PopupType.CommitMessage, …})`,
+   * 而本插件没有应用层弹窗宿主 ⇒ 换成我们自有的 `SquashDialog`
+   * (容器是我们写的,判据/消息都来自镜像,见该文件的头注释)。
+   *
+   * 字段逐字来自上游那次调用:
+   *  - `toSquash`  = `toSquashSansSquashOnto`(`:673-675`,**不含** `squashOnto`);
+   *  - `squashOnto` = 右键点到的那一条(`commit-list.tsx:340`);
+   *  - `lastRetainedCommitRef` = `commit-list.tsx:318-327` 算出的 `<sha>^` / `null`。
+   */
+  const [squashTarget, setSquashTarget] = useState<{
+    toSquash: ReadonlyArray<Commit>;
+    squashOnto: Commit;
+    lastRetainedCommitRef: string | null;
+  } | null>(null);
 
   const repoPath = snap.current;
   const log = snap.log;
@@ -1435,6 +1492,82 @@ export function HistoryView(props: { store: GitStore; snap: Snapshot }): ReactNo
   }, [store]);
 
   /**
+   * 「Squash N Commits…」→ 打开我们自有的 squash 对话框。
+   *
+   * 上游:`ui/history/compare.tsx:667-728` 的 `onSquash`。逐条对照:
+   *  1. `toSquashSansSquashOnto = toSquash.filter(c => c.sha !== squashOnto.sha)`(`:673-675`);
+   *  2. `getSquashedCommitDescription(toSquashSansSquashOnto, squashOnto)`(`:680-683`)
+   *     —— **镜像那份 17 行函数**,不在我们这层重写;
+   *  3. `doMergeCommitsExistAfterCommit(repository, lastRetainedCommitRef)`(`:685-698`)
+   *     —— 上游在这个时候拦「区间里有合并提交」。它的实现在 `lib/git/rev-list.ts`
+   *     (`git rev-list --merges <ref>..HEAD` 一类),本插件**没有**那条路由 ⇒
+   *     **这一条我们今天不做**,如实记在 `docs/multi-commit-operation-adoption.md`:
+   *     缺它的后果是「区间里有合并提交时,用户会看到宿主回的失败/意外结果,而不是
+   *     上游那句提前拦下来的解释」。**不假装**做了一个空检查。
+   *  4. `dispatcher.recordSquashInvoked(isInvokedByContextMenu)`(`:700`)——遥测,
+   *     `lib/stats/**` 是 §1.3 排除面,不做(与全仓其它遥测同一处置)。
+   *  5. `dispatcher.showPopup({type: PopupType.CommitMessage, …})`(`:702-727`)
+   *     —— 换成我们的 `SquashDialog`(没有应用层弹窗宿主)。
+   */
+  const onSquash = useCallback(
+    (
+      toSquash: ReadonlyArray<Commit>,
+      squashOnto: Commit,
+      lastRetainedCommitRef: string | null,
+    ) => {
+      const toSquashSansSquashOnto = toSquash.filter((c) => c.sha !== squashOnto.sha);
+      if (toSquashSansSquashOnto.length === 0) {
+        /*
+         * 上游这里不会发生(菜单的 `enabled` 要求选区里除自己还有别的提交,
+         * `commit-list-item.tsx:87-95`),但真发生的话:**什么都不做**而不是
+         * 打开一个「压缩 1 个提交」的框 —— 那种框点下去只会把一条提交重写一遍。
+         */
+        store.toast('至少要选中两个提交才能压缩。', 'err');
+        return;
+      }
+      // 早算一次:镜像那份函数就是默认消息的真源(对话框里还会再算一次作初值)。
+      // 这里调用同时也是「它真的被用上」的静态可达证据(check-integration)。
+      void getSquashedCommitDescription(toSquashSansSquashOnto, squashOnto);
+      setSquashTarget({ toSquash: toSquashSansSquashOnto, squashOnto, lastRetainedCommitRef });
+    },
+    [store],
+  );
+
+  /**
+   * squash 跑完(或已确认停下)之后的收尾。
+   *
+   * 上游由 `dispatcher.processMultiCommitOperationRebaseResult` 接手(刷新 + 可能
+   * 提示强推);我们没有那套状态机 ⇒ 只做**刷新**,并把结果如实说给用户
+   * (尤其是 `ConflictsEncountered` 那一档:仓库此刻停在 rebase 中途。
+   * ⚠️ 2026-10-10 更正:本插件**已经有** `rebase/continue` 路由(Changes 页签的
+   * `ContinueRebase` 表单会用它);下面那句「去命令行收尾」的文案因此是**保守但不再唯一**
+   * 的出路 —— 它没有错(git 命令仍然有效),但不再是「没有别的办法」)。
+   */
+  const onSquashCompleted = useCallback(
+    (result: string) => {
+      setSquashTarget(null);
+      void store.refreshLog(true);
+      void store.refreshStatus();
+      if (result === 'CompletedWithoutError') {
+        store.toast('已压缩;这个分支被重写过,推送需要强推。', 'ok');
+        return;
+      }
+      if (result === 'AlreadyUpToDate') {
+        store.toast('没有需要压缩的提交。', 'ok');
+        return;
+      }
+      store.toast(`压缩结束:${result}`, 'err');
+    },
+    [store],
+  );
+
+  /** 关掉 squash 对话框(取消 / Esc / 点遮罩)。上游是 `closePopup`,`PopupType` 那套我们没有。 */
+  const onSquashDismissed = useCallback(() => {
+    setSquashTarget(null);
+  }, []);
+
+
+  /**
    * 「Delete tag <name>」→ 直接删本地标签。
    *
    * ✅ **2026-10 该缺口已补**(Task 2):宿主路由 `tag-unpushed`(宿主侧跑上游那次
@@ -1600,21 +1733,33 @@ export function HistoryView(props: { store: GitStore; snap: Snapshot }): ReactNo
               onDeleteTag={onDeleteTag}
               onCherryPick={onCherryPick}
               /*
-               * ⭐ `isMultiCommitOperationInProgress` **必须显式传 `false`**(探针实测:
+               * ⭐ **多提交操作 · squash**(2026-10 本轮接线)。
+               *
+               * 传了它,`commit-list.tsx:878-889` 的 `canSquash()` 才可能为真
+               * (判据是三项合取:`onSquash !== undefined`、`disableSquashing === false`、
+               * `isMultiCommitOperationInProgress === false`),多选右键菜单里那一项
+               * `Squash N Commits…`(`:935-941`)才**从灰变亮**。
+               * 这就是 ledger §3.3 那条「多提交操作在本插件没有界面」的**第一处反转**:
+               * 界面今天有了(对话框 + 宿主路由),而它渲染的是**上游的判据**
+               * (`compare.tsx:667-728` 的流程 + 镜像的 `getSquashedCommitDescription`)。
+               */
+              onSquash={onSquash}
+              /*
+               * ⭐ `isMultiCommitOperationInProgress` **必须显式给**(探针实测:
                * 不传时它是 `undefined`,而 `canCherryPick()` 的判据逐字是
                * `isMultiCommitOperationInProgress === false`(`commit-list.tsx:867-872`)
                * —— `undefined === false` 是 **false** ⇒ **即使用 `onCherryPick` 传了,
                * 「Cherry-pick Commit…」仍然灰着**。这正是审计那一族缺陷的同一个形状:
                * 「props 传了、判据还有另一半没人给」。
                *
-               * 为什么可以确定它是 `false`:上游的语义是「正在做多提交操作
-               * (rebase / squash / reorder / cherry-pick 的冲突解决阶段)」,
-               * 而本插件**没有那套界面**(同一条依据见 `Reorder Commit` 那一段),
-               * 所以「没有多提交操作在进行」是**我们确实知道**的事实,不是猜的。
-               * 它同时是 `canReorder()` 的第三个合取项 —— 那个仍因 `onKeyboardReorder`
-               * 缺席而恒灰(`disableReordering === false` 也照上游默认给上)。
+               * **2026-10 本轮改了一处**:以前恒 `false`,现在跟着 `squashTarget` 走 ——
+               * 上游的语义是「正在做多提交操作(rebase / squash / reorder / cherry-pick
+               * 的冲突解决阶段)」,而我们的 squash 对话框打开期间**确实**处在操作中
+               * (它跑完会重写这个分支的历史)⇒ 那时让 cherry-pick/squash/reorder
+               * 三项一起灰掉是对的,反之则是在一个会重写历史的操作进行中假装可以开第二个。
+               * 未打开对话框时它仍是 `false`,所以既有探针(菜单项 `enabled`)一个字都不变。
                */
-              isMultiCommitOperationInProgress={false}
+              isMultiCommitOperationInProgress={squashTarget !== null}
               disableReordering={false}
               /*
                * ✅ `tagsToPush` **现在传真数据**(2026-10,Task 2 落地)。
@@ -1920,6 +2065,25 @@ export function HistoryView(props: { store: GitStore; snap: Snapshot }): ReactNo
             onChange: onTagNameChange,
           }}
           onDone={onTagDialogDone}
+        />
+      )}
+      {/*
+        * **多提交操作 · squash 的对话框**(2026-10 本轮接线)。
+        * 上游这一段是 `ui/app.tsx` 的弹窗分派 + `ui/multi-commit-operation/squash.tsx`
+         * (那个类需要整套 `lib/stores/app-store.ts` 状态机与 `IMultiCommitOperationState`,
+         * 本插件没有)⇒ 换成 `src/client/squash-dialog.tsx`。
+        * 判据与消息**不在**那个文件里重写:默认消息来自镜像的
+        * `getSquashedCommitDescription`,最终消息用镜像的 `formatCommitMessage`,
+        * 执行走宿主 `multi-commit/squash`(argv 逐字对着上游 `lib/git/rebase.ts:576-633`)。
+        */}
+      {squashTarget !== null && (
+        <SquashDialog
+          path={repoPath}
+          toSquash={squashTarget.toSquash}
+          squashOnto={squashTarget.squashOnto}
+          lastRetainedCommitRef={squashTarget.lastRetainedCommitRef}
+          onDismissed={onSquashDismissed}
+          onCompleted={onSquashCompleted}
         />
       )}
     </div>

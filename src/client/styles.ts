@@ -348,7 +348,9 @@ html[data-gw-toast-clamp] body > div[role="alert"]:has(> span > .gw-toast-mark){
    卡片本体复用 .gw-dialog / .gw-dialog-scrim(与 Clone / Preferences 同一套外壳),
    这里只补这个弹窗自己的排版:宽一点的卡片、竖向页签 + 内容盒、
    文本框与文本域。颜色一律宿主 --dsw-alias-* 令牌,不写死十六进制。 */
-.gw-dialog.gw-repo-settings{width:min(560px,100%);max-height:100%;display:flex;flex-direction:column;
+/* ⚠️ 宽 600 是上游的字面值(dialogs/_repository-settings.scss:2 的 #repository-settings{width:600px}),
+   与同族 Preferences 卡片(.gw-prefs-card)一致;在窄侧栏里由 100% 收窄。 */
+.gw-dialog.gw-repo-settings{width:min(600px,100%);max-height:100%;display:flex;flex-direction:column;
   padding:0;overflow:hidden}
 .gw-dialog.gw-repo-settings > h4{margin:0;padding:12px 14px 10px;font-size:13px;
   border-bottom:1px solid var(--dsw-alias-border-l2)}
@@ -366,6 +368,11 @@ html[data-gw-toast-clamp] body > div[role="alert"]:has(> span > .gw-toast-mark){
 .gw-rs-container .tab-bar .tab-bar-item.selected{background:var(--dsw-alias-button-ghost-active-fill);
   color:var(--dsw-alias-label-primary)}
 .gw-rs-container .tab-bar .tab-bar-item .icon{flex:none}
+/* ⚠️ 图标与文案之间那一段空隙**必须在这里给**:TabBar 的每个子节点是**一个 <span>**
+   包住「图标 + 文案」两段(上游 repository-settings.tsx:186-197 同形),所以上面那条
+   .tab-bar-item 上的 gap 打不到 span **里面**的两段 —— 少这一条,页签就是
+   「远程」「Git 配置」图标与文字贴在一起的现场(用户 2026-10 报的「样式有问题」)。 */
+.gw-rs-container .tab-bar .tab-bar-item>span{display:inline-flex;align-items:center;gap:6px;min-width:0}
 .gw-rs-container > .tab-container{flex:1 1 auto;min-width:0;min-height:0;overflow-y:auto;display:flex;
   flex-direction:column}
 .gw-dialog.gw-repo-settings .dialog-content{padding:16px 18px;display:flex;flex-direction:column;gap:6px}
@@ -396,10 +403,45 @@ html[data-gw-toast-clamp] body > div[role="alert"]:has(> span > .gw-toast-mark){
   color:var(--dsw-alias-label-secondary)}
 .gw-rs-noremote p{margin:0}
 .gw-rs-error{margin:0}
-.gw-rs-form{margin-top:auto;display:contents}
 /* ⚠️ NoRemote 那颗「发布」用**既有的** .gw-btn.primary(styles.ts:144-145),
    刻意**不**在这里重定义它 —— 同名同特异性时后写的会赢,那会把全插件的
-   primary 按钮一起改掉(顶栏 / 别的弹窗都在用)。 */
+   primary 按钮一起改掉(顶栏 / 别的弹窗都在用)。
+   这里只给**尺寸/对齐**:上游 dialogs/_repository-settings.scss:8-16 的
+   .no-remote button{flex:none;min-width:120px;align-self:center} —— 不加它,
+   NoRemote 那一支是 flex 列 ⇒ 按钮会被拉到**整行宽**(实测 236px),而上游是一颗
+   120px 的按钮。 */
+.gw-rs-noremote .gw-btn{flex:none;align-self:center;min-width:120px}
+
+/* ---------- 仓库设置弹窗的页脚(上游 ui/_dialog.scss:295-311) ----------
+   ⚠️ **这一段不能省**。OkCancelButtonGroup 渲染的是上游 Button 原语
+   (lib/button.tsx:234 的 button-component),而那一族的样式表住在
+   scss/preferences.scss 里、前缀化后是 .gw-prefs .button-component ——
+   本弹窗的卡片**没有** .gw-prefs(它是 .gw-dialog.gw-repo-settings),
+   于是「保存 / 取消」拿不到任何配方:浏览器原生按钮、贴在卡片左下角、
+   没有内边距也没有上边框(用户 2026-10 报的「样式有问题」的现场)。
+   数值逐条取自上游 :295-311(padding = --spacing-double = 20,
+   border-top = --base-border = 1px solid --dsw-alias-border-l1,
+   按钮 min-width 120 + margin-right --spacing-half = 5),
+   按钮盒子的配方取自 ui/_button.scss(height --button-height = 25、
+   padding 0 --spacing、圆角 6,submit 用宿主的 primary 填充色)。 */
+.gw-rs-form{display:contents}
+.gw-dialog.gw-repo-settings .dialog-footer{flex:none;display:flex;flex-direction:column;
+  border-top:1px solid var(--dsw-alias-border-l1);padding:20px}
+.gw-dialog.gw-repo-settings .dialog-footer .button-group{display:flex;flex-direction:row;justify-content:flex-end}
+.gw-dialog.gw-repo-settings .dialog-footer button{appearance:none;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;margin-right:5px;min-width:120px;height:25px;padding:0 10px;font:inherit;
+  font-size:12px;cursor:pointer;color:var(--dsw-alias-label-primary);
+  background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);border-radius:6px}
+.gw-dialog.gw-repo-settings .dialog-footer button:last-child{margin-right:0}
+.gw-dialog.gw-repo-settings .dialog-footer button[type=submit]{background:var(--dsw-alias-button-primary-fill);
+  color:var(--dsw-alias-label-primary-foreground);border-color:var(--dsw-alias-button-primary-fill)}
+/* ⚠️ 禁用态读的是 aria-disabled(不是原生 disabled):上游 Button 只在
+   lib/button.tsx:251 写 aria-disabled,点击由 preventDefault 吃掉。 */
+.gw-dialog.gw-repo-settings .dialog-footer button:not([aria-disabled=true]):hover{
+  background:var(--dsw-alias-interactive-bg-hover)}
+.gw-dialog.gw-repo-settings .dialog-footer button[type=submit]:not([aria-disabled=true]):hover{
+  background:var(--dsw-alias-button-primary-hover);border-color:var(--dsw-alias-button-primary-hover)}
+.gw-dialog.gw-repo-settings .dialog-footer button[aria-disabled=true]{opacity:.6;cursor:default}
 
 /* ---------- 窄屏紧凑档(<600px):树变覆盖抽屉、头部换行 ---------- */
 .gw-codepane{position:relative}
@@ -488,6 +530,30 @@ html[data-gw-toast-clamp] body > div[role="alert"]:has(> span > .gw-toast-mark){
 .gw-split>.right{min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden}
 /* ---------- 文件列表 ---------- */
 .gw-files{flex:1;min-height:0;overflow:auto;padding:2px 0 6px}
+/* 镜像虚拟列表(ui/lib/list/section-list.tsx,由 changes-file-list.tsx 挂载)的高度契约。
+   上游那条规则是 .list{flex-grow:1;height:100%;min-width:0;overflow:hidden}
+   (styles/ui/_list.scss:1-13),而 _list.scss 不在 Changes 面的编译闭包里
+   (只在 .gw-desktop-history / .gw-repo-list 下,见审计 §1.4)。上游注释自己写明
+   「without it you'll see react-virtualized just skip rendering as the available
+   vertical space is computed as zero」(_file-list.scss:3-5)—— 实测:少了这两行,
+   真 Chrome 里 .list 高度 0,一行都不画(changes-discard-lines-probe 报 rows=0)。
+   刻意不去改 src/client/scss/desktop-changes.scss + scripts/styles.mjs(那两个文件的
+   所有者是样式那条线;PORT_SURFACES.requires 的登记要一起做),这里只给本面自己的
+   契约,作用域限定在 .gw-files-virtual(只有真的走虚拟路径时才挂这个类)。
+
+   ⚠️ 2026-10-08 更正(实测):虚拟路径今天挂的是 **Grid 本身**,不是镜像
+   SectionList,所以**根本没有 .list 这个元素** ——
+   changes-list-scroll-probe 的 S3 实测 「.gw-files.gw-files-virtual > .list」
+   命中 **0**,「> .ReactVirtualized__Grid」命中 **1**。原来那条只写 .list 的规则
+   因此是**空转**的(靠 Grid 的行内 width/height 撑着),本行把它补成**两个选择器都在**
+   (旧的那条不删:changes-file-list.tsx 的文件头记着将来可能换回镜像列表)。
+   同一行还**同时**把「量到的盒子 = 滚动盒子」这件事钉死:
+   .gw-files 那 8px 上下内边距会让 clientHeight(=自量给 Grid 的 height)比 Grid
+   真正拿到的 flex 内容盒大 8px(实测 138 vs 130)—— 虚拟路径下去掉它,
+   两者就严格相等,Grid 的可见窗口与它以为的一样大。 */
+.gw-files.gw-files-virtual{display:flex;flex-direction:column;overflow:hidden;padding:0}
+.gw-files.gw-files-virtual>.list,
+.gw-files.gw-files-virtual>.ReactVirtualized__Grid{flex:1;min-height:0;height:100%;min-width:0;overflow:hidden}
 .gw-grp{display:flex;align-items:center;gap:5px;padding:6px 8px 3px;font-size:11px;
   color:var(--dsw-alias-label-tertiary);letter-spacing:.02em;cursor:pointer;user-select:none}
 .gw-frow{display:flex;align-items:center;gap:6px;padding:4px 8px;cursor:pointer;font-size:12px;
@@ -506,7 +572,22 @@ html[data-gw-toast-clamp] body > div[role="alert"]:has(> span > .gw-toast-mark){
 .gw-st.D{color:var(--dsw-alias-state-error-primary)}
 .gw-st.R,.gw-st.C{color:var(--dsw-alias-label-secondary)}
 .gw-st.U,.gw-st\?{color:var(--dsw-alias-label-tertiary)}
-.gw-path{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;
+/*
+ * 路径文本**不许**用 direction:rtl。
+ *
+ * 这条 rtl 是从上游行号格那条配方抄来的(_side-by-side-diff.scss:368 的注释写着
+ * 「Workaround to show the ellipsis at the beginning of the line number when it's too long」)——
+ * 那里的内容**全是数字**,安全;而**路径**可以以中性字符开头或结尾(点 / 短横 / 斜杠),
+ * 在 RTL 段落里行首 / 行尾的中性字符会被解析成段落方向(RTL)⇒ 被画到视觉的另一端:
+ *   · .github/workflows/ci.yml 画成 github/workflows/ci.yml.(前导点跑到末尾;用户 2026-10 报的就是它)
+ *   · subdir/ 画成 /subdir(尾随斜杠跑到开头)
+ * 改成默认 LTR 之后字面次序与逻辑次序一致;代价是超长路径的省略号回到**右端**
+ * (文件名可能被截掉)。要做「省略号在左端且保文件名」得用上游的 PathText(它按测量做
+ * 中段截断),而采纳它需要给 Changes 面接上 availableWidth 来源 —— 那条记在
+ * docs/diff-view-gap-audit.md §4 第 4 条的跟进项里。
+ * 判据:docs/probes/changes-path-bidi-probe.mjs(真 Chrome 里量首/末字符画在哪)。
+ */
+.gw-path{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   text-align:left;font-family:var(--gw-mono);font-size:11px}
 .gw-num{flex:none;font-size:10px;font-family:var(--gw-mono);color:var(--dsw-alias-label-tertiary)}
 .gw-num .a{color:var(--dsw-alias-state-success-primary)}
@@ -743,6 +824,14 @@ html[data-gw-toast-clamp] body > div[role="alert"]:has(> span > .gw-toast-mark){
    _variables.scss(--spacing 10px / 正文 12px / 次要 11px / 行高 29px)。
    ============================================================================ */
 
+/* ---------- Squash 对话框(src/client/squash-dialog.tsx)----------
+   与 .gw-clone 同形(插件自有模态,卡片自己滚);文案与禁用逻辑在组件里,
+   这里只给布局 —— 不要在这里写任何判据。 */
+.gw-squash{width:min(560px,100%);max-height:calc(100% - 32px);display:flex;flex-direction:column}
+.gw-squash-body{overflow:auto;display:flex;flex-direction:column;gap:6px;min-height:0}
+.gw-squash-body textarea{resize:vertical;min-height:120px}
+.gw-squash-hint{margin:0;font-size:12px;color:var(--dsw-alias-state-warn-primary)}
+
 /* ---------- Clone a repository ---------- */
 .gw-clone{width:min(520px,100%);max-height:calc(100% - 32px);display:flex;flex-direction:column}
 .gw-clone-tabs{display:flex;gap:2px;border-bottom:1px solid var(--dsw-alias-border-l1);margin-bottom:8px}
@@ -948,23 +1037,42 @@ html[data-gw-toast-clamp] body > div[role="alert"]:has(> span > .gw-toast-mark){
 .gw-chead{flex:none;display:flex;flex-direction:column;padding:5px 10px;
   background:var(--dsw-alias-bg-layer-2);border-bottom:1px solid var(--dsw-alias-border-l1)}
 .gw-filter-box{display:flex;align-items:center;margin-bottom:5px;position:relative}
-.gw-filter-btn{display:inline-flex;align-items:center;gap:2px;height:25px;padding:0 8px;
+.gw-filter-btn{position:relative;display:inline-flex;align-items:center;gap:2px;height:25px;padding:0 8px;
   border-radius:6px 0 0 6px;border:1px solid var(--dsw-alias-border-l1);border-right:none;
   background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);
   font:inherit;font-size:12px;font-weight:600;cursor:pointer;flex:none}
 /* 激活的筛选按钮文字:这是「选中态的最强正文墨色」,宿主对应 --dsw-alias-label-primary
    (与 brand-primary 同值,但语义是正文墨而不是品牌色)。 */
 .gw-filter-btn.active{color:var(--dsw-alias-label-primary)}
+/* 「N 项筛选生效」的**可见小圆点** —— 上游 ui/changes/_changes-list.scss:116-131 的
+   .filter-button .active-badge 一族,数值逐条照抄(right:18px/top:4px、badge-bg
+   padding:1px + 50% 圆、badge 5×5 + 50% 圆)。
+   ⚠️ **必须在这里补一份**:上游那条配方的祖先链是
+   .changes-list-container.filtered-changes-list .header .filter-box-container .filter-button,
+   而我们渲染的是 .gw-chead > .gw-filter-box > .gw-filter-btn(两个类名都不同)
+   ⇒ 不补的话 DOM 在、圆点却是**零尺寸透明块**(「渲染了但看不见」,本仓记过的那一类)。
+   .gw-filter-btn{position:relative} 是这条 absolute 定位的包含块(上游 .filter-button
+   同样有 position:relative,见 _changes-list.scss:107)。 */
+.gw-filter-btn .active-badge{position:absolute;right:18px;top:4px}
+.gw-filter-btn .active-badge .badge-bg{padding:1px;border-radius:50%;
+  background-color:var(--secondary-button-background)}
+.gw-filter-btn .active-badge .badge-bg .badge{display:block;width:5px;height:5px;border-radius:50%;
+  background-color:var(--box-selected-active-background-color)}
 .gw-filter-input{flex:1;min-width:0;height:25px;padding:0 5px;font:inherit;font-size:12px;
   border-radius:0 6px 6px 0;border:1px solid var(--dsw-alias-border-l1);
   background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary)}
 .gw-filter-input:focus{outline:none;border-color:var(--dsw-alias-brand-primary)}
 .gw-checkall{display:flex;align-items:center;gap:7px;font-size:12px;flex-wrap:wrap}
 .gw-chead-warn{color:var(--dsw-alias-state-error-primary);font-size:11px}
-.gw-filter-pop{position:absolute;top:30px;left:0;z-index:40;min-width:240px;
-  max-width:calc(100% - 4px);padding:10px 10px 0;border-radius:6px;
-  border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);
-  box-shadow:0 8px 24px rgba(0,0,0,.28)}
+/* 筛选弹层 —— 2026-10-10 换**镜像 Popover** 之后,外壳(定位 / 圆角 / 边框 / 阴影 /
+   底色 / 字体)全部由 Popover 自己 + 本面已编译的
+   .gw-desktop-changes .popover-component 提供 ⇒ 这里只剩两条**上游自己的值**:
+   · min-width(上游 .filter-popover,_changes-list.scss:87;我们用既有的 240px);
+   · 内容区 padding(上游 .filter-popover .popover-content
+     {padding: var(--spacing) var(--spacing) 0},:88-92)—— 不写它会吃到
+     .popover-component .popover-content 的 var(--spacing-double)(=20px,四周)。 */
+.gw-filter-pop{min-width:240px;text-align:left}
+.gw-filter-pop .popover-content{padding:10px 10px 0}
 .gw-filter-pop-head{display:flex;justify-content:space-between;align-items:center}
 .gw-filter-pop-head h3{margin:0;font-size:12px;font-weight:600}
 .gw-filter-opts{margin:10px 0;display:flex;flex-direction:column;gap:4px}
@@ -1068,6 +1176,52 @@ html[data-gw-toast-clamp] body > div[role="alert"]:has(> span > .gw-toast-mark){
 .gw-diffopt-radios{display:flex;gap:14px}
 .gw-diffopt-hint{margin:6px 0 0;font-size:11px;line-height:1.5;
   color:var(--dsw-alias-label-tertiary)}
+
+/* ==========================================================================
+ * stash 面板(2026-10) —— 上游 styles/ui/_stash-diff-viewer.scss 的**结构值**,
+ * 但类名与令牌是我们自己的。
+ *
+ * 为什么不是把上游那份 partial import 进来:那一份的顶层选择器是
+ * #stash-diff-viewer,且内部全是 .header / .row / .text / .file-list 这类
+ * **通用名**,而我们的手写壳里这些名字与别处冲突(check-base-recipes 的
+ * 「outside 有、inside 没有」清单会当场报出来)。所以这里按同一批结构值
+ * (padding / margin / border / flex)写成 .gw-stash-*,颜色一律走 DSH 令牌
+ * (见 scss/_dsh-bridge.scss 那条契约)。
+ *
+ * 消费方:src/client/changes-view.tsx 的 StashedChangesButton / StashDiffViewer;
+ * 判据:docs/probes/stash-probe.mjs 的 D 组(那里不判几何 —— jsdom 没有布局引擎)。
+ *
+ * ⚠️ 本文件的第一条硬规矩:整份 CSS 是**一个**模板字面量,所以这段注释里
+ * **不许出现反引号**(scripts/check-template-literals.mjs + 交付契约要求整文件
+ * 恰好两个反引号)。上面这些名字因此都不带反引号,不是排版疏忽。
+ * ========================================================================== */
+.gw-stash-button{display:flex;align-items:center;gap:6px;width:100%;text-align:left;
+  appearance:none;border:none;border-top:1px solid var(--dsw-alias-border-l1);
+  background:none;color:inherit;font:inherit;padding:7px 10px;cursor:pointer}
+.gw-stash-button:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.gw-stash-button.selected{background:var(--dsw-alias-interactive-bg-hover);
+  color:var(--dsw-alias-label-primary);font-weight:600}
+.gw-stash-button .text{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gw-stash-view{display:flex;flex-direction:column;flex:1;min-height:0;min-width:0}
+.gw-stash-view>.header{display:flex;flex-direction:column;
+  border-bottom:1px solid var(--dsw-alias-border-l1);padding:14px 18px}
+.gw-stash-view>.header h3{margin:0 0 8px;font-size:15px;font-weight:400;line-height:1}
+.gw-stash-view>.header .row{display:flex;align-items:center;margin-top:8px}
+.gw-stash-view>.header .row .gw-btn{margin-right:8px}
+.gw-stash-hint{display:flex;align-items:center;flex-grow:1;margin-left:4px;
+  font-size:11px;color:var(--dsw-alias-label-secondary)}
+.gw-stash-body{display:flex;flex-direction:row;flex:1;min-height:0}
+.gw-stash-body>.gw-files{flex:none;width:34%;min-width:180px;overflow:auto;
+  border-right:1px solid var(--dsw-alias-border-l1)}
+.gw-stash-file{display:flex;align-items:center;gap:6px;width:100%;text-align:left;
+  appearance:none;border:none;background:none;color:inherit;font:inherit;
+  padding:5px 8px;cursor:pointer}
+.gw-stash-file:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.gw-stash-file.selected{background:var(--dsw-alias-bg-document-selection)}
+.gw-stash-letter{flex:none;width:14px;text-align:center;font-size:10px;font-weight:600;
+  color:var(--dsw-alias-label-tertiary)}
+.gw-stash-path{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gw-stash-diff{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column}
 `;
 
 /** 注入样式(幂等)。 */

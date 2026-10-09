@@ -39,6 +39,9 @@
  * @module dsh-git/client/shim-node-url
  */
 
+import { __dirname } from './desktop-globals'
+import { HIGHLIGHTER_WORKER_SOURCE } from './highlighter-worker.generated'
+
 /** 返回一个 URL 对象形状的最小替代(只需 `.toString()`)。 */
 class SimpleUrl {
   public constructor(private readonly value: string) {}
@@ -47,8 +50,77 @@ class SimpleUrl {
   }
 }
 
+/**
+ * **语法高亮 worker 的脚本 URL(2026-10,「语法高亮也要做」那一轮的接线点)。**
+ *
+ * ## 为什么偏离落在这里(而不是改 `worker.ts` / 加一条宿主路由)
+ *
+ * 上游 `lib/highlighter/worker.ts:7` 是
+ * `const workerUri = encodePathAsUrl(__dirname, 'highlighter.js')`,即
+ * `pathToFileURL(Path.resolve(__dirname, 'highlighter.js'))` —— **这一条链上唯一
+ * 同步、可拦截的 hook 就是本函数**。`worker.ts` 必须与上游**逐字一致**
+ * (它的 `EXPECTED` 偏离已在本轮退役),所以不能把 `highlighter.js` 换成一个
+ * "我们的加载器说明符";而宿主只服务**包内入口**(`lib/client.js`)与名字必须叫
+ * `client.<x>.js` 的**包内 chunk**(`/plugins/<id>/client.<x>.js?rev=<sha1>`,
+ * 见 `@deepseek-ai/dsh-client-modules/lib/index.js:918-940`)——后者的 rev 只有宿主
+ * 知道,`worker.ts` 又不可能去查 ⇒ 走宿主那条路就得**改宿主**(要重启 DSH),
+ * 而且探针没法在 `file://` 页面里复现"产品那条解析路径"。
+ *
+ * blob URL 两个代价都免了:**不需要宿主任何改动**,而且探针测的就是产品这条路径
+ * (真 `lib/path.ts` → 真本函数 → 真 `new Worker`)。
+ * worker 源码由 `scripts/highlighter-worker.mjs` 打成一个自足 IIFE、
+ * 内联在 `src/client/highlighter-worker.generated.ts`(它自己带完整理由与两个实测坑)。
+ *
+ * ## 精确到一处,不是"后缀匹配"
+ *
+ * 只认 `__dirname + '/highlighter.js'`(即上游那一处)这一个字面量。
+ * `encodePathAsUrl` 另外 6 个调用点(`ui/diff/index.tsx:38` 的 `NoDiffImage`、
+ * `ui/changes/no-changes.tsx:54` 等)仍然是**指向不存在的 URL**,那是已登记现象
+ * (`scripts/verify-mirror.mjs` 的 `ui/preferences/appearance.tsx` 条目与 goal 文档 §5),
+ * 本轮**不**扩范围。
+ *
+ * ## 能力边界(如实写明)
+ *
+ * jsdom **没有** `URL.createObjectURL`(实测:`typeof window.URL.createObjectURL === 'undefined'`),
+ * 也**没有** `Worker`。所以:
+ *  - 没有 `createObjectURL` 时这里退回**原串**(与改前逐字相同的行为)——
+ *    否则 jsdom 探针会在**模块求值期**就抛,整包加载失败(那是"探针瞎了",不是"产品坏了");
+ *  - 真浏览器(Chrome / Electron / DSH 页面)有它 ⇒ 走 blob 分支。
+ *    真 Chrome 里的读数见 `docs/probes/syntax-highlighting-probe.mjs`。
+ *
+ * ## 退役条件
+ *
+ * 出现**任意一条**即改回上游形态(`return new SimpleUrl(p)`)、并删掉
+ * `scripts/highlighter-worker.mjs` 与生成物、同时删掉 `scripts/build.mjs` 里的那一步:
+ *  ① 宿主开始提供"包内脚本的**免 rev** URL"(例如 `lib/highlighter.js` 这类静态资产路由);
+ *  ② 上游把 `worker.ts` 改成 `new Worker(new URL('./highlighter.js', import.meta.url))`
+ *     (或别的打包器原生 worker 语法)——那时直接与上游同步,本条偏离作废。
+ */
+const HIGHLIGHTER_WORKER_PATH = `${__dirname}/highlighter.js`
+
+/** 惰性创建的 blob URL(同一份源码只建一次;worker 本身仍然按需启动)。 */
+let highlighterWorkerUrl: string | null = null
+
+/**
+ * 上游那一处 `highlighter.js` 的脚本 URL。
+ * @param p - `Path.resolve(__dirname, 'highlighter.js')` 的结果。
+ * @returns blob URL;环境不支持 blob URL 时返回 `null`(调用方退回原串)。
+ */
+function highlighterWorkerScriptUrl(p: string): string | null {
+  if (p !== HIGHLIGHTER_WORKER_PATH) {
+    return null
+  }
+  if (typeof URL.createObjectURL !== 'function') {
+    return null
+  }
+  highlighterWorkerUrl ??= URL.createObjectURL(
+    new Blob([HIGHLIGHTER_WORKER_SOURCE], { type: 'text/javascript' })
+  )
+  return highlighterWorkerUrl
+}
+
 export function pathToFileURL(p: string) {
-  return new SimpleUrl(p) as unknown as URL
+  return new SimpleUrl(highlighterWorkerScriptUrl(p) ?? p) as unknown as URL
 }
 
 /**

@@ -42,10 +42,12 @@
  * 探针**传**它们 ⇒ 同一份 item 列表**当场变成可点**。这两条读数一起构成
  * 「禁用是能力缺口驱动的、不是写死的」的判据。
  *
+ * ⚠️ **2026-10 起只剩「加入 .gitignore」那 4 项是这一族** —— 见下表第二行后面那段。
+ *
  * | 上游动作 | 为什么禁用 | 缺什么 |
  * |---|---|---|
  * | `Ignore file / folder / N selected / all <ext> files (Add to .gitignore)` | 宿主没有写 `.gitignore` 的路由 | 一条 `gitignore/append` 路由 + `api` 包装。上游那个动作**不跑 git 子进程**,是纯文件读写:`references/desktop/app/src/lib/git/gitignore.ts:138-181`(读 `<repo>/.gitignore` → 转义 `/[[\]!*#?]/g` → 按 `core.autocrlf` 规整行尾 → 写回;符号链接要拒,`:16-45` 的 `O_NOFOLLOW` / `ELOOP`) |
- * | `Stash All Changes…` | 没有 stash 路由,是**已登记的刻意排除**(`docs/no-changes-suggestions-inventory.md` §2.1 第 6 项) | stash 族路由(整族 v1 排除) |
+ * | `Stash All Changes…` | ~~没有 stash 路由,是**已登记的刻意排除**~~ ⇒ **这条登记已于 2026-10 撤回并落地**:stash 族路由已建(`routes.ts` 的 `stash/list|push|pop|drop|show|move`),`ChangesView` 真的把 `stashAll` 传了下来 | ~~stash 族路由(整族 v1 排除)~~ ⇒ **不再缺**。撤回理由:goal 文档 §1.3 的**排除清单里没有 stash**,而 §1.2 E.8 / §10.10 把它列为**必须补**的路由(`docs/unported-master-ledger.md` §1.1.4 的更正) |
  *
  * 「Open with Default Program」**不在此列** —— 它走的是已有的 `system/open-in-app`,
  * 只是**不带 `app`**:宿主那一支的 argv 就是 `['open', path]`
@@ -82,11 +84,48 @@ import type { ChangedFile } from '../core/types.ts';
 export const GITIGNORE_ROUTE_AVAILABLE = true;
 
 /**
- * 宿主有没有 stash 路由。**今天是 `false`**,是**已登记的刻意排除**
- * (`docs/no-changes-suggestions-inventory.md` §2.1 第 6 项:「没有 stash UI /
- * 没有 stash 路由(已登记取舍,与顶栏同一条)」)。同上:判据读的是动作在不在。
+ * 宿主有没有 stash 路由。**2026-10 起是 `true`**。
+ *
+ * ## 改前的原文(**留痕,不是现状**)
+ *
+ * ```ts
+ * /**
+ *  * 宿主有没有 stash 路由。**今天是 `false`**,是**已登记的刻意排除**
+ *  * (`docs/no-changes-suggestions-inventory.md` §2.1 第 6 项:「没有 stash UI /
+ *  * 没有 stash 路由(已登记取舍,与顶栏同一条)」)。同上:判据读的是动作在不在。
+ *  *\/
+ * export const STASH_ROUTE_AVAILABLE = false;
+ * ```
+ *
+ * ## 为什么这条登记是错的(它的撤回是任务的一部分)
+ *
+ * 那两句引的是 `docs/no-changes-suggestions-inventory.md` **§2.1 第 6 项**,
+ * 而被引的那一项说的是**空态的 stash 卡**,不是「文件列表表头右键的
+ * `Stash All Changes…`」—— **引用对象错位**。更要紧的是它与 goal 文档自相矛盾:
+ *
+ *  · `docs/goal-port-desktop.md` §1.3 的**排除清单**里**没有 stash**
+ *    (`lib/stores/**`、`lib/stats`、`lib/ssh`、`lib/trampoline`、`lib/api.ts`、
+ *    `ui/dispatcher`、`main-process/**`、`ui/secret-scanning`、`ui/repository-settings`);
+ *  · §1.2 E.8 把 `stashed-changes-button` 列为「尚未迁移的 Changes 面」;
+ *  · §10.10 把 **stash 族**列为「**必须补**的 6 条宿主路由」之一;
+ *  · `docs/completion-audit.md` U10 记成「**没有**(整族)」。
+ *
+ * ⇒ 正确分类是 **partially ported(UI 骨架)+ needs host route(能力)**,
+ * **不是** deliberate exclusion(`docs/unported-master-ledger.md` §1.1.4 的更正)。
+ *
+ * ## 现状(与 `GITIGNORE_ROUTE_AVAILABLE` 同一种契约)
+ *
+ * 宿主那 6 条路由已建(`src/host/routes.ts` 的 `stash/list|push|pop|drop|show|move`,
+ * 真身 `src/host/git-service.ts` 的六个方法,argv 逐字来自上游 `lib/git/stash.ts`),
+ * 客户端包装在 `api.ts` 的 `stashList` / `stashPush` / `stashPop` / `stashDrop` /
+ * `stashShow` / `stashMove`,产品调用点是 `ChangesView` 的
+ * `menuActions.stashAll`(表头右键)。
+ *
+ * ⚠️ 它仍然只是**给人读的事实声明**:`changesListMenuItems` 的 `enabled` **不读它**,
+ * 读的是 `actions.stashAll !== undefined`。两者必须一致 —— 探针同时量
+ * 「不传动作 ⇒ 那一项禁用」与「传了动作 ⇒ 可用」,所以这条常量漂了会被抓住。
  */
-export const STASH_ROUTE_AVAILABLE = false;
+export const STASH_ROUTE_AVAILABLE = true;
 
 /**
  * `.gitignore` 的文件名(仓库根)。

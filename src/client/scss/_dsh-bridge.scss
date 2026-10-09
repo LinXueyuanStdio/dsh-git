@@ -130,6 +130,44 @@
   // `_variables.scss:503` 是 `$blue-000`(极浅的品牌蓝)。宿主没有等价的浅蓝底,取「比页面底亮一层」的语义层。
   --path-segment-background: var(--dsw-alias-bg-layer-3);
   --path-segment-padding: var(--spacing-third); /* `_variables.scss:505` 原样就是这个引用 */
+  //
+  // ---------- 2026-10-09:作者输入框(co-author)与自动补全两个 partial 需要的变量 ----------
+  //
+  // `src/client/scss/desktop-changes.scss` 新顶层 import 了 `ui/_author-input.scss` 与
+  // `ui/_autocompletion.scss`(理由见那个入口)。这两个 partial 一共引用下面 6 个变量,
+  // 而桥里原来**一个都没有** —— 不绑的后果不是「颜色不对」,而是**那一条声明整条按
+  // invalid-at-computed-value-time 丢掉**(与本节开头同一族失败模式)。
+  //
+  // 取值规则同本文件开头:**结构数值沿用上游,颜色一律绑 DSH 令牌**。
+  //
+  // `_variables.scss:217` / `themes/_dark.scss:178` 是 `$blue-000` / `$blue-800`:
+  // 「比页面底亮一层的品牌蓝」。宿主同一角色的层是 `state-business-tertiary`
+  // (浅 `deepseek-100` / 深 `deepseek-800`)。
+  --co-author-tag-background-color: var(--dsw-alias-state-business-tertiary);
+  // `_variables.scss:218` / `themes/_dark.scss:179` 是 `$blue-200` / `$blue-700`(边框)。
+  // 宿主**没有**「品牌蓝的次级」这一档 ⇒ 取蓝色强调令牌 `state-business-primary`
+  // (浅 `deepseek-500` / 深 `deepseek-400`)。比上游那条浅蓝边框更饱和,这是**宿主令牌缺口**,
+  // 如实记账;不要为此新造 `--dsw-*` 名字。
+  --co-author-tag-border-color: var(--dsw-alias-state-business-primary);
+  // ⚠️ 上游**从未定义**这个变量:全上游树只有 `ui/_author-input.scss:86` 一处**引用**,
+  // 没有任何声明(同 `--spacing-quarter` 那一类事故)。它标的是「已聚焦的 co-author 标签」
+  // 的边框,而那条规则的底色/文字已经换到宿主的选中层
+  // (`--box-selected-active-background-color` / `--box-selected-active-text-color`)
+  // ⇒ 边框取同族的蓝色强调令牌(与 `--focus-color` 同一个真源)。
+  --co-author-tag-selected-border-color: var(--dsw-alias-state-business-primary);
+  // `_variables.scss:466-468` / `themes/_dark.scss:365-367`:错误态三元组
+  // (底 `$red-100` / 边 `$red-200` / 字 `$red-800`)。
+  // 宿主**没有** `state-error-tertiary`(只有 primary / secondary 两档),所以:
+  //   · 底 → `interactive-bg-hover-danger`(浅 5% 红 / 深 15% 红)。宿主自己就用它当
+  //     **危险操作的底色**(`ui-primitives/Menu.module.css` 里就是
+  //     `background: var(--dsw-alias-interactive-bg-hover-danger)`),不是我们配的色;
+  //   · 边 → `state-error-secondary`(= `red-400`);
+  //   · 字 → `state-error-primary`(浅 `red-600` / 深 `red-400`)。
+  //     ⚠️ 深色下上游自己写的是 `var(--text-color)`(普通正文色);这里**故意**保持红字,
+  //     因为这一族表达的是「错误」而不是「正文」。这是一处**已登记的上游偏离**。
+  --form-error-background: var(--dsw-alias-interactive-bg-hover-danger);
+  --form-error-border-color: var(--dsw-alias-state-error-secondary);
+  --form-error-text-color: var(--dsw-alias-state-error-primary);
   // `_variables.scss:180` 是 `$white`(Sass 变量):「选中且激活」的强调色底上的文字色。
   //
   // ⚠️ 原来绑 `--dsw-alias-brand-primary-invert` —— 名字像「反色」,但在宿主里它与
@@ -277,19 +315,70 @@
   --diff-empty-row-gutter-background-color: var(--dsw-alias-bg-layer-2);
   --diff-empty-hunk-handle: var(--dsw-alias-border-l1);
 
-  // ---------- 语法高亮:替身 worker 不产出 token,先一律 inherit ----------
-  --syntax-variable-color: inherit;
-  --syntax-alt-variable-color: inherit;
-  --syntax-keyword-color: inherit;
-  --syntax-atom-color: inherit;
-  --syntax-string-color: inherit;
-  --syntax-comment-color: inherit;
-  --syntax-quote-color: inherit;
+  /*
+   * ---------- 语法高亮:worker 已接线(2026-10),这 13 条现在**必须**给出颜色 ----------
+   *
+   * 历史:这一整段原先是 `inherit`,理由写在注释里 ——「替身 worker 不产出 token」。
+   * 那个前提**已经不存在**了:上游 88 行 `lib/highlighter/worker.ts` 与 690 行模式表
+   * 已逐字搬进来并真的跑起来(`scripts/highlighter-worker.mjs`),`.cm-*` 类现在真的
+   * 落到 diff 行的 `<span>` 上。而 `inherit` 的后果是**所有 token 与正文同色** ——
+   * 类在、范围对,但**肉眼看不见高亮**。用户要的正是「看得见的高亮」,所以这一段必须绑值。
+   *
+   * 绑法沿用本文件的既有契约(**颜色一律绑 DSH 令牌**,见文件头):按**角色**取最近的
+   * DSH 别名令牌,而不是抄上游的十六进制 —— 宿主令牌随主题翻转,抄字面值会在另一主题下
+   * 变成「深底深字」。
+   *
+   * ⚠️ **已知的宿主调色板缺口(如实登记,不新造令牌名)**:
+   *  上游 light 有 **4 个**不同的冷色角色 —— variable `#6f42c1`(紫)、atom `#005cc5`(蓝)、
+   *  string/link `#032f62`(藏青)、header `#0000ff`(纯蓝);而 DSH 的别名表里
+   *  `--dsw-alias-state-business-primary` 与 `--dsw-alias-link` **逐字同值**
+   *  (`#4176e6` / 深色 `#7aaaff`),没有紫色、也没有第二个蓝。
+   *  ⇒ 紫/蓝/藏青三档在**本主题下必然同色**(下面 6 条共享 business)。这是**缺令牌**,
+   *  不是漏查;要拆开只能等宿主补调色板。
+   *
+   * 上游 13 条里的重复关系是**上游自己的**(light:`variable==qualifier==attribute`、
+   * `keyword==type`、`string==link`),所以下面这些共享不是我们引入的。
+   * 逐条依据:
+   */
+  // 上游 `_variables.scss:446` `#6f42c1`(紫)→ 宿主无紫,取最近的冷色角色。
+  --syntax-variable-color: var(--dsw-alias-state-business-primary);
+  // 上游 `:447` `#24292e` —— 语义是"普通标识符",就是正文色。
+  --syntax-alt-variable-color: var(--dsw-alias-label-primary);
+  // 上游 `:448` `#d73a49`(红)→ 宿主红。
+  --syntax-keyword-color: var(--dsw-alias-state-error-primary);
+  // 上游 `:449` `#005cc5`(蓝)→ 宿主蓝。
+  --syntax-atom-color: var(--dsw-alias-state-business-primary);
+  // 上游 `:450` `#032f62`(藏青);上游 light 里它与 `--syntax-link-color` **同值** ⇒ 同绑 link 角色。
+  --syntax-string-color: var(--dsw-alias-link);
+  // 上游 `:451` 与 `--syntax-variable-color` 同值(紫)。
+  --syntax-qualifier-color: var(--dsw-alias-state-business-primary);
+  // ⚠️ 上游 `ui/_diff.scss:675` 的 `.cm-m-javascript.cm-type` 用的是
+  // `--syntax-variable-color`(JS 里 `number` 这类 token 走的就是它)——
+  // 所以这一条同时决定「TypeScript 里的 `number` 是什么色」。
+  // 上游 `:452` 与 `--syntax-keyword-color` 同值(红)。
+  --syntax-type-color: var(--dsw-alias-state-error-primary);
+  // 上游 `:453` `$gray-500`(灰)。
+  --syntax-comment-color: var(--dsw-alias-label-tertiary);
+  // 上游 `:454` `#22863a`(绿)。
+  --syntax-tag-color: var(--dsw-alias-state-success-primary);
+  // 上游 `:455` 与 `--syntax-variable-color` 同值(紫)。
+  --syntax-attribute-color: var(--dsw-alias-state-business-primary);
+  // 上游 `:456` `#032f62`;同名角色,宿主有 `link`。
+  --syntax-link-color: var(--dsw-alias-link);
+  /*
+   * 上游 `:457` 是 `#0000ff`(纯蓝)、深色主题是 `red-300`。宿主只有一个蓝(business),
+   * 再绑它会让 header 与 variable/atom/string 全同色 ⇒ 取**暖色** `warn`(上游深色那一档
+   * 也是暖色),在浅色下是一处**有意偏离**(纯蓝 → 琥珀),理由:保持 5 类可见区分度。
+   */
+  --syntax-header-color: var(--dsw-alias-state-warn-primary);
+  // 上游 `:458` `#1a7e31`(深绿);上游 tag 已经用了绿,两条同族(上游本身也都在绿族)。
+  --syntax-quote-color: var(--dsw-alias-state-success-primary);
+  /*
+   * ⚠️ **这一条没有消费方,保留只为与上游 `_variables.scss` 的清单对齐**:
+   * 上游 `ui/_diff.scss:678-680` 是 `.cm-number { color: inherit }` ——
+   * number 在 Desktop 里**刻意不换色**。`grep -o 'var(--syntax-[a-z-]*)'` 在本仓产物里
+   * 命中 13 条,`--syntax-number-color` **一条都没有**。改它不会有任何视觉后果,
+   * 所以保持 `inherit`(不制造"改了就有用"的错觉)。
+   */
   --syntax-number-color: inherit;
-  --syntax-attribute-color: inherit;
-  --syntax-tag-color: inherit;
-  --syntax-type-color: inherit;
-  --syntax-link-color: inherit;
-  --syntax-header-color: inherit;
-  --syntax-qualifier-color: inherit;
 }

@@ -172,6 +172,27 @@ async function ghList<T>(path: string, opts: GhOpts = {}): Promise<{ data: T; ne
   return { data: r.json as T, nextUrl: parseLinkNext(r.link) };
 }
 
+/**
+ * **通用 REST 出口**(2026-10-07「抄优先」为适配层补的)。
+ *
+ * 为什么需要它:抄进来的 `lib/stores/commit-status-store.ts` 与
+ * `lib/ci-checks/ci-checks.ts` 通过上游的 `lib/api.ts`(`API` 类)取数,而上游那一层
+ * 走 `./http`(Electron `net` + token 池)—— 我们**不搬**那层。于是 `lib/api.ts` 的替身
+ * 留了一个**注入点**(`setGitHubTransport`),由 `src/client/ci-transport.ts` 把本函数装进去:
+ * 上游的路径(如 `repos/{o}/{r}/commits/{ref}/check-runs?per_page=100`)原样传进来。
+ *
+ * 它**不是**第二个传输层:它就是 `ghRequest`(宿主代理 `dsh-git/gh`,令牌只在宿主)
+ * 的一层薄壳,与 `gh()`/`ghList()` 共用同一份 `GhError` / 限流记账 / 载荷收窄。
+ *
+ * @param path - `/repos/...`(上游习惯**不带**前导斜杠,宿主代理两种都接受)或下一页绝对 URL。
+ * @param opts - 方法 / body / 覆盖 Accept。
+ * @returns 解开的 JSON(**失败抛 `GhError`**,与 `gh()` 一致)。
+ */
+export async function ghRest(path: string, opts: GhOpts = {}): Promise<unknown> {
+  const r = await ghRequest(path, opts);
+  return r.json;
+}
+
 export interface GhUser { login: string }
 export interface GhLabel { name: string; color: string }
 export interface GhIssue {
@@ -203,9 +224,49 @@ export interface ListPage<T> {
   nextUrl: string | null;
   totalCount: number | null;
 }
+/**
+ * 一条 check run。**只列判断用得上的字段**(照 `GH_PROXY_SHAPE` 那条注释的规矩:
+ * `json` 是 GitHub 的上游契约,不逐条写 schema)。
+ *
+ * 2026-10 从「只有 5 个字段」加宽到上游
+ * `lib/api.ts:387-399` 的 `IAPIRefCheckRun` —— 判断层
+ * (`src/client/check-runs.ts`)要用 `app.name`(Code scanning 组)、
+ * `check_suite.id`(同名取最新的代理)、`started_at`/`completed_at`(时长),
+ * 而它们**都在同一个响应的同一个对象里** ⇒ 加宽字段**不增加任何请求**。
+ * 全部可选:老宿主/老桩不回这几个键时,判断层各自有缺省(不是拿 `undefined` 当数据)。
+ */
 export interface GhCheckRun {
   id: number; name: string | null; status: string; conclusion: string | null; html_url: string;
+  /** 触发它的 App(上游 `IAPIRefCheckRunApp`)。 */
+  app?: { name?: string | null } | null;
+  /** 所属 check suite(上游 `IAPIRefCheckRunCheckSuite`);同名去重靠它的 id。 */
+  check_suite?: { id?: number | null } | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  output?: { title?: string | null; summary?: string | null } | null;
+  /** 非空 = PR 触发(上游 `getLatestCheckRunsById` 用它区分同名 run 的来源)。 */
+  pull_requests?: ReadonlyArray<{ id?: number }> | null;
 }
+
+/**
+ * 老式 commit status 的一条(`/commits/{ref}/status` 的 `statuses[]`)。
+ *
+ * ⚠️ 这里是 `type` 而不是 `interface`,**不是风格问题**:`.eslintrc.yml` 的
+ * `@typescript-eslint/naming-convention` 要求 interface 名匹配 `^I[A-Z]`,
+ * 而本文件的家族名是 `Gh*`(已有的 21 条历史违规就是这么来的,已登记在
+ * `scripts/lint-baseline.json`)⇒ 新加一个 interface 会**新增**一条违规、把
+ * `check-lint` 的棘轮顶红。`type` 别名不受该 selector 管辖,家族名得以保留。
+ *
+ * 字段面照上游 `lib/api.ts:372-378` 的 `IAPIRefStatusItem`。
+ */
+export type GhCommitStatus = {
+  id: number;
+  state: 'success' | 'pending' | 'failure' | 'error';
+  context: string;
+  description: string | null;
+  target_url: string | null;
+};
+
 export interface GhRun {
   id: number; name: string | null; display_title: string; status: string; conclusion: string | null;
   event: string; head_branch: string; html_url: string;
@@ -383,9 +444,86 @@ export async function getPull(ref: GhRef, n: number): Promise<GhPull> {
   return gh<GhPull>(`/repos/${ghRefKey(ref)}/pulls/${n}`);
 }
 
-export async function listCheckRuns(ref: GhRef, sha: string): Promise<GhCheckRun[]> {
-  const r = await gh<{ check_runs: GhCheckRun[] }>(`/repos/${ghRefKey(ref)}/commits/${sha}/check-runs?per_page=50`);
-  return r.check_runs;
+/**
+ * 一条 PR review(上游 `lib/api.ts:650` 的 `IAPIPullRequestReview` 的**子集**)。
+ *
+ * ⚠️ 用 `type` 而不是 `interface` **不是风格问题**:`.eslintrc.yml` 的
+ * `@typescript-eslint/naming-convention` 要求 interface 名匹配 `^I[A-Z]`,而本文件的
+ * 家族名是 `Gh*`(`GhCommitStatus` 的注释里已记过同一条)。`type` 别名不受该 selector 管辖。
+ */
+export type GhReview = {
+  id: number;
+  user: GhUser | null;
+  body: string | null;
+  /** 上游是 `'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED' | 'PENDING' | …`;这里保留裸串,闸门在 `valid-notification-pull-request-review` 那一份镜像里。 */
+  state: string;
+  submitted_at: string | null;
+  html_url: string;
+};
+
+/**
+ * 某个 PR 的 reviews(上游 `lib/api.ts:1300-1315` 的 `fetchPullRequestReviews` 对应物)。
+ *
+ * **为什么补这一个函数**(2026-10-08,通知切片):上游 `notifications-store.ts:236-242`
+ * 的 `pr-review-submit` 事件要 `fetchPullRequestReview(...)` 才拿得到 review 正文,
+ * 而本文件此前只有 check-runs / statuses / issues 三族 —— 没有 reviews。
+ * 它走的是**同一个** `ghRequest`(宿主 `dsh-git/gh` 代理),**不是**第二个传输层。
+ *
+ * 代价:每个 PR 每次轮询多 1 次 Core 请求(`src/client/notifications.ts` 的
+ * `1 + 4 × MAX_PULLS` 里那 4 之一)。
+ *
+ * @param ref - 仓库。
+ * @param n - PR 编号。
+ * @returns review 列表(载荷不是数组时回 `[]`,不把 `undefined` 当空数据)。
+ */
+export async function listReviews(ref: GhRef, n: number): Promise<GhReview[]> {
+  const r = await gh<GhReview[]>(`/repos/${ghRefKey(ref)}/pulls/${n}/reviews?per_page=100`);
+  return Array.isArray(r) ? r : [];
+}
+
+/**
+ * 某个 ref 上的现代 check runs。
+ *
+ * 两处与上游对齐(`lib/api.ts:1409-1419`):
+ *  - `encodeURIComponent(ref)` —— 上游写的是 `const safeRef = encodeURIComponent(ref)`,
+ *    因为 REST 允许传 **ref**(不止 sha):`refs/pull/<n>/head` 这种带斜杠的形状
+ *    不编码会被 GitHub 当成多段路径(404)。sha 编码后逐字不变 ⇒ 既有调用点行为不变;
+ *  - `per_page=100` 与 `Accept: application/vnd.github.antiope-preview+json`
+ *    —— 上游的预览头。宿主代理本来就支持 `accept`(`host/auth.ts:227,231`)。
+ *
+ * @param ref - 仓库。
+ * @param shaOrRef - 提交 sha **或** 任意 ref(如 `refs/pull/12/head`)。
+ * @returns check run 列表(`check_runs` 数组;上游同名字段)。
+ */
+export async function listCheckRuns(ref: GhRef, shaOrRef: string): Promise<GhCheckRun[]> {
+  const r = await gh<{ check_runs: GhCheckRun[] }>(
+    `/repos/${ghRefKey(ref)}/commits/${encodeURIComponent(shaOrRef)}/check-runs?per_page=100`,
+    { accept: 'application/vnd.github.antiope-preview+json' });
+  /*
+   * 上游 `commit-status-store.ts:312-313` 把 `check_runs` 原样交给判断层;
+   * 这里只做**载荷形状**的一层防护:`check_runs` 缺失时给 `[]` 而不是 `undefined`
+   * (老宿主/降级代理可能回 `{}`),否则 `getLatestCheckRunsByName` 会在 `.map` 上炸。
+   */
+  return r.check_runs ?? [];
+}
+
+/**
+ * 某个 ref 上的**老式 commit status**(Jenkins / Travis 那一族不发 check run,
+ * 只发 status)。上游在同一个 `refreshSubscription` 里与 check runs **并行**取
+ * (`commit-status-store.ts:285-288`),再合成一个列表(`:308-315`)——
+ * 只取 check runs 会**整族漏掉**这类 CI 的红绿。
+ *
+ * 路径与分页照上游 `lib/api.ts:1383-1390`(`?per_page=100`,ref 同样要编码)。
+ * **代价:每个 (仓库, ref) 每次刷新多 1 次请求**(判断层的 60 秒 TTL 管住频率)。
+ *
+ * @param ref - 仓库。
+ * @param shaOrRef - 提交 sha **或** 任意 ref。
+ * @returns status 列表(`statuses` 数组)。
+ */
+export async function listCommitStatuses(ref: GhRef, shaOrRef: string): Promise<GhCommitStatus[]> {
+  const r = await gh<{ statuses: GhCommitStatus[] }>(
+    `/repos/${ghRefKey(ref)}/commits/${encodeURIComponent(shaOrRef)}/status?per_page=100`);
+  return r.statuses ?? [];
 }
 
 export async function listRuns(ref: GhRef): Promise<GhRun[]> {
