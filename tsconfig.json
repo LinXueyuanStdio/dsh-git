@@ -47,7 +47,34 @@
       // `scripts/build.mjs` 的 `clientAlias` 里也显式列了同一条,免得解析依赖
       // 「esbuild 恰好读 paths」这个隐式事实。替身的正确性由
       // `docs/probes/shim-node-util-probe.mjs` 对着真 `node:util` 钉住。
-      "util": ["./src/client/shim-node-util.ts"]
+      "util": ["./src/client/shim-node-util.ts"],
+      /*
+       * `byline-real`(2026-10-08,byline 改成真依赖时新增)。
+       *
+       * 它**不是 npm 上的包**,是宿主替身 `src/host/shims/byline.ts` 用来拿
+       * **真 byline** 的说明符。为什么替身不能直接 `import 'byline'`:
+       * esbuild 的 `alias` 对 alias 目标自己的 import **也生效** —— 实测会打成
+       * `function wrap(stream){ return wrap(stream) }`(构建成功、运行期无限递归),
+       * 而 `'byline/lib/byline.js'` 会被重映射成 `<替身>/lib/byline.js` 直接构建失败。
+       *
+       * 为什么这条落在 **client 的 tsconfig** 里(看起来属于宿主半):
+       * 本仓**实测 24 个探针**各自 esbuild 一份宿主入口,而它们**各有各的 alias 表**
+       * (`scripts/build.mjs` 的 `hostAlias` 传不进去)。esbuild **会读它在
+       * `absWorkingDir` / cwd 找到的 `tsconfig.json` 的 `paths`**(本节上面 `util`
+       * 那条已经记过同一件事,2026-10-08 又实测了一次:同一个 bare specifier 在
+       * `paths` 里能解析、在 `imports` 里被 esbuild 以
+       * `invalid segment "node_modules"` 拒绝)⇒ 把映射放在**根** `tsconfig.json`
+       * 是**零探针改动**地让 24 条探针都解析得到它的唯一办法。
+       *
+       * ⚠️ 与 `scripts/build.mjs` 的 `hostAlias['byline-real']` **必须同源**:
+       * 生产构建走显式 alias(不依赖「esbuild 恰好读 paths」这个隐式事实),
+       * 探针走 `paths`。两处任一改动都要同时改另一处。
+       *
+       * 类型面**不靠**这条:`tsc` 用的是 `types/host-shims.d.ts` 里
+       * `declare module 'byline-real'` 的 ambient 声明(所以不需要 `allowJs`,
+       * 也不会因为指向 node_modules 里的 .js 而报 TS7016)。
+       */
+      "byline-real": ["./node_modules/byline/lib/byline.js"]
     }
   },
   // 只看浏览器半:我们的适配层 + 它的依赖(镜像树)。host 半由 tsconfig.host.json 管。
@@ -59,5 +86,49 @@
     "types/desktop-globals.d.ts",
     "types/desktop-globals-client.d.ts"
   ],
-  "exclude": ["node_modules", "lib", "references", "vendor", "screenshots"]
+  /*
+   * ⚠️ `src/core/desktop/lib/git/{rebase,reorder,squash}.ts` 是**唯一**必须从本程序
+   * 排除的三个文件(2026-10-08 装了 `dugite` 之后实测)。
+   *
+   * **为什么**:这三个是逐字镜像的上游原文(`verify-mirror` 记「与上游字节一致」),
+   * `rebase.ts` 第 1-3 行是
+   * `import { ChildProcess } from 'child_process'` /
+   * `import { GitError } from 'dugite'` / `import byline from 'byline'`;
+   * `reorder.ts:8` 与 `squash.ts:8` 又 `from './rebase'` 把它拉进来。
+   * `types: []` 只挡 `@types/node` 的**自动加载**,挡不住 .d.ts 的**传递引用**:
+   * dugite 一装上,`from 'dugite'` 从 TS2307 变成可解析 ⇒ dugite 自己的
+   * `build/lib/index.d.ts` 引 `child_process` ⇒ **`@types/node` 进程序** ⇒
+   * 全局 `setTimeout` 由 DOM 的 `number` 变成 `NodeJS.Timeout`、`Buffer` 可用、
+   * `require`/`module`/`process` 全部出现。
+   *
+   * **后果(实测,不是推断)**:client 程序诊断 647→595,`@types/node` 全局把
+   * 「浏览器半禁止 node 内置」这条机器检查**静默削掉一大块** ——
+   * `lib/split-buffer.ts` 的 `Buffer`、`lib/git/{show,git-delimiter-parser}.ts`、
+   * `ui/diff/syntax-highlighting/index.ts` 一夜之间从「报错」变成「干净」,
+   * 而它们的可用性**没有**任何改变(esbuild 仍然解析不了这些模块);
+   * 另加一条我们自己的新错(`src/client/polyfills.ts` 的 `setTimeout`,它正是
+   * 这条不变式的**金丝雀** —— 所以那个文件一行都不改)。
+   *
+   * **为什么排除这三个是正确的**:它们在浏览器半**没有任何 importer**
+   * (`check-integration` 把它们列在「失去可达」名单里;`src/client/**` 与
+   * `src/core/desktop/**` 里对它们的引用全是注释),所以排除**不减少任何真实覆盖**;
+   * 而它们的**逐字副本**在 host 镜像里(`src/host/mirror/lib/git/{rebase,reorder,squash}.ts`,
+   * 由 `tsconfig.host-mirror.json` 检查)。代价只是 client 基线里这三条变成 stale
+   * (报告会提示,不是失败),换来的是那条不变式继续生效。
+   *
+   * **退役条件**:① 上游把 `lib/git/rebase.ts` 的 `dugite`/`child_process` 依赖摘掉
+   * (那时删掉本排除);② 或者本仓给 client 半补一个**不含 node 类型**的 dugite
+   * 类型替身(那要同时解释为什么值得养第二份声明,见
+   * `docs/probes/README-probe-index.md` §二.1 的「一个模块名一个替身」纪律)。
+   */
+  "exclude": [
+    "node_modules",
+    "lib",
+    "references",
+    "vendor",
+    "screenshots",
+    "src/core/desktop/lib/git/rebase.ts",
+    "src/core/desktop/lib/git/reorder.ts",
+    "src/core/desktop/lib/git/squash.ts"
+  ]
 }

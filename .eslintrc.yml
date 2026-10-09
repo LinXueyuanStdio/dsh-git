@@ -268,6 +268,33 @@ overrides:
         - error
         - *fetchBypass
 
+  # --- host 半的 **node 包替身**(`src/host/shims/**`):允许默认导出 ----------
+  # 与上面 `src/client/shim-node-*.ts` 那条**同因**:替身替的是**一个 node 包**,
+  # 而镜像里的调用点是**上游逐字**的 `import byline from 'byline'`
+  # (`lib/file-system.ts:3`、`lib/progress/from-process.ts:4`、
+  # `lib/git/{rebase,cherry-pick}.ts`)⇒ 替身**必须**提供 default 导出,
+  # 否则 esbuild 的 `alias`(scripts/build.mjs 的 `hostAlias`)解析出来的模块形状不对。
+  # 这是**刻意做的替身,不是错误**(C16 的同一套豁免理由)。
+  # **只对这一个目录**;host 半其余文件、以及镜像树,默认导出**照旧禁止**。
+  #
+  # ⚠️ **2026-10-08 更新(用户裁决之后)**:本节原来写着「不要用装真的 `byline` 来退役
+  # 本条」。用户裁决是「**可以,使用 `@github/alive-client`、`byline`**」⇒ 真包**已经装了**,
+  # 那条注释的措辞随之失效 —— 但**结论没变**:真包 `byline@5.0.0` 在**没有编码的流**上
+  # (我们那 4 处的输入是 `process.std*` 与 `spawn` 的 stdio 管道,实测
+  # `_readableState.encoding === null`)发的是 `Buffer`,而 `lib/progress/git.ts:219`
+  # 第一句是 `stripVTControlCharacters(line)` ⇒ 在 node 25 上抛 `ERR_INVALID_ARG_TYPE`。
+  # 现在的形态是**「真包 + 边界一次转换」**:`src/host/shims/byline.ts` 调真包并传
+  # `{ encoding: 'utf8' }`(byline **自己的**选项)⇒ 仍是 default 导出 ⇒ 本 override 仍然必要。
+  # 读数:`docs/probes/byline-shape-probe.mjs` 9/9(其中 P1 是「真包发 Buffer 且真 util 抛」的
+  # 阴性对照、P5 是「同一 parser 喂原始 Buffer 必抛」的承重对照)。
+  # **退役条件**:① 上游把那 4 处的标注与传流编码统一(那时删掉替身,让镜像直接 import 真包,
+  # 本 override 与 `scripts/build.mjs` 的 `byline` / `byline-real` 两条 alias 一起删);
+  # ② 或本仓不再需要 `lib/progress/from-process.ts`。
+  - files:
+      - 'src/host/shims/*.ts'
+    rules:
+      no-restricted-syntax: off
+
   # --- host 半:同步 fs 合法(C14)------------------------------------------
   # `no-sync` 对浏览器半是硬约束(同步 IO 会卡死 UI 线程);host 半跑在 node
   # 子进程里,`git-runner` 一类同步调用是既定设计。
@@ -276,3 +303,29 @@ overrides:
       - 'scripts/**/*.mjs'
     rules:
       no-sync: off
+
+  # --- host 镜像(`src/host/mirror/**`):只关 `react-hooks/*` ----------------
+  # 2026-10-08 新增的第三段镜像(GitHub Desktop 编排层的**逐字副本**,见
+  # `docs/host-mirror-adaptation.md`)。它**不是**我们的代码:每个字节都与上游
+  # 一致(`scripts/verify-mirror.mjs` 的第二个根逐字节比对),而且**不许改** ——
+  # 所以「改掉这条 lint 违规」在这里是**禁止**的动作,不是「懒得改」。
+  #
+  # 实测的假阳性(2 条,都在 `lib/stores/app-store.ts`):
+  #   · `useRepoRulesLogic`(`lib/helpers/repo-rules.ts`,「仓库规则」,不是 hook)
+  #   · `useExternalCredentialHelper`(`lib/trampoline/use-external-credential-helper.ts`,
+  #     「使用外部凭据助手」,**也不是 hook**)
+  # 两个都因为 `use*` 前缀被 `react-hooks/rules-of-hooks` 当成了 React Hook,而调用点
+  # 在一个 **class** 组件里 ⇒ 规则报「Hook cannot be called in a class component」。
+  # 上游没有这个假阳性(它的 react-hooks 插件配置与本仓不同),我们也不该为它
+  # 去改镜像的字节。
+  #
+  # **只关这一类** —— 其余规则(含 `scripts/check-lint.mjs` 盯的 `curly` /
+  # `no-unused-vars` / 自定义的 `react-proper-lifecycle-methods` 等)在这个根上**照旧生效**,
+  # 所以「镜像被人手改坏」仍会被 lint + `verify-mirror` 双重拦下。
+  # **退役条件**:① host 镜像被逐文件接进 `src/host/**`(那时它不再是「不许改的副本」);
+  # ② 或上游把那两个函数改名(不再撞 `use*` 约定)—— 那时删掉本条。
+  - files:
+      - 'src/host/mirror/**/*.ts'
+    rules:
+      react-hooks/rules-of-hooks: off
+      react-hooks/exhaustive-deps: off

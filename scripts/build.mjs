@@ -11,6 +11,7 @@
  */
 import { build } from 'esbuild';
 import { mkdir, readFile, rm } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import {
   PORT_SCOPES,
   CLASS_EXCEPTIONS,
@@ -18,8 +19,12 @@ import {
   buildPortStyles,
   classCoverage,
 } from './styles.mjs';
+import { writeHighlighterWorkerModule } from './highlighter-worker.mjs';
 
 const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+
+/** 仓库根(本文件在 `scripts/` 下)。{@link aliveAliasPlugin} 要用它拼替身路径。 */
+const REPO = resolve(import.meta.dirname, '..');
 
 /**
  * 构建时间戳:写进 host 注册日志与客户端控制台。
@@ -104,6 +109,107 @@ const clientInject = ['./src/client/desktop-globals.ts'];
 
 // react 系与 @deepseek-ai/* 由宿主 loader 提供,必须保持 external。
 const clientExternal = ['react', 'react-dom', 'react-dom/*', 'react/jsx-runtime', '@deepseek-ai/*'];
+
+/**
+ * **宿主半**的 esbuild `alias`(与 `clientAlias` 同一套思路,但只作用于 host)。
+ *
+ * ## `byline`(2026-10-08 起:**真依赖 + 一层转换**,不再是手写替身)
+ *
+ * 上游 `lib/**` 的 4 个文件(`lib/file-system.ts`、`lib/progress/from-process.ts`、
+ * `lib/git/{rebase,cherry-pick}.ts`)写的是 `import byline from 'byline'`。
+ * 用户裁决(逐字):「**可以,使用 `@github/alive-client`、`byline`**」⇒
+ * `byline@^5.0.0` 进了 `dependencies`(与上游 `app/yarn.lock:399-402` 同区间)。
+ *
+ * ⚠️ **装真包不会自动正确,实测**:byline 5.0.0 的 `LineStream._reencode`
+ * (`node_modules/byline/lib/byline.js:144-155`)在**输出流自己没有 encoding** 时
+ * 发的是 `new Buffer(line, encoding)` —— 它靠 `'pipe'` 事件继承**输入流**的
+ * `_readableState.encoding`,而我们这 4 处的输入是 `process.stderr` / `process.stdout`
+ * 与 `child_process.spawn` 的 stdio 管道,**实测 encoding 全是 `null`** ⇒ 发 `Buffer`
+ * ⇒ `lib/progress/git.ts:219` 的 `stripVTControlCharacters(line)` 抛
+ * `ERR_INVALID_ARG_TYPE`(那 4 个消费方自己的类型标注互相矛盾:`(line: string)` ×3
+ * vs `(buffer: Buffer)` ×1)。
+ *
+ * ⇒ 边界处**一次**转换,落在 `src/host/shims/byline.ts`:它调**真包**并传
+ * `{ encoding: 'utf8' }`(byline **自己的**选项,不是我们手搓的行切分)。
+ * 镜像文件一个字节都不动。
+ *
+ * ## `byline-real`:为什么需要第二条 alias(不是风格问题)
+ *
+ * esbuild 的 `alias` **对 alias 目标自己的 import 也生效** —— 实测:让
+ * `byline` 指向的替身 `import real from 'byline'` 会打成
+ * `function wrap(stream){ return wrap(stream) }`(**构建成功、运行期无限递归**),
+ * 而写成 `'byline/lib/byline.js'` 则直接构建失败
+ * (`The path "byline/lib/byline.js" was remapped to "<替身>/lib/byline.js"`)。
+ * ⇒ 替身必须用**一个不会被 alias 命中的说明符**去拿真包,这就是 `byline-real`。
+ * 它不是 npm 上的包:类型声明在 `types/host-shims.d.ts`,映射就是下面这一行。
+ *
+ * ⚠️ 改这里必须同时确认两份类型层镜像(`tsconfig.host.json` 与
+ * `tsconfig.host-mirror.json` 的 `paths.byline`),否则会出现「esbuild 打得出来、
+ * tsc 报 TS2307」这种自相矛盾的读数。(`byline-real` 不需要 `paths`:
+ * 它由 `types/host-shims.d.ts` 的 ambient module 声明顶住。)
+ */
+const hostAlias = {
+  byline: './src/host/shims/byline.ts',
+  'byline-real': './node_modules/byline/lib/byline.js',
+};
+
+/**
+ * **alive 的四条相对 import,按「谁 import 的」重定向**(2026-10-08)。
+ *
+ * ## 为什么不能用 `alias`(实测)
+ *
+ * 那四条说明符是**相对**的(`./accounts-store` / `../api` / `../endpoint-capabilities` /
+ * `../../models/account`),esbuild 的 `alias` 只接受**裸包名** ⇒ 实测
+ * `error: Invalid alias name: "../endpoint-capabilities"`(**构建直接失败**)。
+ *
+ * ## 为什么必须按 importer 收窄(不是风格问题)
+ *
+ * 这四条说明符在宿主编译闭包里**别人也在用**:
+ *   - `mirror/lib/stores/git-store.ts` / `mirror-git.ts` 用 `../models/account`;
+ *   - `mirror/lib/api.ts` 自己用 `./endpoint-capabilities`(它**转发** `isDotCom`/`isGHE`),
+ *     而 `mirror/models/{popup,account}.ts`、`app-state.ts`、`feature-flag.ts`、
+ *     `repository-matching.ts` 又都 import `account` / `api`。
+ * ⇒ 一条全局 alias 会把**整片**镜像的解析改掉。{@link aliveAliasPlugin} 只对
+ * `mirror/lib/stores/alive-store.ts` 这一个 importer 生效,其余文件**一个字节不变**。
+ *
+ * ## 重定向到什么
+ *
+ * `src/host/shims/alive-lib.ts`:它转发**同一份** `Account` 与 `getDotComAPIEndpoint`,
+ * 并把另外三个面缩到 `AliveStore` 真正引用的那一小块(见该文件头)。
+ *
+ * ⚠️ **类型层(C6)仍然会解析到真的 `accounts-store.ts`**:`tsconfig.host.json` 的
+ * `paths` 对相对说明符**不生效**(实测:加了四条,诊断一条没变),所以那一条
+ * TS2307(`../auth`)进了 `scripts/type-baseline.json` 的 host 段 —— 如实登记,见
+ * 该文件 `$aliveNote`。
+ * @type {import('esbuild').Plugin}
+ */
+const aliveAliasPlugin = {
+  name: 'dsh-git-alive-alias',
+  setup(build) {
+    /** 只重定向这一个 importer 的四条相对 import。 */
+    const MIRROR_ALIVE_STORE = 'src/host/mirror/lib/stores/alive-store.ts';
+    const REDIRECT = new Set([
+      './accounts-store',
+      '../api',
+      '../endpoint-capabilities',
+      '../../models/account',
+    ]);
+    build.onResolve({ filter: /^(\.\.?\/)/ }, (args) => {
+      if (!args.importer.endsWith(MIRROR_ALIVE_STORE)) {
+        return null;
+      }
+      if (!REDIRECT.has(args.path)) {
+        return null;
+      }
+      /*
+       * ⚠️ **必须 `namespace: 'file'`**:onResolve 的返回值默认落在**当前插件**的
+       * namespace 里,而 esbuild 会拿它去问下一个 `onLoad` ⇒ 实测
+       * `ERROR: No loader is configured for ".ts" files`(文件根本没被读)。
+       */
+      return { path: resolve(REPO, 'src/host/shims/alive-lib.ts'), namespace: 'file' };
+    });
+  },
+};
 
 
 // ---------- 样式表自检 ----------
@@ -645,6 +751,23 @@ async function checkDesktopDiffUiBundles() {
 // 清单在 scripts/styles.mjs 的 PORT_SURFACES;这里不再有「每个移植面一段判定」。
 const styleBuild = await buildPortStyles();
 
+/*
+ * **语法高亮的 worker 也要先打**(2026-10,上游 88 行 worker.ts + 690 行模式表那一族)。
+ *
+ * 它产出 `src/client/highlighter-worker.generated.ts`(worker 的**源码字符串**),
+ * 而浏览器半的 `src/client/shim-node-url.ts` 的 `pathToFileURL` 静态 import 它 ⇒
+ * 少了这一步,`checkDesktopDiffUiBundles()` 与 `lib/client.js` 都会在解析期报
+ * `Could not resolve "./highlighter-worker.generated"`。
+ *
+ * ⚠️ 为什么不是"一条 esbuild 插件 + 虚拟模块":探针各自有自己的 esbuild 配置,
+ * 它们**没有**这条插件;而 `pathToFileURL` 在任何挂 diff 的探针里都会被求值
+ * (`lib/path.ts` 只是转发)⇒ 虚拟模块会把 30+ 条探针变成 `Could not resolve`。
+ * 落成**普通文件**之后,`tsc`(相对 import)、`esbuild`(相对 import)、探针三方零配置。
+ * 理由与两个实测坑(模式表的 `lib/codemirror` 重定向、`require.resolve` 垫片)
+ * 都写在 `scripts/highlighter-worker.mjs` 的文件头。
+ */
+await writeHighlighterWorkerModule();
+
 await checkJsxIdentifiers();
 await checkInlineTokens();
 await checkCssTemplate('src/client/styles.ts');
@@ -665,7 +788,72 @@ await build({
   platform: 'node',
   target: 'node20',
   sourcemap: true,
-  external: ['@deepseek-ai/*'],
+  /*
+   * `dugite` **必须** external(2026-10-08 实测,不是推断)。
+   *
+   * 为什么:dugite 的 `build/lib/*.js` 是 **CommonJS**,而本构建是
+   * `format: 'esm' + platform: 'node'`。esbuild 内联它之后会把自己的
+   * `__require` 垫片塞进产物,而那个垫片在 ESM 输出里没有 `require` ⇒
+   * 产物**加载即崩**:`Error: Dynamic require of "child_process" is not supported`
+   * (复现:入口一行 `import { exec } from 'dugite'`,内联构建 exit 0 / 28,504 B、
+   * 运行 exit 1;加 `external: ['dugite']` 后产物里是 `import { exec } from "dugite"`、
+   * 运行 exit 0 并且真跑出 `git version 2.53.0`)。读数见
+   * `docs/host-mirror-adaptation.md` §1.4。
+   *
+   * 代价(已登记):`package.json` 的 `files` 只有 6 项、**不发 node_modules**,
+   * 所以运行期必须在 profile 的 `node_modules` 里能找到 dugite —— 它是
+   * `dependencies` 的第一项,由插件安装器装(另见 `src/host/dugite-env.ts`
+   * 的 git 供给决策)。
+   */
+  external: ['@deepseek-ai/*', 'dugite'],
+  alias: hostAlias,
+  // alive 的四条**相对** import 按 importer 重定向(见 {@link aliveAliasPlugin})。
+  plugins: [aliveAliasPlugin],
+  /*
+   * 宿主半也要 `inject` Desktop 的构建期全局(2026-10-08 实测必需)。
+   *
+   * 接线之后 `lib/index.js` 的模块图里有上游 `lib/feature-flag.ts`,它在**模块顶层**
+   * 就走 `__RELEASE_CHANNEL__ === 'beta'` ⇒ 只补类型声明挡不住运行期:
+   * `node -e "import('./lib/index.js')"` 报
+   * `ReferenceError: __RELEASE_CHANNEL__ is not defined`(`lib/index.js:32489`)。
+   * 取值与理由逐条写在 `src/host/desktop-globals.ts`。
+   *
+   * ⚠️ 与客户端半是**两份**全局(`clientInject` 是
+   * `src/client/desktop-globals.ts`):合并会把 `navigator`/`process.platform`
+   * 交叉拖进两个 bundle。它们各自与自己的 `.d.ts` 声明同形
+   * (`types/desktop-globals.d.ts` + `types/host-shims.d.ts`)。
+   */
+  inject: ['./src/host/desktop-globals.ts'],
+  /*
+   * **宿主半的 `require` 垫片(2026-10-08 实测必需,不是预防性写法)。**
+   *
+   * 为什么:宿主产物是 `format: 'esm'`,而镜像层把几个 **CommonJS** 依赖打了进来
+   * (`deep-equal` → `object-inspect` → `require('util')`;`semver` 同族)。
+   * esbuild 对 CJS 里**动态/条件式**的 `require('node内置')` 只能发出它的
+   * `__require` 垫片,而那个垫片在 ESM 里的兜底是
+   * `throw Error('Dynamic require of "util" is not supported')`
+   * ⇒ **`lib/index.js` 加载即崩**(实测:`node -e "import('./lib/index.js')"` →
+   * `Dynamic require of "util" is not supported`,栈顶在 `object-inspect/util.inspect.js`)。
+   *
+   * 这与 `dugite` 那条是**同一类**问题、两个不同的解法:dugite 用 `external`
+   * (它还需要自己包内那份 git 的相对路径),而这里的依赖**必须**打进产物
+   * (它们不是 `dependencies`,发布时 `files` 里也没有 `node_modules`)。
+   * 标准解法就是在 ESM 里造一个真的 `require`:`__require` 的第一支是
+   * `typeof require !== "undefined" ? require : …`,所以只要这个名字存在且可用,
+   * 整条链就走正常路径。
+   *
+   * ⚠️ 代价(如实记账):垫片之后,**产物里任何**残留的动态 `require` 都会**成功**,
+   * 而不是响亮地失败。也就是说 `external` 那条「忘了标 external 就会崩」的
+   * 早期信号在宿主半被削弱了 —— 换来的是「CJS 依赖能正常跑」。判据:
+   * `docs/probes/host-mirror-wiring-probe.mjs` 会**真的加载** lib/index.js,
+   * 所以「加载不了」这类回归仍然会被探针抓住。
+   */
+  banner: {
+    js: [
+      "import { createRequire as __dshCreateRequire } from 'node:module';",
+      'const require = __dshCreateRequire(import.meta.url);',
+    ].join('\n'),
+  },
   define,
 });
 

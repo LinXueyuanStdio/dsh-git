@@ -1,0 +1,60 @@
+/**
+ * **host 镜像树** `src/host/mirror/**` 的类型检查程序(第三个程序,**不在**默认棘轮里)。
+ *
+ * ## 为什么需要第三个程序
+ *
+ * `src/core/desktop/**`(客户端镜像)与 `src/host/**`(我们的宿主适配层)是两个
+ * **已经进了棘轮**的程序。`src/host/mirror/**` 是 2026-10 新增的**第三段镜像**:
+ * GitHub Desktop 的**编排层**(`lib/stores/**` + `lib/api.ts` +
+ * `lib/databases/**` + `lib/git/**`)逐字副本,供**宿主半**执行 ——
+ * 因为 `dugite` 只能在 node 里跑(`tsconfig.host.json` 的 `types:["node"]`
+ * 那一半),而 `tsconfig.json`(客户端)会把整片 `src/core/desktop/**` 拉进去。
+ *
+ * 这 102 个文件是**刚抄进来、还没适配**的上游原文:它们 import `electron`、
+ * `dexie`、`keytar`、`@github/copilot-sdk`、`../app-state`、`../notifications/**`
+ * 等本仓尚不存在的东西 —— **必然报错**,那是预期状态,不是缺陷。
+ * 所以它**不能**进 `tsconfig.host.json` 的 include(那会让默认棘轮一次多出
+ * 上千条诊断,把真回归淹掉),也不能进 `tsconfig.json`(客户端半会撞
+ * `dugite`/`child_process`,构建直接红)。
+ *
+ * ⇒ 单开一个程序,只用于**测量与登记**:`node node_modules/typescript/lib/tsc.js -p tsconfig.host-mirror.json --noEmit`。
+ * **退出条件(退役条件)**:某一文件被适配完(依赖面补齐 + 接线)后,把它移出本
+ * 程序、加入 `tsconfig.host.json` 的 include 与 `scripts/type-baseline.json`;
+ * 本程序里最终一个文件都不剩时,删除本文件与 `scripts/type-baseline.json` 的
+ * `hostMirror` 段。
+ *
+ * ## 与另外两个程序的差别
+ *
+ * | | tsconfig.json | tsconfig.host.json | 本文件 |
+ * |---|---|---|---|
+ * | 覆盖 | `src/client/**` + `src/core/desktop/**` | `src/index.ts` + `src/host/**` + `src/core/*.ts` | `src/host/mirror/**` |
+ * | `types` | `[]`(禁 node) | `["node"]` | `["node"]`(镜像要 child_process/Buffer/process) |
+ * | `paths`(esbuild alias 镜像) | 有(path/url/fs-promises/util) | 无 | 无(**宿主半用真 node 内置**) |
+ * | 在默认棘轮里 | 是 | 是 | **否**(体积大、且是未适配存量) |
+ *
+ * @module dsh-git/tsconfig.host-mirror
+ */
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    // 与 tsconfig.host.json 同:host 跑在 node 里,镜像里的 child_process/Buffer/process
+    // 都必须是**真的** node 类型,不能像客户端半那样用 shim 顶。
+    "types": ["node"],
+    "baseUrl": ".",
+    /*
+     * esbuild 宿主 alias 的类型层镜像(与 `scripts/build.mjs` 宿主构建的
+     * `hostAlias` 必须逐条一致 —— 目前只有 `byline` 一条)。
+     *
+     * 为什么 `byline` 是替身而不是依赖:它只做「把可读流按行切开」,被
+     * `lib/file-system.ts` / `lib/progress/from-process.ts` /
+     * `lib/git/{rebase,cherry-pick}.ts` 四处使用;替身
+     * `src/host/shims/byline.ts` 的注释逐条写明它复现/不复现什么。
+     * **两个镜像根里都没有浏览器半的文件 import 它**,所以这条只存在于宿主两半。
+     */
+    "paths": {
+      "byline": ["./src/host/shims/byline.ts"]
+    }
+  },
+  "include": ["src/host/mirror/**/*.ts", "types/desktop-globals.d.ts", "types/host-shims.d.ts"],
+  "exclude": ["node_modules", "lib", "references", "vendor", "screenshots"]
+}

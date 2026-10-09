@@ -1,5 +1,6 @@
 /**
- * 镜像完整性探针(**opt-in**):把 `src/core/desktop/**` 与上游
+ * 镜像完整性探针(**opt-in**):把**两段**镜像根 —— `src/core/desktop/**`(client 半)
+ * 与 `src/host/mirror/**`(host 半,2026-10-08 起)—— 分别与上游
  * `references/desktop/app/src/**` 逐一比对,报告**非预期**的偏离。
  *
  * 为什么需要它:上轮两个子代理并发写同一个仓库,其中一个把
@@ -36,6 +37,24 @@ const MIRROR = 'src/core/desktop';
 const UPSTREAM = 'references/desktop/app/src';
 
 /**
+ * **第二段镜像根(2026-10-08 新增)**:host 半的镜像树。
+ *
+ * 为什么镜像要分两段(实测的结构约束,不是偏好):
+ *   · `dugite` 只能在 **node** 里跑(`import child_process`),而客户端 bundle 是
+ *     `platform: 'browser'` ⇒ 一份 import dugite 的文件放进 `src/core/desktop/**`
+ *     就等于放进**浏览器程序**(`tsconfig.json` 的 include 覆盖整片),
+ *     而且一旦 dugite 装上了,esbuild 会真去打包它再撞 `child_process` ⇒ **构建红**;
+ *   · 所以「宿主半执行的镜像」必须在 `src/core/desktop` **之外**另立一个根 ——
+ *     代价是同一份上游文件可能出现在两个根里(如 `lib/stores/app-store.ts`:
+ *     client 根是 151 行替身/已登记偏离,host 根是 10,935 行**逐字节原文**)。
+ *     这不是「第二份真源」:两个根都由本探针**逐字节**比对上游,谁漂移都会红。
+ *
+ * 布局与 client 根**同构**(都相对上游 `app/src`),这样上游的相对 import
+ * (`../../models/repository`、`./core`)在两个根里都零改动可解析。
+ */
+const HOST_MIRROR = 'src/host/mirror';
+
+/**
  * 允许与上游不一致的文件,以及理由。
  * 键是相对 `src/core/desktop` 的路径。
  */
@@ -70,7 +89,22 @@ const EXPECTED = new Map([
       '`log.error(...)` 会变成 3 条 `log is not defined` 的未处理拒绝。' +
       '待补宿主能力(不在本泳道所有权内):`log/authors {path, shas}` → `{authors:{name,email,date}[]}`。',
   ],
-  ['lib/highlighter/worker.ts', 'Web Worker + node 路径'],
+  /*
+   * `lib/highlighter/worker.ts`(88 行)**的登记已于 2026-10 退役** ——
+   * 用户指令:「语法高亮 也要做。语法高亮上游也有啊,你还问我」。
+   *
+   * 退役条件原文写的是「把 CodeMirror 模式表 + worker 打包进来」,本轮做的就是它:
+   *   · `src/core/desktop/highlighter/index.ts`(690)= 上游 `app/src/highlighter/index.ts`
+   *     逐字复制 ⇒ 模式表与分词器是上游那一份,**没有手写词法器**;
+   *   · `src/core/desktop/lib/highlighter/worker.ts` 现在与上游 **字节一致**
+   *     (`cmp` 通过,88 行);
+   *   · 打包在 `scripts/highlighter-worker.mjs`(worker 单独打成一个自足 IIFE,
+   *     源码内联进 `src/client/highlighter-worker.generated.ts`);
+   *   · 浏览器半那条约 URL 的桥在 `src/client/shim-node-url.ts` 的 `pathToFileURL`
+   *     (blob URL;那里写了理由、能力边界与新的退役条件)。
+   * 判据:`docs/probes/syntax-highlighting-probe.mjs`(真 Chrome,真 worker,
+   * token 流 + 真 DOM 里的 `cm-*` 类 + 阴性对照)。
+   */
   ['ui/main-process-proxy.ts', '主进程代理走 ipcRenderer'],
   ['ui/window/title-bar.tsx', 'Electron 窗口标题栏'],
   ['ui/diff/syntax-highlighting/index.ts', '取旧/新文件内容走 node:fs + dugite'],
@@ -453,6 +487,55 @@ const EXPECTED = new Map([
       ' `IAutocompletionProvider`。**唯一的改动就是这一行**。' +
       '回收条件:同上(桶文件不再 `export *`)⇒ 还原成上游原文,本登记删除。',
   ],
+  /*
+   * --- 2026-10 共同作者(Co-Authored-By)那一行新增的**两个**镜像件 ---
+   *
+   * 两条的偏离都是**最小面**:一条只改两个 import 说明符 + 就地声明两个类型,
+   * 另一条只改一处 import 说明符。逐条理由与退役条件**同时**写在各自文件的文件头里
+   * (本仓惯例:登记与文件内注释同源,不在这里展开第二份说明)。
+   */
+  [
+    'ui/autocompletion/user-autocompletion-provider.tsx',
+    '上游 `ui/changes/commit-message.tsx:208` 的 `CoAuthorAutocompletionProvider` 就定义在' +
+      '这个文件里,而共同作者那一行(我们的 `src/client/co-authors-row.tsx`)是本仓第一个' +
+      '真的需要它的消费方 ⇒ 2026-10 逐字抄进来。**四处偏离**(逐条与那个文件头里的' +
+      '登记块同源):① `:3` `\'./index\'` → `\'./autocompletion-provider\'`(同上一条桶' +
+      '文件的理由);②③ 上游 `:4` `\'../../lib/stores\'`、`:7` `\'../../lib/databases/index\'`' +
+      '这两个模块在 **client 根不存在**(实测:`src/core/desktop/lib/stores/` 没有 `index.ts`;' +
+      '`src/core/desktop/lib/databases/` 整个目录不存在),真身在 **host 根**的镜像里' +
+      '(`src/host/mirror/lib/stores/github-user-store.ts:34`、' +
+      '`src/host/mirror/lib/databases/github-user-database.ts:4`),两个根不能互相 import ⇒ ' +
+      '把**本文件真正用到**的成员(`IMentionableUser` 六个字段、`GitHubUserStore` 的' +
+      '`getByLogin`/`getMentionableUsersMatching` 两个签名)就地声明成结构类型;' +
+      '④ `:1` 的 `import * as React from \'react\'` **删掉** —— 上游 `jsx: "react"`(经典运行时)' +
+      '必需它,我们是 `jsx: "react-jsx"`(自动运行时)⇒ 留着就是一条**新** TS6133' +
+      '(`noUnusedLocals`),而本文件是**新文件**、不能靠改基线消掉(与存量同形的' +
+      '`branch-autocompletion-provider.tsx` 不同:那一条早就登记在 `type-baseline.json` 里)。' +
+      '删掉不改行为(JSX 的编译目标与这个 import 无关)。' +
+      '**逐字的是其余 200+ 行**(类体、正则、`exactMatch`、`renderItem` 全未改)。',
+  ],
+  [
+    'ui/lib/author-input/author-input.tsx',
+    '只改 import 说明符:上游 `:3-8` 从 `\'../../autocompletion\'`(即 `export *` 桶' +
+      '`ui/autocompletion/index.ts`)一次取 `AutocompletingInput` 与' +
+      '`UserAutocompletionProvider` / `UserHit` / `KnownUserHit`;这里拆成两条直指定义模块的' +
+      'import(`autocompletion-provider` + `user-autocompletion-provider`),绕开那个桶 ——' +
+      '桶会把 `emoji` / `issues` / `build-autocompletion-providers` 三个**本仓树里没有**的' +
+      '模块拉进包,打包期就失败;**这一条**与 `autocompleting-text-input.tsx` /' +
+      '`ref-name-text-box.tsx` 两条既有登记同源。第二处偏离:`render()` 里上游写的是 JSX' +
+      '`<FocusContainer …>{…}</FocusContainer>`,这里改成' +
+      '`React.createElement(FocusContainer, props, …children)` —— 镜像' +
+      '`ui/lib/focus-container.tsx:5-13` 的 `IFocusContainerProps` **没有声明 `children`**,' +
+      '而它 `render()` 又读 `this.props.children`(`:117`);上游跑 `@types/react@^16`' +
+      '(那一代 `this.props` 带隐式 `children`),我们钉 18.3.31 ⇒ JSX 写法多一条 TS2322。' +
+      '`createElement` 的 children 走第三个可变参数重载 ⇒ 类型成立、产出的 DOM 逐字相同;' +
+      '同一条手法已用在 `changes-view.tsx` 的 `CommitWarning`/`LinkButton` 与' +
+      '`hidden-changes-warning.tsx`。类体其余 470 行逐字(含' +
+      '`componentDidUpdate` 的聚焦规则、`attemptUnknownAuthorSearch`、键盘导航)。' +
+      '消费方:`src/client/co-authors-row.tsx`(上游 `commit-message.tsx:827-848` 的落点)。' +
+      '⚠️ 它同时是**上游 `ui/changes/commit-message.tsx:17` 的 import 目标**,所以这条登记' +
+      '也影响那份(仍不可达的)镜像件。',
+  ],
   // --- 有意的最小改动(每处都在文件内注明) ---
   ['lib/patch-formatter.ts', '补一行显式 log import'],
   ['lib/sanitize-ref-name.ts', '修正上游 g 标志 .test() 的 lastIndex 状态性 bug'],
@@ -767,6 +850,235 @@ const OURS = new Set([
 ]);
 
 /**
+ * **host 镜像根**的登记表(键是相对 `src/host/mirror` 的路径)。
+ *
+ * 2026-10-08 之前它是**空**的(host 根里全是上游原文的逐字副本)。本轮**接线**
+ * (`docs/host-mirror-wiring.md`)时出现了 7 处**必须**偏离的地方 ——
+ * 全部是「上游那份在宿主半没有落点、而它又是宿主闭包的一环」的**适配层文件**,
+ * 逐条理由在下面。原裁决("代偿应当放在 `src/host/**` 而不是改副本")**没有变**:
+ * 这 7 个之所以只能放在镜像根里,是因为上游的**相对 import 写死了它们的路径**
+ * (`../app-state`、`../stats`、`./api` …),放在别处就解析不到 —— 与 client 根
+ * 那 45 条的处境逐字相同。
+ *
+ * **判据**:每一条都必须写明「为什么不能沿用上游」+「退役条件」。
+ *
+ * ## 2026-10-08 追加:本表现在有**两类**条目,不要混读
+ *
+ * | 类 | 条数 | 是什么 |
+ * |---|---:|---|
+ * | ① **适配层** | 7 | 上游那份在宿主半没有落点(desktop-notifications / Electron / dexie / Central 遥测),而它又是宿主闭包的一环 ⇒ 写替身 |
+ * | ② **跨根转发** | 8 | 上游那个文件的**字节唯一的一份在 client 根**,而它自己零相对 import(或只有裸包)⇒ 本文件只做 `export *`,**不复制字节** |
+ *
+ * ⚠️ **一条既有读数变了**(必须一起读,否则会读错第 ① 类里 `lib/api.ts` 那条):
+ * `lib/api.ts` 的登记理由里写着「host→client 跨根 import = 0 是一条现有读数」。
+ * **那条读数今天不再成立**:本批落地后 host 镜像根里有 **8 个**跨根转发文件
+ * (逐条见下面第 ② 类)。但**两份 `lib/api.ts` 仍然各自独立**(host 349 行 / client 632 行),
+ * 那一条判断的理由没有变 —— 变的是「跨根 import 的总数」,不是「两份 api 替身被合并了」。
+ * 判据:`grep -rn "core/desktop" src/host/mirror/ | grep -v '^\S*: *\*' | wc -l`。
+ *
+ * @type {Map<string, string>}
+ */
+const HOST_EXPECTED = new Map([
+  [
+    'lib/api.ts',
+    '上游 2,499 行的 GitHub REST 客户端。宿主半**不发任何 REST 请求**' +
+      '(认证在 DSH 的 provider、仓库数据面在 `src/host/repo-registry.ts`),但上游不是按这个边界分层的:' +
+      '`models/account.ts:1`/`models/owner.ts:1`/`models/dot-com-bots.ts:1`/`models/publish-settings.ts:1`/' +
+      '`lib/repository-matching.ts:6` 都直接 import 它,而 `models/account.ts` 是 `Repository` 的传递依赖、' +
+      '`Repository` 是 `GitStore` 的构造参数。它自己的闭包(copilot-sdk / Electron `session` / `./http` → ' +
+      '`ui/lib/app-proxy` / React 的 bypass 对话框)在宿主半没有落点,而且 **esbuild 不会因为「只用三个导出」' +
+      '就树摇掉未解析的 import** —— 实测直接构建失败(`Could not resolve "./http"` 等 5 条)。' +
+      '替身逐字保留 `getHTMLURL`/`getDotComAPIEndpoint`/`getEnterpriseAPIURL`/`getEndpointForRepository`/' +
+      '`getAccountForEndpoint`(上游 `lib/api.ts:2273-2355`),REST 面按 `any` 声明(接线前本来就是 `any`:' +
+      '模块找不到 ⇒ TS2307 + any),OAuth/token 四个函数**抛错**(不假装成功,也不静默返回空)。' +
+      '⚠️ 这是本轮最大的一处诚实缺口:经 `models/account.ts` 进宿主程序的 GitHub 面没有类型检查。' +
+      '退役条件:宿主真的接 GitHub REST 时换成真实现或真依赖。与 client 根那份 632 行的同类替身' +
+      '**同因、同形、各自独立**(合并就是跨根 import,而「host→client 跨根 import = 0」是一条现有读数)。' +
+      '⚠️ 2026-10-08 加注:那句「跨根 import = 0」**已不是今天的读数**(本批新增 8 个跨根转发文件,' +
+      '逐条见本表 header 第 ② 类),但**本条的判断没有变** —— 两份 api 替身仍然各自独立、没有合并,' +
+      '理由与退役条件逐字照旧。',
+  ],
+  [
+    'lib/app-shell.ts',
+    '上游 64 行,`import { shell as electronShell } from "electron"` + `../ui/main-process-proxy`(全是 ipcRenderer)。' +
+      '宿主半没有这两个面。整片 host 镜像只需要它的 **2 个名字**:`IAppShell`(`git-store.ts:27`/`git-store-cache.ts:3`,' +
+      '**构造参数的类型**)与 `shell`(`sign-in-store.ts:20`)。' +
+      '⚠️ `GitStore` 一次都没用过注入的 `shell`(`grep -n "this\\.shell" lib/stores/git-store.ts` = 0 处),' +
+      '所以这条链上它不影响行为;但每个方法都**抛错**而不是空实现 —— 空实现会把「没接」伪装成「做成了」。' +
+      '退役条件:宿主提供「打开外链 / 在文件管理器里显示 / 移到废纸篓」中的任意一项时,换对应方法为真实现。',
+  ],
+  [
+    'lib/app-state.ts',
+    '上游 1,220 行的**应用状态类型总表**。宿主半只需要它的 **34 个名字**(实测:整片 host 镜像里对它的 import 并集),' +
+      '但它自己的 import 面把 copilot-sdk / GitHub REST(`./api`)/ Electron / React 弹窗全拉进来。' +
+      '两处偏离:① 与 `lib/api.ts` 同因的那 7 个名字(`./stores/copilot-store`、`./api`、`./stores/sign-in-store`、' +
+      '`../models/app-menu`、`../models/banner`、`../models/drag-drop`、`../models/popup`、' +
+      '`./stores/api-repositories-store`)按 `any` 声明 —— 这同时把那 7 个文件**整片**挡在棘轮程序外' +
+      '(`tsconfig.host.json` 的 `exclude` **挡不住 import**,实测:只要 `src/host/**` 里有一行 import,' +
+      '被 exclude 的文件照样进程序);② `./window-state`/`./shells`/`../ui/lib/application-theme`/`./custom-integration`/' +
+      '`./emoji`/`../ui/lib/update-store` 的**类型定义本身是可携带的**,所以逐字搬进本文件(不退化成 any)。' +
+      '`IAppState`/`IRepositoryState` 等主体**逐字来自上游**。' +
+      '退役条件:那片依赖被裁决/移植时,把对应的 `any` 别名换回真 import。',
+  ],
+  [
+    'lib/stats/index.ts',
+    '上游是 2 行桶(`./stats-database` = **dexie/IndexedDB** + `./stats-store` = Central/CAFE 遥测上报),' +
+      '两样宿主半都没有,而 dexie 那条是**产品裁决**(`docs/host-mirror-adaptation.md` §4.2)。' +
+      '整片 host 镜像只需要 **3 个名字**(`IStatsStore`/`StatsStore`/`ILaunchStats`),且**只作类型用**' +
+      '(实测:唯一调用是 `increment(...)`)。替身把 `increment` 记进**进程内**留痕' +
+      '(`takeRecordedStats()` 读得到)⇒ 不是静默:探针可以断言「上游真的调了 recordPush」。' +
+      '不落盘、不上报。退役条件:决定「宿主半要不要遥测」时,要么换真实现、要么把这两个名字从 app-store 的构造里删掉。',
+  ],
+  [
+    'lib/resolve-git-proxy.ts',
+    '上游 43 行,`resolveProxy(url)` 走 **Electron 主进程 IPC**(`../ui/main-process-proxy`)拿 PAC 字符串 ——' +
+      '宿主半没有 Electron。替身恒返回 `undefined`(**「没有解析到代理」,不是「直连」**)。' +
+      '这与今天的宿主实现**逐字相同**:`src/host/git-service.ts`/`git-runner.ts` 今天没有任何代理解析' +
+      '(`grep -rn resolveGitProxy src/host` = 0 处)⇒ 不是新增的行为缺失。环境变量那一档由上游的' +
+      '`lib/git/environment.ts` 的 `envForProxy` 负责(它在调用本函数**之前**就退出了)。' +
+      '退役条件:宿主提供「按 url 解析系统代理」的能力时换回上游原文;判据:`http_proxy` 指向本地假代理时能观察到 `git fetch` 真的走了它。',
+  ],
+  [
+    'lib/trampoline/trampoline-environment.ts',
+    '上游 222 行的**自带凭据助手**入口(起本地服务 + `desktop-trampoline` 原生二进制 + `../ssh/*` + dugite 的' +
+      '`resolveGitBinary`)。宿主半一样都没有,而且**不该有**:本仓的凭据注入是 `src/host/credential-bridge.ts` +' +
+      '`git-service.ts` 的 `credentialEnv()`(另一套,已经存在)。' +
+      '替身保留上游签名,并给一个**显式注入点** `setTrampolineEnvProvider`(宿主启动时把自己的凭据环境注册进来)' +
+      '—— 一个静默返回 `{}` 的替身会让**每次**远端操作退化成无凭据,而且**看不出来**(公开仓库照样成功)。' +
+      '刻意**不**复现:SSH askpass、passphrase 暂存、`GIT_ASKPASS=""`(上游设它是为了禁用 askpass,' +
+      '而宿主要的正是相反的:用 `git-service` 注入的 `GIT_ASKPASS` 脚本)。' +
+      '退役条件:宿主把凭据注入统一到一条机制上之后,本文件应当消失。',
+  ],
+  [
+    'lib/hooks/with-hooks-env.ts',
+    '上游 105 行:把仓库 hooks 抄进临时目录、起 `process-proxy` 原生进程代理执行,' +
+      '并把 hooks 的 shell 环境(`get-shell-env`)注进 git 子进程。宿主半没有 `process-proxy`。' +
+      '替身逐字保留签名并直接 `fn(opts?.env)` —— 这与上游在' +
+      '`!opts?.interceptHooks || !getHooksEnvEnabled()` 时的**早退分支逐字相同**(上游 `:34-36`),' +
+      '不是编出来的行为。⚠️ 诚实缺口:`interceptHooks` 为真时宿主**不会**拦截 hooks(git 直接执行仓库里的 hook),' +
+      '而宿主今天本来就是这么做的 ⇒ 这条接线没有让它变差,但「上游那套 hooks 沙箱」仍然未移植。' +
+      '`withHooksEnv` 的 `opts` 类型**从 `../git/core` 取**(不重声明:重声明会造出结构上「看起来一样」的别名,' +
+      '而 `core.ts:385` 传进来的那个是 dugite 扩展过的版本,实测两者不互相可赋值 = 替身自己造出来的假错)。' +
+      '退役条件:宿主提供「拦截并代理仓库 hooks」的能力时换回上游原文。',
+  ],
+  /*
+   * ---- 2026-10-08「跨根采纳」批次(见 docs/cross-root-adoption.md) ----
+   *
+   * 下面 8 条是**新的一类**登记:它们不是「上游那份在宿主半没有落点」的适配层,
+   * 而是**跨根转发**(`export * from '../../..<深度>../core/desktop/...'`)——
+   * 文件里**只有一行真代码 + 一段为什么**,字节的唯一一份在 client 根。
+   *
+   * 为什么选转发而不是第二份逐字副本,判据是**可复跑的一条测量**:
+   * 转发一个模块会把它的 **client 根闭包**拉进 `tsconfig.host-mirror.json` 这个程序;
+   * 若该闭包里出现**与 host 根同名**的模块(例如 `lib/api.ts` —— host 那份 349 行、
+   * client 那份 632 行,是**两份不同的替身**),同一个程序里就会出现两份实现,
+   * 那才是「第二个真相源」。实测(`tsc -p tsconfig.host-mirror.json --listFiles`):
+   * 本批 7 个客户根文件进入宿主镜像程序,而它们**没有一个是 host 根已有的模块**
+   * (`emoji` / `format-duration` / `format-relative` / `helpers/non-fatal-exception` /
+   * `offset-from` / `ui/autocompletion/common` / `ui/lib/list/list-row-index-path`)。
+   * 反例(所以那三个是**逐字副本**而不是转发):`lib/email.ts`(client 闭包 5 模块 /
+   * 4 个与 host 同名)、`lib/web-flow-committer.ts`(12 / 11)、
+   * `lib/ci-checks/ci-checks.ts`(9 / 7)。把 `ci-checks` 改成转发实测过:
+   * 诊断 165 → 166,`--listFiles` 里同时出现两份 `lib/api.ts` 与两份 `models/account.ts`,
+   * 并新造出 `commit-status-store.ts(506,7)` TS2345(两份 `Account`/`api` 的身份冲突)
+   * 与一条从 client 根漏进来的 `models/account.ts(1,44)` TS2305。
+   */
+  [
+    'lib/offset-from.ts',
+    '上游 37 行、**零 import**。host 根唯一的一份字节在 `src/core/desktop/lib/offset-from.ts`' +
+      '(与上游 `cmp` 无输出),本文件只是它在上游路径上的转发。' +
+      '如果不转发,`lib/stores/commit-status-store.ts:20` 与 `lib/stores/helpers/branch-pruner.ts:19` 各报一条 TS2307。' +
+      '退役条件:该上游文件需要 host 专属改动时改成 host 自己的实现并改写本条理由。',
+  ],
+  [
+    'ui/autocompletion/common.ts',
+    '上游 **5 行**(内容就是一个 `export const DefaultMaxHits = 25`)、**零 import**。' +
+      'host 根唯一的一份字节在 `src/core/desktop/ui/autocompletion/common.ts`(与上游 `cmp` 无输出)。' +
+      '引用方 `lib/stores/github-user-store.ts:12` 与 `lib/stores/issues-store.ts:6` 在**上游原文**里' +
+      '取的就是同一个常量 ⇒ 这里绝不能出现第二个 25。' +
+      '退役条件:同 `lib/offset-from.ts`。',
+  ],
+  [
+    'lib/format-relative.ts',
+    '上游 44 行,import 面只有两个**裸包**(`mem` / `quick-lru`,本仓都已安装)、**零相对 import**。' +
+      'host 根唯一的一份字节在 `src/core/desktop/lib/format-relative.ts`(与上游 `cmp` 无输出)。' +
+      '⚠️ 它是本批**新发现的缺件**:重测报告 §4.6 只写了 `branch-pruner` 缺 `../../offset-from`,' +
+      '实测它缺的是**两个**说明符(还有这一个)。' +
+      '退役条件:同 `lib/offset-from.ts`。',
+  ],
+  [
+    'lib/helpers/non-fatal-exception.ts',
+    '⚠️ **转发到一个登记偏离**(client 根那份是 85 行替身,上游 64 行),这是本批**唯一**一条' +
+      '「转发的目标本身不是逐字副本」的登记,必须单独读。' +
+      '为什么不能照抄上游那 64 行:它第 22 行 `import { getHasOptedOutOfStats } from \'../stats/stats-store\'`,' +
+      '而 host 根的遥测面按已决的**选项 B** 只有 104 行的 `stats/index.ts`(只实现 `increment`),' +
+      '`getHasOptedOutOfStats` 不存在 ⇒ 照抄会「修一个缺件、造一个新缺件」。' +
+      'client 那份替身逐条写明它替换了什么(去掉遥测 opt-out 查询、投递改成可注入的宿主钩子' +
+      '`setNonFatalExceptionHost()`,**节流逻辑逐字保留**)⇒ 共享它,「非致命异常怎么投递」在整棵树里只有**一个**实现。' +
+      '⚠️ 诚实边界:宿主半今天**没有**任何入口能走到它(`repository-state-cache.ts` 不在 `tsconfig.host.json` 的闭包里),' +
+      '所以这是**类型面**的解析,不是「接上了投递」;真接线时应在宿主启动处注入 logger。' +
+      '退役条件:① host 补上投递面时换成 host 自己的实现;② 或 `getHasOptedOutOfStats` 进了 host 的 stats 替身时' +
+      '改回上游原文的逐字副本。',
+  ],
+  [
+    'lib/emoji.ts',
+    '上游 18 行,**只导出一个类型** `Emoji`(**零运行期代码、零 import**)。' +
+      'host 根唯一的一份字节在 `src/core/desktop/lib/emoji.ts`(与上游 `cmp` 无输出)。' +
+      '引用方 `models/banner.ts:1` 只用那个类型。' +
+      '退役条件:同 `lib/offset-from.ts`。',
+  ],
+  [
+    'ui/lib/list/list-row-index-path.ts',
+    '上游 99 行(纯函数 + 一个类型),**零 import**。' +
+      'host 根唯一的一份字节在 `src/core/desktop/ui/lib/list/list-row-index-path.ts`(与上游 `cmp` 无输出)。' +
+      '引用方 `models/drag-drop.ts:1` 只用 `RowIndexPath` 那个类型。' +
+      '退役条件:同 `lib/offset-from.ts`。',
+  ],
+  [
+    'lib/format-duration.ts',
+    '上游 58 行(两个纯函数导出),**零 import**。' +
+      'host 根唯一的一份字节在 `src/core/desktop/lib/format-duration.ts`(与上游 `cmp` 无输出)。' +
+      '⚠️ 与 `lib/format-relative.ts` 一样是本批**新发现的缺件**:它是 `lib/ci-checks/ci-checks.ts:17`' +
+      '(`../format-duration`)的依赖,而重测报告 §4.6 把 `../ci-checks/ci-checks` 记成单件 [今],' +
+      '没有量它自己的闭包。' +
+      '退役条件:同 `lib/offset-from.ts`。',
+  ],
+  [
+    'lib/stats/stats-store.ts',
+    '**接缝文件**,不是跨根转发:它 `export * from \'./index\'`,即 host 根**自己**那个 104 行遥测替身。' +
+      '为什么必须有它:接线批次把上游 `lib/stats/index.ts`(2 行桶)整份替换成了替身,只补了 `../stats` 这一个入口,' +
+      '而上游原文里 `lib/stores/updates/changes-state.ts:18` 走的是**另一个文件名** `../../stats/stats-store`' +
+      '⇒ 它报 TS2307。这是**我们自己造的**接缝冲突,不是上游缺件。' +
+      '⚠️ 为什么**不**转发到 client 根那份 765 行纯类型替身:那会让宿主程序里同时存在**两个** `IStatsStore` 声明' +
+      '(`git-store.ts` / `repository-state-cache.ts` 用 `../stats` 那个,`changes-state.ts` 用 client 那个)' +
+      '⇒ 同一个 `StatsStore` 实例在两条边上是两种类型,正是「第二个真相源」,而且不报错。' +
+      '本文件落地后两条边都落在 `src/host/mirror/lib/stats/index.ts` 这一个文件上。' +
+      '⚠️ 它**不是**遥测:上游那份 1,486 行会向 Central/CAFE 上报,而 `./index` 只把 `increment` 记进进程内留痕。' +
+      '退役条件:① 决定「宿主半要遥测」时用真实现替换 `./index`(本文件改成逐字副本、`index.ts` 回归 2 行桶);' +
+      '② 决定「不要遥测」时把 `StatsStore`/`ILaunchStats` 从 app-store 的构造里删掉,本文件与 `./index` 一起消失。',
+  ],
+]);
+
+/** host 镜像根里「上游没有对应文件」的集合。现在为空(全部逐字来自上游)。 */
+const HOST_OURS = new Set([]);
+
+/**
+ * 两段镜像根。每段各自带 `own`/`expected` 登记表 —— 两张表的**键空间独立**,
+ * 因为同一个相对路径(如 `lib/stores/app-store.ts`)在两段里的身份完全不同:
+ * client 根是 151 行替身(已登记偏离),host 根是 10,935 行逐字原文(字节一致)。
+ *
+ * ⚠️ `@type` 不是装饰:`scripts/check-scripts-types.mjs` 用 `checkJs` 跑这个文件,
+ * 少了它,下面 `for (const { root } of ROOTS)` 里的 `root` 是 any ⇒
+ * `relative(root, file)` 是 any ⇒ `identical.push(...)` 推不出 `string[]` ⇒
+ * 一次多 5 条 TS7005/TS7034(实测:脚本诊断 377→374 条但「新增指纹」137→140)。
+ * @type {{root: string, label: string, ours: Set<string>, expected: Map<string, string>}[]}
+ */
+const ROOTS = [
+  { root: MIRROR, label: 'client 镜像', ours: OURS, expected: EXPECTED },
+  { root: HOST_MIRROR, label: 'host 镜像  ', ours: HOST_OURS, expected: HOST_EXPECTED },
+];
+
+/**
  * 递归列出某目录下的 .ts/.tsx(相对路径,统一用 `/` 分隔)。
  * @param root - 根目录。
  */
@@ -834,32 +1146,59 @@ async function main() {
     return;
   }
 
-  const files = await listFiles(MIRROR);
-  const identical = [];
-  const expected = [];
-  const suspicious = [];
-  const ours = [];
-  const noUpstream = [];
+  /** @type {{root: string, label: string, total: number, identical: string[], expected: string[], ours: string[], noUpstream: string[], suspicious: string[], expectedSet: Map<string, string>}[]} */
+  const perRoot = [];
+  for (const { root, label, ours: oursSet, expected: expectedSet } of ROOTS) {
+    const files = await listFiles(root);
+    const identical = [];
+    const expected = [];
+    const suspicious = [];
+    const ours = [];
+    const noUpstream = [];
 
-  for (const file of files) {
-    const rel = relative(MIRROR, file).split(sep).join('/');
-    if (OURS.has(rel)) {
-      ours.push(rel);
-      continue;
+    for (const file of files) {
+      const rel = relative(root, file).split(sep).join('/');
+      if (oursSet.has(rel)) {
+        ours.push(rel);
+        continue;
+      }
+      const upstream = await findUpstream(rel);
+      if (upstream === null) {
+        noUpstream.push(rel);
+        continue;
+      }
+      const same = Buffer.compare(await readFile(file), await readFile(upstream)) === 0;
+      if (same) identical.push(rel);
+      else if (expectedSet.has(rel)) expected.push(rel);
+      else suspicious.push(rel);
     }
-    const upstream = await findUpstream(rel);
-    if (upstream === null) {
-      noUpstream.push(rel);
-      continue;
-    }
-    const same = Buffer.compare(await readFile(file), await readFile(upstream)) === 0;
-    if (same) identical.push(rel);
-    else if (EXPECTED.has(rel)) expected.push(rel);
-    else suspicious.push(rel);
+
+    perRoot.push({
+      root,
+      label,
+      total: files.length,
+      identical,
+      expected,
+      ours,
+      noUpstream,
+      suspicious,
+      expectedSet,
+    });
   }
 
-  const total = files.length;
-  console.log(`dsh-git: 镜像完整性 — 共 ${total} 个文件`);
+  const total = perRoot.reduce((n, r) => n + r.total, 0);
+  const identical = perRoot.flatMap((r) => r.identical);
+  const expected = perRoot.flatMap((r) => r.expected);
+  const ours = perRoot.flatMap((r) => r.ours);
+  const noUpstream = perRoot.flatMap((r) => r.noUpstream.map((rel) => `${r.root}/${rel}`));
+  const suspicious = perRoot.flatMap((r) => r.suspicious.map((rel) => `${r.root}/${rel}`));
+
+  console.log(`dsh-git: 镜像完整性 — 共 ${total} 个文件(${ROOTS.length} 段镜像根)`);
+  for (const r of perRoot) {
+    console.log(
+      `  [${r.root}] ${r.label}: ${r.total} 文件 → 一致 ${r.identical.length} / 已登记 ${r.expected.length} / 自增 ${r.ours.length}`,
+    );
+  }
   console.log(`  与上游字节一致: ${identical.length}`);
   console.log(`  已登记的偏离:   ${expected.length}`);
   console.log(`  我们自己新增:   ${ours.length}`);
@@ -868,19 +1207,21 @@ async function main() {
   }
 
   // 登记了但实际已一致(说明上游变了或我们对齐了)→ 提醒清理,不算失败
-  const staleExpected = expected.filter((rel) => !identical.includes(rel));
-  const registered = [...EXPECTED.keys()].filter((rel) => !expected.includes(rel) && !ours.includes(rel));
-  if (registered.length > 0) {
-    console.log(`  提示: 登记表里这些文件不在镜像里(已删除?): ${registered.join(', ')}`);
+  for (const r of perRoot) {
+    const registered = [...r.expectedSet.keys()].filter(
+      (rel) => !r.expected.includes(rel) && !r.ours.includes(rel),
+    );
+    if (registered.length > 0) {
+      console.log(`  提示: [${r.root}] 登记表里这些文件不在镜像里(已删除?): ${registered.join(', ')}`);
+    }
   }
-  void staleExpected;
 
   if (suspicious.length > 0) {
     console.error('');
     console.error('dsh-git: 以下镜像文件与上游不一致,且**没有登记理由** —— 视为被改坏:');
     for (const rel of suspicious) console.error(`  ≠ ${rel}`);
     console.error('');
-    console.error('  若是有意偏离,请在 scripts/verify-mirror.mjs 的 EXPECTED 里登记并写明理由;');
+    console.error('  若是有意偏离,请在 scripts/verify-mirror.mjs 的 EXPECTED / HOST_EXPECTED 里登记并写明理由;');
     console.error('  若是被改坏,直接从上游与上游一致回去。');
     process.exitCode = 1;
     return;

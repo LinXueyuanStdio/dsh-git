@@ -5,6 +5,7 @@
   "inputFiles": 657,
   "artifacts": {
     "src/client/desktop-diff-styles.generated.ts": "sha256:ddbf32edfbeb17708e3aa5d28c5c70b457ab5856df2025606b0d3a8a2adbebd4",
+    "src/client/highlighter-worker.generated.ts": "sha256:5e70ff10e0aa3e51f991186c075747a489f1c51e3be8ec825676b96d5bd00d2f",
     "lib/index.js": "sha256:2855e71992bf48e948447b1fd197865505fe09ed391cca2b62dadb543990477d",
     "lib/index.js.map": "sha256:23af6e9c38899f344c2f1fb97f613750d905a76a273ac7f7bca893491c5444b4",
     "lib/client.js": "sha256:1a7df8b07e1aa30d5351cd271d44fad79627186cd8b41702109855c3bd432326",

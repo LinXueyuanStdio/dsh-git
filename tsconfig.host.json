@@ -20,7 +20,21 @@
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
     // 上游 tsconfig 就是这一行。host 跑在 node 里,需要 node 全局与内置类型。
-    "types": ["node"]
+    "types": ["node"],
+    "baseUrl": ".",
+    /*
+     * esbuild 宿主构建 `alias` 的类型层镜像(见 `scripts/build.mjs` 的 `hostAlias`)。
+     * 目前只有一条:上游 `lib/**` 的 4 个文件 `import byline from 'byline'`
+     * (把 git 的 stderr/stdout 按行切开),而它做的事用一个 15 行的
+     * `src/host/shims/byline.ts` 就能顶 —— 不为它新增 npm 依赖。
+     *
+     * ⚠️ 与 `tsconfig.host-mirror.json` 的 `paths` **必须逐条一致**:
+     * 两个程序看的是同一批镜像文件,一边有这一条、另一边没有,就会得到
+     * 「host 程序 0 条、hostMirror 程序 1 条 TS2307」这种自相矛盾的读数。
+     */
+    "paths": {
+      "byline": ["./src/host/shims/byline.ts"]
+    }
   },
   "include": [
     "src/index.ts",
@@ -29,5 +43,18 @@
     "types/desktop-globals.d.ts",
     "types/host-shims.d.ts"
   ],
-  "exclude": ["node_modules", "lib", "references", "vendor", "screenshots", "src/core/desktop"]
+  // `src/host/mirror/**` 是 2026-10 新增的**第三段镜像**(Desktop 编排层的逐字副本,
+  // 见 tsconfig.host-mirror.json 的文件头)。它**不在**本程序里:这 102 个文件 import
+  // electron/dexie/keytar/@github/copilot-sdk/../app-state 等本仓尚不存在的东西,
+  // 一次会带进上千条 TS2307 —— 那些是**未适配存量**,不是回归,混进来会让真回归
+  // 淹在噪声里。它由 `tsconfig.host-mirror.json` 单独测量,适配一个就搬一个。
+  "exclude": [
+    "node_modules",
+    "lib",
+    "references",
+    "vendor",
+    "screenshots",
+    "src/core/desktop",
+    "src/host/mirror"
+  ]
 }

@@ -177,6 +177,11 @@ export const PORT_SURFACES = [
       '.panel': '空态/二进制/大 diff 面板(来自 _panel.scss)',
       '.image-header': '图片 diff 的表头(来自 _diff.scss)',
       '.diff-contents-warning': '大文件警告条',
+      '.path-label-component': 'DiffHeader → PathLabel 的根(上游 `_path-label.scss:1`)。' +
+        '缺它 `PathText` 拿不到 `display:flex;flex-grow:1;min-width:0`,表头里的长路径' +
+        '既不会截断、也量不到可用宽度(2026-10-08 随 Changes 头部改用镜像 `DiffHeader` 新增)',
+      '.path-text-component': '路径文本本体(上游 `_path-text.scss:3`)。镜像 `PathText` 的' +
+        '截断算法按**这个盒子量出来的宽度**算字符预算(`ui/lib/path-text.tsx:396-404`)',
       '.button-component': 'Button 原语(来自 _button.scss)',
       '.popover-component': 'Popover 原语(来自 _popover.scss)',
       'svg.octicon': 'Octicon 图标基底(来自 _octicons.scss)',
@@ -290,6 +295,31 @@ export const PORT_SURFACES = [
       '.ref-component': '分支名 chip(来自 `ui/_ref.scss`;`no-changes.tsx` 就在本面渲染它)',
       'svg.octicon': 'Octicon 图标基底(`ui/_octicons.scss`;告警条的三角图标靠它才有 fill)',
       '.link-button-component': '`LinkButton` 本体(`ui/_button.scss`;告警条的「调整筛选」链接靠它)',
+      /*
+       * 2026-10-09:提交表单的 **作者输入框(co-author)与自动补全**。
+       *
+       * 镜像件 `ui/lib/author-input/author-input.tsx` 与
+       * `ui/autocompletion/user-autocompletion-provider.tsx` 进活跃图之后,
+       * `ui/_author-input.scss` / `ui/_autocompletion.scss` 才是它们的配方来源,而这两个
+       * partial **此前不在任何面的闭包里** ⇒ `.author-input-component` / `.shadow-input` /
+       * `.added-author-container` / `.user` 一直躺在 `check-base-recipes` 的**未登记 split**
+       * 桶里(类名在、基础配方在闭包外)。
+       *
+       * 修法两步缺一不可:
+       *   1. 入口 `src/client/scss/desktop-changes.scss` 顶层 `@import` 这两个 partial
+       *      —— 把配方**真的带进编译产物**;
+       *   2. 在这里逐条登记 —— 把「它必须在**本面作用域下**存在」变成**构建期断言**。
+       *
+       * 只做第 1 步,缺口就从「有闸门报的 split」退化成「没人守卫」;只做第 2 步则产物里
+       * 没有那些规则,本闸门立刻红。两条要一起改。
+       */
+      '.author-input-component': '作者输入框本体(上游 `ui/_author-input.scss:3`);提交表单的 co-author 输入走它',
+      '.shadow-input': '输入框的隐形量宽副本(上游 `_author-input.scss:21`;`@include textboxish` + `position:absolute`)',
+      '.added-author-container': '已添加作者的容器(上游 `_author-input.scss:29`,配方只有 `display:contents`)',
+      '.autocompletion-container': '自动补全容器(上游 `ui/_autocompletion.scss:3`;`autocompleting-text-input.tsx` 渲染)',
+      '.autocompletion-popup': '自动补全弹层(上游 `_autocompletion.scss:14/18`;宽度由 `.emoji`/`.user`/`.issue` 修饰)',
+      '.autocompletion-item': '自动补全里的一项(上游 `_autocompletion.scss:61`)',
+      '.user': '自动补全里的用户行(上游 `_autocompletion.scss:133`;由 `user-autocompletion-provider.tsx:240` 渲染)',
     },
     /*
      * 刻意**没有** usageFiles:本面还没有渲染方,「实际用到的类名」没有取样来源。

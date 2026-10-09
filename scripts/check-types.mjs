@@ -18,18 +18,23 @@
  * 所以本脚本 **不是** 我们的发明,而是把上游 ts-loader 的关卡用
  * `tsc --noEmit` 的最低成本形式补回来(不换构建器,只加一道检查)。
  *
- * ## 2. 两个程序(client / host)
+ * ## 2. 三个程序(client / host / hostMirror)
  *
- * 两半的硬约束相反,所以是**两个 tsconfig**:
+ * 两半的硬约束相反,所以是**两个 tsconfig**;2026-10 加的第三段镜像再单开一个:
  *
  *   - `tsconfig.json`      —— 浏览器半(`src/client/**` + 与上游一致的 `src/core/desktop/**`)。
  *     `types: []`,于是 `import ... from 'os'` / `setImmediate` / `Buffer` / `process`
  *     会**报错** —— 这是「浏览器半禁止 node 内置」(`docs/goal-port-desktop.md` §2.3)
  *     第一次有了机器检查。
  *   - `tsconfig.host.json` —— host 半(`src/index.ts` + `src/host/**` + `src/core/*.ts`)。
- *     沿用上游的 `types: ["node"]`。
+ *     沿用上游的 `types: ["node"]`。**不含** `src/host/mirror/**`(显式 exclude)。
+ *   - `tsconfig.host-mirror.json` —— host 镜像(`src/host/mirror/**`):Desktop 编排层
+ *     (`lib/stores/**` + `lib/api.ts` + `lib/databases/**` + `lib/git/**` + `models/**`)
+ *     的**逐字副本**,带 dugite 依赖,只能在宿主半跑。它是**尚未适配的存量**,
+ *     所以单独成一个程序、存量钉在基线里,而不是混进 host 把真回归淹掉。
+ *     见 `docs/host-mirror-adaptation.md`。
  *
- * 基线按 `程序 + 文件` 计数:`{ "client": { "src/…": 3 }, "host": { … } }`。
+ * 基线按 `程序 + 文件` 计数:`{ "client": { "src/…": 3 }, "host": { … }, "hostMirror": { … } }`。
  * 同一个文件同时出现在两个程序里时,两边的计数**独立** —— 那是两个不同的
  * 编译现场,合并没有意义。
  *
@@ -76,10 +81,15 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 /** 基线(棘轮)文件。 */
 const BASELINE_PATH = join(ROOT, 'scripts/type-baseline.json');
 
-/** 两个编译程序:键名 → tsconfig 文件名。 */
+/** 三个编译程序:键名 → tsconfig 文件名。 */
 const PROGRAMS = [
   { name: 'client', config: 'tsconfig.json', title: '浏览器半(src/client + 镜像 src/core/desktop)' },
   { name: 'host', config: 'tsconfig.host.json', title: 'host 半(src/index.ts + src/host + src/core)' },
+  {
+    name: 'hostMirror',
+    config: 'tsconfig.host-mirror.json',
+    title: 'host 镜像(src/host/mirror:Desktop 编排层逐字副本,**尚未适配**)',
+  },
 ];
 
 /** TypeScript 入口候选(优先 lib/tsc.js:用 node 直接跑,不依赖 .bin 的可执行位)。 */
@@ -270,7 +280,7 @@ function parseArgs(argv) {
   return opts;
 }
 
-const HELP = `用法: node scripts/check-types.mjs [--json] [--write-baseline] [--program client|host|all]
+const HELP = `用法: node scripts/check-types.mjs [--json] [--write-baseline] [--program client|host|hostMirror|all]
 
   类型检查棘轮:tsc --noEmit 的诊断按**文件**计数,与 scripts/type-baseline.json 比对。
   某文件诊断变多 / 出现新文件 ⇒ 退出码 1;变少 ⇒ 报告为可改进项。
@@ -281,11 +291,13 @@ const HELP = `用法: node scripts/check-types.mjs [--json] [--write-baseline] [
 
   --json            stdout 输出机器可读 JSON
   --write-baseline  用当前诊断数重写 scripts/type-baseline.json(棘轮)
-  --program NAME    只跑一个程序:client(默认 tsconfig.json)/ host(tsconfig.host.json)
+  --program NAME    只跑一个程序:client(默认 tsconfig.json)/ host(tsconfig.host.json)/ hostMirror(tsconfig.host-mirror.json)
 
-  两个程序:
-    client  src/client/** + src/core/desktop/**  (types: [],禁止 node 内置)
-    host    src/index.ts + src/host/** + src/core/*.ts  (types: ["node"])
+  三个程序:
+    client      src/client/** + src/core/desktop/**  (types: [],禁止 node 内置)
+    host        src/index.ts + src/host/** + src/core/*.ts  (types: ["node"])
+    hostMirror  src/host/mirror/**  (types: ["node"])—— Desktop 编排层的逐字副本,
+                **尚未适配**,存量诊断全部钉在基线里;适配一个搬一个(client/host)。
 `;
 
 /** 主流程。 */
@@ -329,7 +341,7 @@ async function main() {
       ? PROGRAMS
       : PROGRAMS.filter((p) => p.name === opts.program);
   if (selected.length === 0) {
-    warn(`--program 只接受 client / host / all,收到 "${opts.program}";按 all 处理`);
+    warn(`--program 只接受 client / host / hostMirror / all,收到 "${opts.program}";按 all 处理`);
   }
   const programsToRun = selected.length === 0 ? PROGRAMS : selected;
 

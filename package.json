@@ -68,6 +68,13 @@
     "typecheck": "node scripts/check-types.mjs",
     "e2e": "node scripts/e2e-deploy.mjs"
   },
+  "dependencies": {
+    "@github/alive-client": "^1.2.0",
+    "byline": "^5.0.0",
+    "dompurify": "^3.4.13",
+    "dugite": "^3.2.3",
+    "marked": "^4.0.10"
+  },
   "peerDependencies": {
     "@deepseek-ai/dsh-client-ui-primitives": ">=0.2.0-rc.2 || >=0.3.0-rc.1 || >=0.4.0-rc.1 || >=0.5.0-rc.1",
     "@deepseek-ai/schemastery": "~3.18.4",
@@ -106,6 +113,10 @@
     "@typescript-eslint/eslint-plugin": "^6.13.2",
     "@typescript-eslint/parser": "^6.13.2",
     "classnames": "^2.5.1",
+    "codemirror": "^5.65.17",
+    "codemirror-mode-elixir": "^1.1.2",
+    "codemirror-mode-luau": "^1.0.2",
+    "codemirror-mode-zig": "^1.0.7",
     "date-fns": "^4.1.0",
     "deep-equal": "^2.2.3",
     "esbuild": "^0.28.2",

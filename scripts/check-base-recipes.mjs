@@ -1266,11 +1266,39 @@ export function collectLiveClasses(text, file, universe, allowLoose) {
     }
   }
 
-  // (2) classNames('a b', { c: cond })
+  /*
+   * (2) classNames('a b', { c: cond })
+   *
+   * 实参里出现的字符串字面量本来就算证据(内联的 `classNames(['handle', {focused}])`
+   * 一直能采到)。这里补的是**同一文件里数组字面量借了个变量名**的那一种:
+   *
+   *     const classNamesArr: Array<any> = ['handle', { focused: isFocused }]
+   *     return classNames(classNamesArr)          // ← 实参是裸标识符,字面量不在调用范围内
+   *
+   * 形状**故意写得很窄**:只认「实参整个就是一个裸标识符」+「同一文件里有
+   * `const/let/var IDENT ... = [ ... ]`」。**不追**函数返回值、不追
+   * `const x = classNames(...)` 的二次包装、不跨文件、不把裸标识符以外的形状
+   * 的字符串当类名。放宽成「任意字符串都算」会把真正发不出来的类名一起洗绿 ——
+   * 这正是本检查存在的意义(见文件头 §3:只许写理由,不许放宽判定)。
+   */
   for (const m of clean.matchAll(/\b(?:classNames|classnames|clsx|cx)\s*\(/g)) {
     const open = m.index + m[0].length - 1;
     const range = readBalanced(clean, open, '(', ')');
-    if (range !== null) addExpression(range, 'classNames');
+    if (range === null) {
+      continue;
+    }
+    addExpression(range, 'classNames');
+    const sole = range.text.trim();
+    if (!/^[A-Za-z_$][\w$]*$/.test(sole)) {
+      continue;
+    }
+    const escaped = sole.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // `: Array<any>` 之类的类型注解里不含 `=` 与 `;`,写成可选片段。
+    for (const decl of clean.matchAll(new RegExp(`\\b(?:const|let|var)\\s+${escaped}\\s*(?::[^=;]*)?=\\s*\\[`, 'g'))) {
+      const bracket = clean.indexOf('[', decl.index);
+      const literal = readBalanced(clean, bracket, '[', ']');
+      if (literal !== null) addExpression(literal, 'classNames');
+    }
   }
 
   // (3) classList.add/remove/toggle/contains('a b')

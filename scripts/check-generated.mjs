@@ -91,6 +91,17 @@ const MANIFEST_PATH = join(ROOT, 'scripts/generated-manifest.json');
  */
 const ARTIFACTS = [
   'src/client/desktop-diff-styles.generated.ts',
+  /*
+   * **语法高亮 worker 的源码字符串**(2026-10 新增)。
+   *
+   * 由 `scripts/build.mjs` 调 `scripts/highlighter-worker.mjs` 生成:把上游
+   * `app/src/highlighter/index.ts`(690 行模式表 + 分词器)打成一个自足 IIFE、
+   * 以字符串内联;浏览器半的 `src/client/shim-node-url.ts` 拿它 `new Blob` 出
+   * worker 的脚本 URL。它和 `desktop-diff-styles.generated.ts` 是同一类东西
+   * (构建期产物、被静态 import),所以同样必须进清单 —— 否则「上游那一半同步了
+   * 但没重建」这种漂移没人发现(manifests 存在的理由,见文件头 §2)。
+   */
+  'src/client/highlighter-worker.generated.ts',
   'lib/index.js',
   'lib/index.js.map',
   'lib/client.js',
@@ -103,7 +114,17 @@ const ARTIFACTS = [
 const BUILD_ENTRY = 'scripts/build.mjs';
 
 /** 除 `src/**` 之外的输入(相对仓库根)。 */
-const EXTRA_INPUTS = ['package.json', 'scripts/build.mjs', 'scripts/styles.mjs'];
+const EXTRA_INPUTS = [
+  'package.json',
+  'scripts/build.mjs',
+  'scripts/styles.mjs',
+  /*
+   * 高亮 worker 的打包器(模式表 → 自足 IIFE → `highlighter-worker.generated.ts`)。
+   * 它是那份生成物的**输入**:不进这张表的话,「改了它 + 重建」会被判成
+   * 「输入没变、产物却变了」= **假失败**(而那正是这份清单最容易被人关掉的原因)。
+   */
+  'scripts/highlighter-worker.mjs',
+];
 
 /**
  * 输入扫描根(相对仓库根)。
