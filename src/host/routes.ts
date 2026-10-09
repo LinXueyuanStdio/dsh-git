@@ -50,12 +50,53 @@ export interface RouteDeps {
   /** 当前会话所在的工作区路径(自动登记正在编辑的项目)。 */
   currentWorkspace?: (sessionId: string) => Promise<string | null>;
   /**
+   * 长连接(上游 `AliveStore` + 真 `@github/alive-client`)。
+   *
+   * 可选:老接线或探针里的替身没有它时,`alive/status` 回
+   * `{ listening: false, supported: false }` —— 客户端据此**维持轮询**
+   * (而不是把「没有这条路由」误读成「长连接已就绪」然后停掉轮询)。
+   */
+  alive?: {
+    status(): {
+      readonly listening: boolean;
+      readonly endpoint: string;
+      readonly received: number;
+      readonly cursor: number;
+      readonly lastError: string | null;
+    };
+    eventsSince(since: number): {
+      events: ReadonlyArray<{
+        readonly id: number;
+        readonly event: unknown;
+        readonly receivedAt: number;
+      }>;
+      cursor: number;
+    };
+  };
+  /**
    * 本 host 产物的构建时间戳。
    * 放进 health 是为了让**客户端能自己发现版本错配** —— host 半不参与热重载,
    * 刷新页面只会拿到新的前端,于是很容易出现「界面是新的、host 是旧的」,
    * 表现为一堆莫名其妙的旧行为(曾经为此白查了很久)。
    */
   buildStamp?: string;
+  /**
+   * **LFS 覆盖检查**(`lfs/untracked` 路由)—— 上游 `lib/git/lfs.ts:107` 的
+   * `filesNotTrackedByLFS`。
+   *
+   * **可选 + 注入**,理由与 `system` / `alive` 逐字相同,只是这条更硬:
+   * 实现在 `src/host/lfs-check.ts`,而它 `import` 的是镜像 git 层(dugite)。
+   * 若让 `routes.ts` 或 `git-service.ts` 直接 import,仓里 **24 个探针**的宿主产物
+   * 会全体连带打进镜像层 ⇒ 每个探针都得复制宿主产物的四条构建参数
+   * (`src/index.ts:405-419` 记过同一课)。注入把这件事收敛成一处。
+   *
+   * 没有它时路由回 `unsupported: true`(**不是**「都算未跟踪」—— 那会凭空造出告警),
+   * 客户端据此说实话并**照常提交**(它只是告警闸门,不是硬门)。
+   */
+  lfs?: {
+    /** @param root - 仓库根;@param files - 仓库内相对路径。 */
+    untracked(root: string, files: ReadonlyArray<string>): Promise<ReadonlyArray<string>>;
+  };
   /** 大文件上限提示用。 */
   log?: (message: string) => void;
 }
@@ -429,6 +470,118 @@ export function createGitHandler(deps: RouteDeps): (request: IncomingMessage, re
     'repo/tree': async (body) => deps.git.listFiles(requirePath(body)),
 
     /**
+     * 「git 这次提交会用谁当作者」—— 上游 `lib/git/var.ts:20-42` 的
+     * `getAuthorIdentity`(`git var GIT_AUTHOR_IDENT`,成功码 `{0, 128}`)。
+     *
+     * **消费方(唯一,已在树且可达)**:`src/client/changes-view.tsx` 的
+     * `CommitAuthorAvatar` —— 提交区左下角那个「Committing as <name>」头像与浮层。
+     * 上游那份数据来自 `app-store` 的 `commitAuthor`(`getAuthorIdentity`),
+     * 由 `ui/repository-settings/repository-settings.tsx:380-382` 的
+     * `dispatcher.refreshAuthor(repository)` 刷新。
+     *
+     * 响应形状刻意**只有原始那一行**:`{ ident: string | null }`。
+     * 解析(`CommitIdentity.parseIdentity`)留在客户端 —— 那份解析器**已经逐字在树**,
+     * 在这里再写一份就是第二份真源。`null` = 上游 `var.ts:33-35` 的
+     * 「`user.useConfigOnly` 且没配 name/email」,**不是**错误。
+     */
+    'repo/author-ident': async (body) => deps.git.authorIdent(requirePath(body)),
+
+    /**
+     * **多提交操作 · squash** —— 上游 `lib/git/squash.ts`(173 行,逐字镜像在
+     * `src/core/desktop/lib/git/squash.ts`)。
+     *
+     * 规格出处:`docs/changes-state-adoption.md` §2.4.3;2026-10 本轮把 argv / env /
+     * 结果判定**逐行对着上游复核过**,结论与两处更正写在
+     * `docs/multi-commit-operation-adoption.md`(其中一条:`RebaseResult` 有 **6** 个
+     * 取值,ledger §1.2.2 记的「5 个」是错的)。
+     *
+     * 请求字段:`path`、`toSquash`(sha 数组)、`squashOnto`(sha)、
+     * `lastRetainedCommitRef`(字符串或 null)、`commitMessage`(字符串)、可选 `noVerify`。
+     * 响应:**`{ result }`** —— `result` 是 `RebaseResult` 的字符串值。
+     *
+     * ⚠️ **`ConflictsEncountered` 是成功响应,不是错误信封**:冲突是多提交操作的
+     * 正常一步(客户端要进冲突解决态),上游 `parseRebaseResult` 就是**返回**它
+     * (`lib/git/rebase.ts:425-427`)。折成信封会让界面把「正常一步」播成失败。
+     *
+     * ⚠️ **但冲突档今天没有出路**:仓库会停在 rebase 中途,续跑只能靠
+     * `continueRebase`(`:444-546`)—— 它**不是一条 argv**(先 stage 手工解决、
+     * 再 stage 其余 tracked 文件、读 `REBASE_HEAD`,然后自己在 `--skip` 与
+     * `--continue` 之间选)。**2026-10-10 起它有了**:本文件下面的
+     * `'rebase/continue'` 就是那条出路(用户裁决「都做」)。
+     */
+    'multi-commit/squash': async (body) => {
+      const squashOnto = str(body, 'squashOnto');
+      if (squashOnto === undefined) {
+        throw new GitServiceError('bad-request', '缺少 squashOnto(要压到哪一条提交上)。');
+      }
+      const toSquash = strList(body, 'toSquash');
+      if (toSquash.length === 0) {
+        throw new GitServiceError('bad-request', '缺少 toSquash(要被压入的提交号)。');
+      }
+      return deps.git.squashCommits({
+        path: requirePath(body),
+        toSquash,
+        squashOnto,
+        lastRetainedCommitRef: nullableRev(body.lastRetainedCommitRef, 'lastRetainedCommitRef'),
+        // 上游 `squash.ts:139` 的判定是 `commitMessage.trim() !== ''`;
+        // 缺字段等同于空串 = 「用 git 默认消息」,不是错误。
+        commitMessage: typeof body.commitMessage === 'string' ? body.commitMessage : '',
+        noVerify: bool(body, 'noVerify'),
+      });
+    },
+
+    /**
+     * **多提交操作 · reorder** —— 上游 `lib/git/reorder.ts`(153 行,逐字镜像在
+     * `src/core/desktop/lib/git/reorder.ts`)。
+     *
+     * 请求字段:`path`、`toMove`(sha 数组)、`beforeCommit`(字符串或 null)、
+     * `lastRetainedCommitRef`(字符串或 null)、可选 `noVerify`。
+     * 响应:`{ result }`,与 squash 同一套(`ConflictsEncountered` 同样是**成功**值)。
+     * `beforeCommit: null` = 移到最前(上游 `reorder.ts:120-126`)。
+     */
+    'multi-commit/reorder': async (body) => {
+      const toMove = strList(body, 'toMove');
+      if (toMove.length === 0) {
+        throw new GitServiceError('bad-request', '缺少 toMove(要移动的提交号)。');
+      }
+      return deps.git.reorderCommits({
+        path: requirePath(body),
+        toMove,
+        beforeCommit: nullableRev(body.beforeCommit, 'beforeCommit'),
+        lastRetainedCommitRef: nullableRev(body.lastRetainedCommitRef, 'lastRetainedCommitRef'),
+        noVerify: bool(body, 'noVerify'),
+      });
+    },
+
+    /**
+     * **续跑一个停在冲突上的变基** —— 上游 `ui/dispatcher/dispatcher.ts:1473-1512` 的
+     * `continueRebase` → `app-store.ts:7535-7553` 的 `_continueRebase` →
+     * `lib/git/rebase.ts:444-546` 的 `continueRebase`。
+     *
+     * 请求字段:`path`,`可选 noVerify`。响应:**`{ result }`** —— `RebaseResult` 的
+     * 字符串值,与 `multi-commit/*` 同一形状(`ConflictsEncountered` / `Aborted` /
+     * `OutstandingFilesNotStaged` 都是**成功响应**,不是错误信封)。
+     *
+     * ## 为什么它今天才存在(裁决变了)
+     *
+     * 2026-10-10 之前这里写着「本插件没有 `rebase/continue` 路由」,理由是
+     * `continueRebase` **不是一条 argv**(先逐文件 stage 手工解决、再读 status/REBASE_HEAD,
+     * 然后自己在 `--skip` 与 `--continue` 之间选)。用户随后裁决「都做」⇒
+     * 那套多步流程落在 `GitService.continueRebase`(逐跳对着上游写,注释在那边),
+     * 这里只是它的路由。`multi-commit/squash` 那条注释里「冲突档今天没有出路」
+     * 一句**已过时**,一并更正。
+     *
+     * **`manualResolutions` 不在请求里**(如实):上游那一跳要吃客户端的
+     * 「手工标记为已解决」状态机,而它整个不在本仓(见 `GitService.continueRebase`
+     * 的方法注释);客户端到达这里的前提是「冲突文件已经没有了」
+     * (`ContinueRebase` 在同帧禁用按钮)。
+     */
+    'rebase/continue': async (body) => deps.git.continueRebase({
+      path: requirePath(body),
+      noVerify: bool(body, 'noVerify'),
+    }),
+
+    /**
      * 读**某个修订下**某个文件的内容(blob)—— **老 host 契约**(JSON)。
      *
      * 与 `file-text` 的区别:后者读工作区磁盘上的当前内容,这里读某个版本的内容。
@@ -466,6 +619,50 @@ export function createGitHandler(deps: RouteDeps): (request: IncomingMessage, re
         throw new GitServiceError('bad-request', '缺少文件路径。');
       }
       return deps.git.fileText(requirePath(body), file);
+    },
+
+    /**
+     * 工作区文件的**字节数** —— `fs.promises.stat` 的宿主半边。
+     *
+     * 消费者是**逐字镜像**的上游 `lib/large-files.ts`:客户端
+     * `src/client/shim-node-fs-promises.ts` 的 `IFsPromisesHost.stat` 把
+     * `join(repository.path, file.path)` 的绝对路径交到这里,量的就是
+     * 「>100 MiB 的超大文件」告警(阈值在客户端那一份里,**不在这条路由**)。
+     *
+     * 刻意**不读文件内容**(`GitService.fileSize` 只 `lstat` + `realpath`):
+     * `file-text` 也能给 size,但它对 ≤2 MiB 的文件会把整份读回来 ——
+     * 一个 500 文件的提交就是 500 份内容,而这条路径只需要 4 个字节的数字。
+     * @returns `{ size: number | null }`,`null` = 不是工作区里的普通文件。
+     */
+    'file-size': async (body) => {
+      const file = str(body, 'file');
+      if (file === undefined) {
+        throw new GitServiceError('bad-request', '缺少文件路径。');
+      }
+      return deps.git.fileSize(requirePath(body), file);
+    },
+
+    /**
+     * 这批路径里哪些**没有被 LFS 跟踪** —— 上游 `lib/git/lfs.ts:107` 的
+     * `filesNotTrackedByLFS`(逐文件 `git check-attr filter <path>`)。
+     *
+     * 上游的调用点是 `ui/changes/sidebar.tsx:169`(超大文件告警的第二道):
+     * 「大 **且** 没被 LFS 覆盖」才值得拦。所以调用方只会在**已经**判出超大文件之后
+     * 才来这里,入参通常只有几个。
+     *
+     * 没有注入 `deps.lfs` 时回 `{ untracked: [], unsupported: true }` ——
+     * **不假装**「都算未跟踪」(那会凭空造出告警),客户端看到 `unsupported`
+     * 会说实话并照常提交。
+     */
+    'lfs/untracked': async (body) => {
+      const files = strList(body, 'files');
+      if (files.length === 0) {
+        return { untracked: [] as string[], unsupported: deps.lfs === undefined };
+      }
+      if (deps.lfs === undefined) {
+        return { untracked: [] as string[], unsupported: true };
+      }
+      return { untracked: [...await deps.lfs.untracked(requirePath(body), files)], unsupported: false };
     },
 
     /** 目录选择:克隆目标、添加仓库都用它(宿主能力,没有则返回 null)。 */
@@ -955,6 +1152,79 @@ export function createGitHandler(deps: RouteDeps): (request: IncomingMessage, re
       tags: await deps.git.unpushedTags(requirePath(body), str(body, 'remote')),
     }),
 
+    // ---------- stash 族(上游 `lib/git/stash.ts`,298 行) ----------
+
+    /**
+     * 列 stash。上游:`getStashes`(`lib/git/stash.ts:45-88`),
+     * argv 逐字见 `core/git-argv.ts` 的 `stashLogArgv`。
+     *
+     * 返回 `desktopEntries`(**只有**带 `!!GitHub_Desktop<branch>` 前缀的条目)
+     * 与 `stashEntryCount`(总条数;与上游 `entries.length - 1` 的偏离写在
+     * `GitService.stashList` 的 JSDoc 上,带实测读数)。
+     * 「没有 `refs/stash`」是**空结果**不是错误(退出码 128 被吞掉)。
+     */
+    'stash/list': async (body) => deps.git.stashList(requirePath(body)),
+
+    /**
+     * 建 stash。上游:`createDesktopStashEntry`(`lib/git/stash.ts:143-207`),
+     * 消息是 `!!GitHub_Desktop<branch>`,**未跟踪文件先整份 `git add`**。
+     *
+     * 请求体:`{path, branch, untrackedFiles?: string[]}`。
+     * 回执里多一个 `created`:上游同一个函数也返回布尔量 ——
+     * `false` 表示 `git stash push` 打了 `No local changes to save`
+     * (那不是失败,是「没什么可贮藏」)。
+     */
+    'stash/push': async (body) => {
+      const branch = str(body, 'branch');
+      if (branch === undefined) {
+        throw new GitServiceError('bad-request', '缺少分支名。');
+      }
+      return {
+        ok: true,
+        created: await deps.git.createStashEntry(requirePath(body), branch, strList(body, 'untrackedFiles')),
+      };
+    },
+
+    /**
+     * 把一条 stash 应用回工作区并删掉它。上游:`popStashEntry`
+     * (`lib/git/stash.ts:238-271`),argv `stash pop --quiet <name>`。
+     * 冲突走既有的 `merge-conflicts` 信封;「退出码 1 + stderr 空 ⇒ 手工 drop」
+     * 那一档在 `GitService.popStashEntry` 里。
+     */
+    'stash/pop': async (body) => {
+      await deps.git.popStashEntry(requirePath(body), requireSha(body));
+      return { ok: true };
+    },
+
+    /** 丢弃一条 stash。上游:`dropDesktopStashEntry`(`lib/git/stash.ts:219-229`)。 */
+    'stash/drop': async (body) => {
+      await deps.git.dropStashEntry(requirePath(body), requireSha(body));
+      return { ok: true };
+    },
+
+    /**
+     * 某条 stash 的文件清单。上游:`getStashedFiles`(`lib/git/stash.ts:279-297`),
+     * argv `stash show <sha> --raw --numstat -z --format=format: --no-show-signature --`。
+     */
+    'stash/show': async (body) => deps.git.getStashedFiles(requirePath(body), requireSha(body)),
+
+    /**
+     * 把一条 stash 挪到别的分支名下。上游:`moveStashEntry`
+     * (`lib/git/stash.ts:95-116`)= `commit-tree` + `stash store` + `drop`。
+     * ⚠️ 上游触发它的弹窗(`ui/stash-changes/stash-and-switch-branch-dialog.tsx`)
+     * 属于**切分支**那条面,今天还没接线 —— 这条路由是「机制先建好」,
+     * 已在交付说明里登记为未接线的触发点。
+     */
+    'stash/move': async (body) => {
+      const branch = str(body, 'branch');
+      if (branch === undefined) {
+        throw new GitServiceError('bad-request', '缺少目标分支名。');
+      }
+      return {
+        sha: await deps.git.moveStashEntry(requirePath(body), requireSha(body), branch),
+      };
+    },
+
     // ---------- 历史 ----------
     'log': async (body) => deps.git.log(requirePath(body), {
       limit: num(body, 'limit', 50),
@@ -1301,6 +1571,30 @@ export function createGitHandler(deps: RouteDeps): (request: IncomingMessage, re
     },
     'gh/rate': async () => ({ remaining: deps.auth.rateRemaining() }),
 
+    /*
+     * ---------- 长连接(上游 `AliveStore`)----------
+     *
+     * 数据面的**所有者是宿主**(见 `src/host/alive.ts`):浏览器拿不到令牌,
+     * 而 alive 的两个端点都要令牌。客户端只读这两条路由 ——
+     * 它**不再**为通知发任何 GitHub 请求(轮询在长连接就绪时被停掉,
+     * 见 `src/client/alive.ts` 的 `applyAliveMode`)。
+     */
+    'alive/status': async () => ({
+      ...(deps.alive === undefined
+        ? { listening: false, endpoint: '', received: 0, cursor: 0, lastError: '宿主没有接长连接' }
+        : deps.alive.status()),
+      supported: deps.alive !== undefined,
+    }),
+    'alive/events': async (body) => {
+      if (deps.alive === undefined) {
+        // 明确回空 + `supported:false`,让客户端**不要**据它停轮询。
+        throw new GitServiceError('bad-request', '宿主没有接长连接(alive/events 不可用)。');
+      }
+      const since = num(body, 'since', 0);
+      const { events, cursor } = deps.alive.eventsSince(since);
+      return { events, cursor };
+    },
+
     // ---------- 远程仓库列表(令牌在 host,不打浏览器) ----------
     'remote-repos': async (body) => {
       const force = bool(body, 'force');
@@ -1394,6 +1688,44 @@ function requirePath(body: Record<string, unknown>): string {
     throw new GitServiceError('bad-request', '缺少仓库路径。');
   }
   return path;
+}
+
+/**
+ * 「字符串或 **null**」形状的取参 —— 多提交操作的两个区间字段用。
+ *
+ * 为什么需要单独一个:`str()` 把 `null`、`''`、缺字段**都**当「没给」,
+ * 而这两个字段里 `null` 是一个**有含义的值**:
+ *  - `lastRetainedCommitRef === null` ⇒ 上游 `rebase.ts:616` 的 `--root`
+ *    (选中的提交里包含分支的第一个提交,没法用 `<sha>^` 指它);
+ *  - `beforeCommit === null` ⇒ 上游 `reorder.ts:120` 的「移到最前」。
+ * ⇒ 三者必须分开:缺字段/空串 = `bad-request`,`null` = 合法值,字符串 = 普通值。
+ * (合法性——非空、不以 `-` 开头、无空白/冒号——留给 `GitService.assertValidRev`。)
+ * @param v - 原始请求字段。
+ * @param name - 报错里用的字段名。
+ */
+function nullableRev(v: unknown, name: string): string | null {
+  if (v === null || v === undefined) {
+    return null;
+  }
+  if (typeof v === 'string' && v !== '') {
+    return v;
+  }
+  throw new GitServiceError('bad-request', `${name} 只能是字符串或 null。`);
+}
+
+/**
+ * stash 那几条路由共用的 `sha` 取值。
+ *
+ * 只做「有没有给」这一层;「是不是合法的对象名」由 `GitService` 的
+ * `assertStashSha` 判(`git-argv.ts` 的 `isSafeObjectName`)—— 那里才是
+ * 拼 argv 的地方,守卫必须贴着 argv,不能只留在路由层。
+ */
+function requireSha(body: Record<string, unknown>): string {
+  const sha = str(body, 'sha');
+  if (sha === undefined) {
+    throw new GitServiceError('bad-request', '缺少贮藏条目的提交号。');
+  }
+  return sha;
 }
 
 /**

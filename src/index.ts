@@ -19,15 +19,32 @@ import type { Context } from '@deepseek-ai/cordis';
 import { CommitMessageGenerator, type LlmModelChoice } from './host/commit-message.ts';
 import { GithubAuth } from './host/auth.ts';
 import { GitService } from './host/git-service.ts';
+// ★ 镜像编排层的接线(推送后的远端刷新走上游 `GitStore.fetchRemotes`)。
+import {
+  fetchRemotesAfterPush,
+  setMirrorGitCredentialEnv,
+  setMirrorGitLogger,
+} from './host/mirror-git.ts';
 import { RepoRegistry, type DomainLike, type PrefsPatch } from './host/repo-registry.ts';
 import {
   createCredentialBridge, GITHUB_TOKEN_REF,
   type CredentialService, type TokenHome,
 } from './host/credential-bridge.ts';
 import { createGitHandler, ROUTE_PREFIX } from './host/routes.ts';
+// ★ 长连接(上游 `AliveStore` + 真 `@github/alive-client`)的宿主生命周期。
+import { AliveService } from './host/alive.ts';
 import { SystemService } from './host/system-service.ts';
 import { subprocessRunner, type SubprocessLike } from './host/git-runner.ts';
 import { createHooksEnvProvider } from './host/hooks-env.ts';
+/*
+ * ★ LFS 覆盖检查的宿主实现(`lfs/untracked` 路由)。
+ *
+ * 为什么是**单独 import 再注入**而不是让路由层直接 import:本模块 `import` 的是
+ * 镜像 git 层(dugite),而仓里 24 个探针各自打一份宿主入口 —— 注入让它们的产物
+ * 一个 dugite 字节都不多(`src/host/routes.ts` 的 `RouteDeps.lfs` 注释写了全账,
+ * 与 `afterPushFetch` 是同一课)。
+ */
+import { lfsUntracked } from './host/lfs-check.ts';
 
 /** 插件名(loader 诊断用)。 */
 export const name = 'dsh-git';
@@ -315,6 +332,69 @@ export function apply(ctx: Context, config?: PluginConfig): () => void {
   const system = new SystemService(host, () => registry.allowedRoots());
 
   /*
+   * ★ **长连接的生命周期所有者**(2026-10-08)—— `src/host/alive.ts`。
+   *
+   * 为什么在宿主半:alive 的两个端点(`/alive_internal/websocket-url`、
+   * `/desktop_internal/alive-channel`)都要令牌,而**令牌只在宿主**
+   * (`src/client/gh-api.ts` 实测 `getToken()` 恒 `''`)。上游 `AliveStore`
+   * 逐字镜像在宿主,驱动它的是这里的 `AliveService`。
+   *
+   * **只装配,不联网**:`new` 不建 socket。真正的启动是下面 `startAlive()` 里的
+   * `alive.start()` ⇒ 上游 `AliveStore.setEnabled(true)`。
+   */
+  /** `auth.state()` 里那个登录名(异步,拿不到就先空着;只为日志可读)。 */
+  let authLogin = '';
+  const alive = new AliveService({
+    // 与 `auth.ghProxy` / `credentialEnv()` 读的是**同一个**来源,否则会出现
+    // 「git 能过、alive 打到另一个端点」这种最难查的分叉。`auth.endpoint()` 是私有的,
+    // 而 `RepoRegistry.githubEndpoint()` 就是它的取值处(`auth.ts:438`)。
+    endpoint: () => registry.githubEndpoint(),
+    token: () => registry.githubToken(),
+    login: () => authLogin,
+    proxy: (input) => auth.ghProxy(input),
+    log,
+  });
+  /** 长连接是否已经启动(幂等:`AliveService.start` 自己也判一次)。 */
+  let aliveStarted = false;
+  /**
+   * 启动长连接(**只跑一次**)。
+   *
+   * 时机:令牌来源结算之后(`startTokenHome()` 的 `bootstrap()` 之后)。
+   * 为什么不能更早:`AliveStore.getAll()` 会现造 `Account`,而令牌那时可能还是空串
+   * ⇒ 订阅一次都不发生,而且**不会重试**(上游 `subscribeToAccounts` 只在
+   * `accountsStore.onDidUpdate` 时重来,宿主没有那个通知面)。
+   * 这也是 {@link AliveService.refresh} 存在的原因:令牌**换值**时显式重启。
+   */
+  const startAlive = async (): Promise<void> => {
+    if (aliveStarted || disposed) {
+      return;
+    }
+    if (registry.githubToken() === '') {
+      // 未登录:长连接没有意义。**不标记 started**,登录后再调一次即可。
+      return;
+    }
+    aliveStarted = true;
+    try {
+      const state = await auth.state();
+      authLogin = state.login;
+    } catch {
+      // 登录名只进日志;拿不到不影响订阅。
+    }
+    alive.start();
+    /*
+     * ⚠️ 这里只能说**同步可知的那件事**:订阅**已经被请求**(`alive.start()` 的第一行)。
+     * `status().listening` 自 2026-10-08 起是**结果**(真的有 session + 订阅),
+     * 而它在这一刻**必然还没结算** —— session 是在 `getAliveWebSocketURL()` 回来之后
+     * 才建的(`alive-store.ts:166-192`)。用它在这行判断会打出一句**假的「未启动」**。
+     * 「连接到底建没建」由路由 `alive/status` 对外回答,不由这行日志猜。
+     */
+    const status = alive.status();
+    log('[dsh-git] Alive 长连接:已请求订阅(连接是否建立见 alive/status)'
+      + `(端点 ${status.endpoint === '' ? '未配置' : status.endpoint}`
+      + `${status.lastError === null ? '' : `,最近错误:${status.lastError}`})`);
+  };
+
+  /*
    * Hooks 的环境注入(2026-10):偏好读宿主存储域,环境由**用户 shell** 捕获一次
    * (`host/hooks-env.ts`)。接在 runner 上而不是 GitService 上,是因为注入点就是
    * 「spawn 之前的 env 槽」—— 与凭据注入同一条缝,但凭据走调用方显式给的 `opts.env`
@@ -341,8 +421,42 @@ export function apply(ctx: Context, config?: PluginConfig): () => void {
        * 不接它不会坏功能,但那条警告会静默消失。
        */
       log,
+      /*
+       * ★ **推送之后的远端刷新**走上游那份编排层(2026-10-08 接线)。
+       *
+       * 为什么是注入而不是让 `git-service.ts` 直接 import:仓里 **24 个探针**
+       * 各自 esbuild 一份宿主入口,直接 import 会让它们全部连带打进整片
+       * `src/host/mirror/**`,于是每个探针都要复制宿主产物的四条构建参数
+       * (`external: dugite` / `inject` / `alias: byline` / `banner: createRequire`)。
+       * 注入把这件事收敛到**一份生产构建配置 + 一个可替换的函数**。
+       *
+       * 语义契约(照上游 `app-store.ts:5341-5347`)写在
+       * `GitServiceOptions.afterPushFetch` 的注释里。
+       */
+      afterPushFetch: (root, remote, onProgress) =>
+        fetchRemotesAfterPush(root, remote, onProgress),
     },
   );
+
+  /*
+   * ★ 镜像编排层的宿主接线(2026-10-08)—— `src/host/mirror-git.ts`。
+   *
+   * 两件事,缺一不可:
+   *
+   * 1. **凭据**。镜像那条路上的 git 是 **dugite 直接 spawn** 的,不经过
+   *    `GitService` 的 `opts.env` ⇒ 凭据必须从另一条缝进去:上游
+   *    `lib/git/core.ts:289-291` 会把 `withTrampolineEnv` 给的 env 并进 dugite 的
+   *    `env`,而 `mirror-git.ts` 把 `withTrampolineEnv` 换成了可注入的
+   *    ({@link setMirrorGitCredentialEnv})。用**同一个** provider
+   *    (`auth.credentialEnv()`)是刻意的:私有远端在两条路上的凭据**必须**一致,
+   *    否则会出现「手动 fetch 能过、推送后的自动刷新 401」这种最难查的分叉。
+   *
+   * 2. **日志**。镜像里 `performFailableOperation` 捕获到的错误只
+   *    `emitError`(`base-store.ts:13`),而 `event-kit` 的 `Emitter` 在没有监听者时
+   *    **静默**。接上宿主 logger,否则「推送后的 fetch 失败」永远没人知道。
+   */
+  setMirrorGitCredentialEnv(() => auth.credentialEnv());
+  setMirrorGitLogger((message, error) => log(error === undefined ? message : `${message} :: ${error.message}`));
 
   // llm 是可选的:懒等待,缺它时生成功能返回可读错误而不是崩。
   const llmHolder: { service?: LlmServiceLike } = {};
@@ -535,9 +649,20 @@ export function apply(ctx: Context, config?: PluginConfig): () => void {
       // 跨进程写锁(宿主给的是 30 秒的上限,见 `credentials-local/src/index.ts:112`),
       // 而路由必须尽快挂上。这段时间 `githubToken()` 读到的是空(还没接上),接上
       // 之后由 `bootstrap()` 补齐 —— 令牌不在别处,没有第二个来源可读。
-      void startTokenHome().catch((error) => {
-        log(`[dsh-git] 凭据服务接线失败(GitHub 令牌只在内存里,重启后需要重新登录): ${messageOf(error)}`);
-      });
+      void startTokenHome()
+        .catch((error) => {
+          log(`[dsh-git] 凭据服务接线失败(GitHub 令牌只在内存里,重启后需要重新登录): ${messageOf(error)}`);
+        })
+        /*
+         * ★ **长连接的启动点**(就是这一行)。放在 `startTokenHome()` 的
+         * `bootstrap()` **之后**:早于它 `githubToken()` 还是空串 ⇒ `AliveStore`
+         * 一个订阅都不会建(而且不会自己重试)。`startAlive()` 内部对
+         * 「未登录」与「已启动过」都幂等。
+         */
+        .then(() => startAlive())
+        .catch((error) => {
+          log(`[dsh-git] Alive 长连接启动失败(数据面维持轮询): ${messageOf(error)}`);
+        });
 
       const webServer = host.webServer;
       if (webServer === undefined || typeof webServer.register !== 'function') {
@@ -548,7 +673,17 @@ export function apply(ctx: Context, config?: PluginConfig): () => void {
         kind: 'prefix',
         path: ROUTE_PREFIX,
         handler: createGitHandler({
-          git, registry, llm: generator, auth,
+          git, registry, llm: generator, auth, alive,
+          /*
+           * ★ LFS 覆盖检查(2026-10)—— 上游 `lib/git/lfs.ts:107` 的宿主接线。
+           *
+           * 消费者:`docs/probes/README-probe-index.md` 里那条「超大文件告警」
+           * (上游 `ui/changes/sidebar.tsx:159-183`):先由镜像
+           * `lib/large-files.ts` 判 >100 MiB,再由这条判「是否被 LFS 覆盖」。
+           * 注入的实现在 `src/host/lfs-check.ts`(逐字复用镜像那份
+           * `filesNotTrackedByLFS`,一行都没重写)。
+           */
+          lfs: { untracked: (root, files) => lfsUntracked(root, files) },
           // 只有宿主真的拿得到选择服务时才把 pickDirectory 交给路由 ——
           // 否则 health/repos 会谎报 canPickDirectory:true,界面就会把按钮渲染成可用。
           ...(hasHostPicker() ? { pickDirectory } : {}),
@@ -579,6 +714,14 @@ export function apply(ctx: Context, config?: PluginConfig): () => void {
 
   return () => {
     disposed = true;
+    /*
+     * ★ **长连接的停止点**(就是这一行)。`AliveService.stop()` 走的是上游
+     * `AliveStore.setEnabled(false)` ⇒ `unsubscribeFromAllAccounts` ⇒
+     * 每条订阅 `session.unsubscribe([...])` + `session.offline()`(关 socket)。
+     * 放在 `disposers` 之前:路由先卸掉的话,客户端可能在 socket 关闭前
+     * 再读一次 `alive/events`(读到的还是同一份缓冲,无害,但顺序清楚更好查)。
+     */
+    alive.stop();
     for (const dispose of disposers.reverse()) {
       try { dispose(); } catch { /* 已清理 */ }
     }

@@ -10,8 +10,8 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { lstat, mkdir, open as openFd, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { lstat, mkdir, mkdtemp, open as openFd, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import {
   BLOB_JSON_FALLBACK_MAX_BYTES, INDEX_REV, MAX_BLOB_BYTES, contentTypeFor, formatByteSize,
@@ -21,19 +21,26 @@ import type {
   BranchEntry, ClonePathKind, CommitDetail, CommitEntry, DiffResult, GitError, RepoStatus, SyncState,
 } from '../core/types.ts';
 import {
-  addArgv, applyCachedArgv, applyReverseArgv, blobContentArgv, blobIndexEntryArgv, blobSizeArgv, blobTreeEntryArgv, branchCreateArgv, branchDeleteArgv, branchListArgv,
+  addArgv, applyCachedArgv, applyReverseArgv, authorIdentArgv, blobContentArgv, blobIndexEntryArgv, blobSizeArgv, blobTreeEntryArgv, branchCreateArgv, branchDeleteArgv, branchListArgv,
   branchRenameArgv, checkoutBranchArgv, checkoutDetachArgv, checkoutPathsArgv, checkoutRemoteArgv, cherryPickArgv,
   cleanArgv, cloneArgv, commitArgv, commitDetailStatArgv, configGetArgv, configGetEffectiveArgv, configSetArgv, configUnsetArgv, diffCommitArgv,
   diffCommitNumstatArgv, diffNumstatArgv, diffStagedArgv, diffUnstagedArgv, diffUntrackedArgv,
   fetchArgv, initArgv, logArgv, nameStatusCommitArgv, pullArgv, pushArgv, pushDeleteRemoteBranchArgv,
   lsFilesArgv, remoteListArgv, remoteSetUrlArgv, remoteUrlArgv, resetMixedArgv, resetPathsArgv, resetToCommitArgv,
+  rebaseInteractiveArgv,
   revertArgv, rmCachedAllArgv,
   statusArgv, tagCreateArgv, tagDeleteArgv, tagListArgv, topLevelArgv, unpushedTagsArgv, updateRefDeleteArgv,
+  createDesktopStashMessage, extractBranchFromStashMessage, isSafeStashName, stashCommitTreeArgv, stashDropArgv,
+  stashLogArgv, stashPopArgv, stashPushArgv, stashShowFilesArgv, stashStoreArgv, STASH_LOG_FIELDS,
   isSafeObjectName, isSafeRev, type ResetMode } from '../core/git-argv.ts';
 import {
   buildRepoStatus, operationFromMarkers, parseBranches, parseConfigValue, parseGithubRemoteText,
-  parseLog, parseNameStatus, parseNumstat, parseRemotes, parseStatus, parseTags, parseUnpushedTags,
+  parseLog, parseNameStatus, parseNumstat, parseRawLogWithNumstat, parseRemotes, parseStatus, parseTags,
+  parseUnpushedTags, type IStashFileEntry,
 } from '../core/parse.ts';
+// stash 列表的解析**逐字**用镜像那份上游 parser(`createLogParser`),不再写第二份;
+// 它用 `Buffer` ⇒ 只能进 host 半(浏览器半没有 `Buffer`,见 `lib/git/index.ts` 的同类理由)。
+import { createLogParser } from '../core/desktop/lib/git/git-delimiter-parser.ts';
 import type { GitRunner, GitRunResult } from './git-runner.ts';
 import { DEFAULT_TIMEOUT_MS, OUTPUT_CAP_BYTES } from './git-runner.ts';
 import {
@@ -41,6 +48,7 @@ import {
   type SyncProgressKind, type SyncProgressSnapshot,
 } from './sync-progress.ts';
 import { buildPartialPatch, isSelectionEmpty, type FileStatusKind, type LineSelectionSpec } from '../core/partial-stage.ts';
+import { reorderTodoLines, squashTodoLines, type ITodoCommit } from '../core/rebase-todo.ts';
 import { parseRawDiff } from '../core/diff-parse.ts';
 import { testForInvalidChars } from '../core/desktop/lib/sanitize-ref-name.ts';
 import * as gitignore from './gitignore.ts';
@@ -59,6 +67,39 @@ export interface GitServiceOptions {
    * 由 `src/index.ts` 接上 `RouteDeps.log`(即宿主的 logger,自带 `[dsh-git]` 前缀)。
    */
   log?: (message: string) => void;
+  /**
+   * ★ **推送成功之后刷新远端** —— 上游 `app-store.ts:5341-5347`
+   * (`gitStore.fetchRemotes([safeRemote], false, …)`)的宿主注入点。
+   *
+   * ## 为什么是**注入**而不是在这里 `import`
+   *
+   * 实现是**镜像的那份上游编排层**(`src/host/mirror-git.ts` →
+   * `mirror/lib/stores/git-store.ts` 的 `GitStore.fetchRemotes`)。如果本文件直接
+   * `import` 它,那么**每一个**打包 `git-service.ts` 的东西都会连带把整片
+   * `src/host/mirror/**` 拉进自己的 bundle —— 实测:仓里 **24 个探针**各自
+   * `esbuild` 一份宿主入口,它们就都要跟着复制宿主产物的
+   * `external: ['dugite']` / `inject`(Desktop 构建期全局)/ `alias`(byline)/
+   * `banner`(CJS 依赖的 `require`)四条构建参数。**一份实现不该有 25 份构建配置。**
+   *
+   * 注入还买到一件更要紧的事:探针可以**只换这一个函数**来量
+   * 「有它 / 没它」两档(见 `docs/probes/host-mirror-wiring-probe.mjs` 的
+   * B 组阴性对照),而不用去改 `src/**`。
+   *
+   * 生产接线在 `src/index.ts`(那里 `import { fetchRemotesAfterPush }`)。
+   *
+   * ## 语义契约(照上游)
+   *
+   *   · **只在推送成功之后**调用(推送失败不会调);
+   *   · **失败不致命**:实现自己吞掉网络错误(上游 `performFailableOperation`
+   *     就是这么做的),所以它 reject 只会被折成一条警告,**不会**把成功的推送
+   *     判成失败;
+   *   · 进度经 `onProgress` 回灌到**同一个** `syncProgressByRoot`(不是另起一条)。
+   */
+  afterPushFetch?: (
+    root: string,
+    remote: { readonly name: string; readonly url: string },
+    onProgress?: (progress: { readonly description?: string; readonly value: number }) => void,
+  ) => Promise<void>;
 }
 
 /** 结构化失败:服务内部统一抛它,路由层转成信封。 */
@@ -270,6 +311,28 @@ export interface CommitRequest {
   paths: readonly string[];
 }
 
+/**
+ * 一条 **Desktop 建的** stash 条目 —— 上游 `IStashEntry`
+ * (`references/desktop/app/src/models/stash-entry.ts:3-22`)的 JSON 投影。
+ *
+ * 字段名与上游**逐字相同**(`name` / `branchName` / `stashSha` / `tree` / `parents`),
+ * 所以客户端拿到它之后可以直接当成 `IStashEntry` 用(只差 `files` 那一段,
+ * 由 `stash/show` 单独装载 —— 与上游 `getStashes` → `loadFilesForCurrentStashEntry`
+ * 的两段式一致)。
+ */
+export interface IStashEntryPayload {
+  /** 上游 `IStashEntry.name` = `%gD`,`refs/stash@{N}`。 */
+  readonly name: string;
+  /** 上游 `IStashEntry.branchName` = 从消息里解出来的分支名。 */
+  readonly branchName: string;
+  /** 上游 `IStashEntry.stashSha` = `%H`。 */
+  readonly stashSha: string;
+  /** 上游 `IStashEntry.tree` = `%T`。 */
+  readonly tree: string;
+  /** 上游 `IStashEntry.parents` = `%P` 按空格切开。 */
+  readonly parents: readonly string[];
+}
+
 export class GitService {
   /**
    * 内容类型的**记忆表**:同一个 blob sha / 同一个 worktree 版本只嗅探一次。
@@ -357,7 +420,13 @@ export class GitService {
     context: string,
     opts: {
       input?: string;
-      env?: Readonly<Record<string, string>>;
+      /**
+       * `undefined` 是**墓碑**(删掉父环境里的同名项)—— 语义与
+       * `GitRunOptions.env` 逐字相同,见 `git-runner.ts` 的注释。
+       * 唯一使用者是 `multi-commit/*`:上游 `lib/git/rebase.ts:585` 的
+       * `GIT_SEQUENCE_EDITOR: undefined`。
+       */
+      env?: Readonly<Record<string, string | undefined>>;
       timeoutMs?: number;
       allow?: readonly number[];
       /**
@@ -579,6 +648,47 @@ export class GitService {
     } catch {
       return null;
     }
+  }
+
+  // ---------- 作者身份(上游 `lib/git/var.ts`) ----------
+
+  /**
+   * 「git 这一次提交真正会用的作者身份」—— 上游 `lib/git/var.ts:20-42`
+   * 的 `getAuthorIdentity`。
+   *
+   * ## 为什么把它放在宿主(而不是客户端读 `config-get`)
+   *
+   * 这是**一条 git 命令**(`git var GIT_AUTHOR_IDENT`),按本仓的四层分工
+   * (`docs/goal-port-desktop.md` §2.4)命令的实现在 host;而且它的**成功码是
+   * `{0, 128}`** 两档,只有真正跑过子进程的一侧才知道自己拿到的是哪一档。
+   *
+   * ## 三档结局(逐档对着上游,不合并)
+   *
+   * | git 退出码 | stdout | 上游 | 这里 |
+   * |---|---|---|---|
+   * | 0 | `Name <email> <ts> <tz>` | `CommitIdentity.parseIdentity(stdout)`(`:38`) | `{ ident: <trim 后的 stdout> }` |
+   * | 128(`user.useConfigOnly` 且没配 name/email) | 空 | **回 `null`**(`:33-35`) | `{ ident: null }` |
+   * | 其它非零 | — | `git()` 直接抛 | `must()` 分类上抛(信封 `ok:false`) |
+   *
+   * ⚠️ **不在这里解析**(不调 `CommitIdentity`):解析器是客户端镜像里那一份
+   * (`src/core/desktop/models/commit-identity.ts` 的 `parseIdentity`,逐字上游),
+   * 在宿主再写一份正则就是第二份会漂移的真源。宿主只交**原始那一行**。
+   *
+   * ⚠️ `trim()` 只去掉 git 结尾的换行:`parseIdentity` 的正则没有 `$` 锚定,
+   * 上游传的是带换行的 stdout;trim 让「同一份身份」在任何消费方眼里都是同一个字符串
+   * (对解析结果**零影响**,已由 `docs/probes/repo-author-ident-probe.mjs` 的 A3 钉住)。
+   *
+   * @param path - 仓库内任意路径(只用来过 `gate` 定位仓库根)。
+   */
+  public async authorIdent(path: string): Promise<{ ident: string | null }> {
+    const root = await this.gate(path);
+    const res = await this.must(authorIdentArgv(), root, '读取作者身份', { allow: [0, 128] });
+    // 128 = `user.useConfigOnly` 且没有可用的 name/email ⇒ 上游 `var.ts:33-35` 回 null。
+    // 它**不是**失败:上游此时也照旧让界面渲染(头像用户为 `undefined`)。
+    if (res.exitCode !== 0) {
+      return { ident: null };
+    }
+    return { ident: res.stdout.trim() };
   }
 
   // ---------- diff ----------
@@ -1319,6 +1429,44 @@ export class GitService {
   }
 
   /**
+   * 工作区文件的**字节数** —— `fs.promises.stat` 在浏览器半的数据面。
+   *
+   * ## 它是谁的宿主半边
+   *
+   * 客户端 `src/client/shim-node-fs-promises.ts` 的 `IFsPromisesHost.stat` 是
+   * **唯一的注入点**,它自己的 JSDoc 就写着「宿主侧一旦提供 `stat`(例如走
+   * `repo/tree` 的 blob 大小),即可无改动接上」。这条方法 + `file-size` 路由
+   * 就是那半边;消费方是**逐字镜像**的上游 `lib/large-files.ts`
+   * (`src/core/desktop/lib/large-files.ts`,100 MiB 门限也在它里面,不在宿主)。
+   *
+   * ## 为什么**不建** `file/large` 路由
+   *
+   * `docs/probes/README-probe-index.md` §八 已裁决:门限逻辑住在客户端的镜像件里,
+   * 再开一条「宿主替你判 >100MB」的路由就是**第二份机制**(两处门限必然漂移)。
+   * 所以这里只给**通用的大小**,一个阈值都不判。
+   *
+   * ## 语义边界(如实记,因为它与 node 的 `fs.stat` 不完全同)
+   *
+   * | | node `fs.stat`(上游 `lib/large-files.ts` 用的) | 本条 |
+   * |---|---|---|
+   * | 普通文件 | `size` | 同 |
+   * | 缺失 / 目录 / 非法路径 | 抛 ENOENT 等 | **回 `{ size: null }`**(调用方按缺失处理) |
+   * | 符号链接 | 跟随链接(报**目标**大小) | `worktreeFile` 用 **`lstat`**,报**链接自身**大小;且链接指向仓库外时**拒绝**(守卫优先) |
+   *
+   * 第三条是刻意保留的守卫(`worktreeFile` 的三道闸),代价是「指向仓库内大文件的符号
+   * 链接」会被判成小文件 ⇒ 超大文件告警会**漏**它一个。今天不为此放宽守卫:
+   * 放宽意味着允许仓库里的链接把仓库外任意文件的**大小**读出来。
+   * @param path - 仓库根(过 gate)。
+   * @param file - 仓库内相对路径。
+   * @returns `size` 为 `null` = 不是工作区里的普通文件(缺失/目录)。
+   */
+  public async fileSize(path: string, file: string): Promise<{ size: number | null }> {
+    const root = await this.gate(path);
+    const info = await this.worktreeFile(root, file);
+    return { size: info === null ? null : info.size };
+  }
+
+  /**
    * 读某个修订下的文件内容(blob)—— **老 host 契约**(JSON + base64),
    * 新代码请用 {@link openBlob}(原始字节、`Range`、缓存)。
    *
@@ -1469,6 +1617,385 @@ export class GitService {
     await this.must(tagCreateArgv(name, sha), root, '新建标签');
   }
 
+  // ---------- 多提交操作:squash / reorder(上游 `lib/git/{squash,reorder}.ts`)----------
+
+  /**
+   * 生成交互式 rebase 的 todo 与（可选的）提交消息文件，跑**那一条** argv，按上游
+   * `parseRebaseResult` 的语义把结果折成 `RebaseResult` 的字符串值。
+   *
+   * ## 为什么这一层是完整的（不是「半接线」）
+   *
+   * 上游 `rebaseInteractive`(`lib/git/rebase.ts:576-633`)本来就**只有一条 argv**，
+   * 与 `continueRebase`(`:444-546`,先 stage、再自己选 `--skip`/`--continue`)不同。
+   * 本方法逐字复刻它：`-c sequence.editor=cat "<todoPath>" >` + `rebase [-–no-verify] -i <ref|--root>`,
+   * env `GIT_SEQUENCE_EDITOR` **不存在**、`GIT_EDITOR` = 消息文件或 `':'`。
+   *
+   * ## 但「一条 argv」不等于「一次操作就完了」（必须说清）
+   *
+   * `parseRebaseResult` 在冲突时**成功返回** `ConflictsEncountered`(`rebase.ts:425-427`)，
+   * 仓库此时停在 rebase 中途。要接着跑只能靠 `continueRebase`，而它**不是一条 argv**。
+   * **2026-10-10 起那条出路存在**：`GitService.continueRebase` + 路由 `'rebase/continue'`
+   * (此前「不建」的裁决被用户「都做」推翻;历史记在
+   * `docs/probes/README-probe-index.md` §八 与 §十七)。
+   * ⇒ 冲突档的调用方拿到 `ConflictsEncountered` 之后应当接着调 `rebase/continue`。
+   *
+   * ## 判定逐条对着上游
+   *
+   * | 现场 | 上游 | 这里 |
+   * |---|---|---|
+   * | 退出码 0 且 stdout 匹配 `/^Current branch [^ ]+ is up to date.$/im` | `AlreadyUpToDate`(`:418-420`) | 同 |
+   * | 退出码 0 | `CompletedWithoutError`(`:422`) | 同 |
+   * | 非 0 且仓库**已经进入 rebase 中途** | dugite 的 `GitError.RebaseConflicts` ⇒ `ConflictsEncountered`(`:425-427`) | 用 `operationMarkers` 读 `.git/rebase-merge`／`rebase-apply` 判「真在 rebase 中途」（**比匹配 stderr 硬**：git 的冲突文案随版本/语言变） |
+   * | 非 0 且 stderr 是 `Unresolved conflicts` | `OutstandingFilesNotStaged`(`:429-431`) | 按 stderr 逐字认这一句 |
+   * | 其它 | `parseRebaseResult` **抛** ⇒ `squash.ts`/`reorder.ts` 的 `catch` 折成 `RebaseResult.Error`（`:159-161`,`:143-145`） | 回 `'Error'`（**成功响应**，不是错误信封 —— 上游把它当返回值） |
+   *
+   * ## 一处**刻意的加固**（上游没有，写在这里以免被当成偏离）
+   *
+   * `sequence.editor` 的值会经 `sh -c` 执行，所以 todo 路径里若含 `"` 或换行，
+   * 拼出来的命令就**不是**我们要的那条（上游用 `os.tmpdir()` 起临时文件，同样有这条
+   * 暴露面）。这里改成**显式报错**而不是让它去跑一条错命令。
+   * @param root - 仓库根（已过 `gate`）。
+   * @param todo - todo 全文。
+   * @param commitMessage - squash 的提交消息；`''` ⇒ 不写消息文件（走 `':'`，上游 `squash.ts:139-146`）。
+   * @param lastRetainedCommitRef - 区间下界；`null` ⇒ `--root`。
+   * @param noVerify - 上游 `RebaseInteractiveOptions.noVerify`。
+   */
+  private async runInteractiveRebase(
+    root: string,
+    todo: string,
+    commitMessage: string,
+    lastRetainedCommitRef: string | null,
+    noVerify: boolean,
+  ): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-git-rebase-'));
+    const todoPath = join(dir, 'todo');
+    let messagePath: string | undefined;
+    try {
+      if (/["\n\r]/.test(todoPath)) {
+        throw new GitServiceError(
+          'internal',
+          '临时目录路径里有引号或换行,交互式 rebase 的 `sequence.editor` 无法安全拼接。',
+        );
+      }
+      await writeFile(todoPath, todo, 'utf8');
+      // 上游:squash 的消息文件只在 commitMessage 非空时写(`squash.ts:139-142`);
+      // `gitEditor` 与它同生共死(`:145-146`)—— 没有消息文件就交给 `':'`(no-op)。
+      if (commitMessage.trim() !== '') {
+        messagePath = join(dir, 'message');
+        await writeFile(messagePath, commitMessage, 'utf8');
+      }
+      const gitEditor = messagePath !== undefined ? `cat "${messagePath}" >` : ':';
+      /*
+       * env 的两项**逐字**来自上游 `rebase.ts:582-588`。
+       * `GIT_SEQUENCE_EDITOR: undefined` 是宿主 subprocess 服务的**墓碑**语义
+       * (见 `git-runner.ts` 的 `GitRunOptions.env` 注释),它让这个键在子进程里
+       * **不存在** —— 空串不等价(git 会去执行空命令)。
+       */
+      const env: Record<string, string | undefined> = {
+        GIT_SEQUENCE_EDITOR: undefined,
+        GIT_EDITOR: gitEditor,
+        ...(this.credentialEnv() ?? {}),
+      };
+      /*
+       * 「冲突」的硬判据 = **这次调用把仓库带进了 rebase 中途**。
+       * 先记一次调用前的标记,再记一次调用后的 —— 只有「前:不在 rebase / 后:在」才算
+       * 本次的冲突。单看「后:在 rebase」会把「仓库本来就有一个没跑完的 rebase」
+       * 误判成冲突档(`git rebase` 那时报的是 `a rebase is already in progress`,
+       * 上游 dugite 对它没有匹配 ⇒ `parseRebaseResult` 抛 ⇒ `RebaseResult.Error`)。
+       */
+      const rebaseBefore = (await this.operationMarkers(root)) === 'rebase';
+      const res = await this.runner.run(
+        rebaseInteractiveArgv(todoPath, lastRetainedCommitRef, { noVerify }),
+        root,
+        { env, timeoutMs: 180_000 },
+      );
+      if (res.timedOut === true) {
+        throw timeoutFailure(
+          rebaseInteractiveArgv(todoPath, lastRetainedCommitRef, { noVerify }),
+          '多提交操作',
+          180_000,
+          res.stderr,
+        );
+      }
+      if (res.exitCode === 0) {
+        return /^Current branch [^ ]+ is up to date\.$/im.test(res.stdout)
+          ? 'AlreadyUpToDate'
+          : 'CompletedWithoutError';
+      }
+      if (/unresolved conflicts?/i.test(res.stderr)) {
+        return 'OutstandingFilesNotStaged';
+      }
+      /*
+       * 「仓库现在真的在 rebase 中途」= 最硬的冲突判据。
+       * 它比匹配 stderr 强:git 的冲突文案随版本与语言变,而 `.git/rebase-merge`
+       * 是 git 自己的状态文件。前一刻不在、这一刻在 ⇒ 就是**这次**调用造成的。
+       */
+      if (!rebaseBefore && (await this.operationMarkers(root)) === 'rebase') {
+        return 'ConflictsEncountered';
+      }
+      /*
+       * 上游这条路会 `log.error(e)` 之后回 `RebaseResult.Error`(`squash.ts:159-161`)。
+       * 我们这里只留一行诊断 —— `stderr` 的原句必须留下,否则「操作出错了」这句话
+       * 在现场是不可追的(与 `gitDebugEnabled()` 那条同一条纪律)。
+       */
+      this.options.log?.(`[multi-commit] git 既没成功也没进入 rebase 中途:${firstLine(res.stderr)}`);
+      return 'Error';
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * 读**一次** `lastRetainedCommitRef..HEAD` 区间里的提交(log 顺序 = 新 → 旧)。
+   *
+   * 上游走 `getCommits(repository, revRange(ref,'HEAD'))`(`lib/git/index.ts`),
+   * 我们走**同一条** `logArgv`(sha + subject 取自同一次 `git log`)。
+   *
+   * ⚠️ **不静默截断**:todo 少一条 = 那个提交被丢掉。所以多要一条,
+   * 一旦真拿到 `limit + 1` 条就**抛错**,而不是交出一份悄悄变短的 todo。
+   * @param root - 仓库根。
+   * @param lastRetainedCommitRef - 区间下界;`null` ⇒ 整条 HEAD 历史。
+   */
+  private async commitsForTodo(root: string, lastRetainedCommitRef: string | null): Promise<CommitEntry[]> {
+    const limit = 10_000;
+    const ref = lastRetainedCommitRef === null ? undefined : `${lastRetainedCommitRef}..HEAD`;
+    const argv = logArgv({ limit: limit + 1, ...(ref !== undefined ? { ref } : {}) });
+    const res = await this.must(argv, root, '读取要重放的提交');
+    const all = parseLog(res.stdout);
+    if (all.length > limit) {
+      throw new GitServiceError(
+        'internal',
+        `这次操作要重放的提交超过 ${limit} 条,超出本路由的安全上限(拒绝以防 todo 被静默截断)。`,
+      );
+    }
+    return all;
+  }
+
+  /**
+   * **squash 若干提交到一个提交上**(上游 `lib/git/squash.ts` 的 `squash` 函数)。
+   *
+   * 分工与上游逐条对齐(上游步骤表见 `docs/changes-state-adoption.md` §2.4.3):
+   *  - todo 拼装 = {@link squashTodoLines}(上游 `:72-135`,纯逻辑);
+   *  - 临时文件 + `writeFile(messagePath)` = 宿主(`:71,84,108,126,131`,`:139-141`);
+   *  - 执行 = `rebaseInteractive`(`:148-158`)⇒ {@link runInteractiveRebase};
+   *  - `finally` 删临时目录(`:162-170`)。
+   *
+   * ⚠️ 上游 `squash.ts` 把**任何**异常折成 `RebaseResult.Error`(`:159-161`)。
+   * 这里只把 git 的意外结果折成 `'Error'`;`bad-request`(非法 sha、区间读不出来、
+   * todo 拼装失败)仍然走错误信封 —— 那是**请求本身不成立**,与「git 跑失败了」
+   * 不是同一件事,混成一个值会让界面把参数错误说成「操作出错」。
+   * @param input.path - 仓库路径。
+   * @param input.toSquash - 要被压进去的提交 sha(**不含** `squashOnto`)。
+   * @param input.squashOnto - 压到哪一条上。
+   * @param input.lastRetainedCommitRef - 区间下界;`null` ⇒ `--root`。
+   * @param input.commitMessage - 压完后的提交消息;`''` ⇒ 让 git 用默认(`':'`)。
+   * @param input.noVerify - 上游 `RebaseInteractiveOptions.noVerify`。
+   */
+  public async squashCommits(input: {
+    path: string;
+    toSquash: readonly string[];
+    squashOnto: string;
+    lastRetainedCommitRef: string | null;
+    commitMessage: string;
+    noVerify?: boolean;
+  }): Promise<{ result: string }> {
+    this.assertValidRev(input.squashOnto, '被压到的提交号');
+    for (const sha of input.toSquash) {
+      this.assertValidRev(sha, '要压入的提交号');
+    }
+    if (input.lastRetainedCommitRef !== null) {
+      this.assertValidRev(input.lastRetainedCommitRef, '区间下界');
+    }
+    const root = await this.gate(input.path);
+    const commits = await this.commitsForTodo(root, input.lastRetainedCommitRef);
+    const todo = squashTodoLines(
+      toTodoCommits(commits),
+      new Set(input.toSquash),
+      input.squashOnto,
+    );
+    const result = await this.runInteractiveRebase(
+      root,
+      todo,
+      input.commitMessage,
+      input.lastRetainedCommitRef,
+      input.noVerify === true,
+    );
+    return { result };
+  }
+
+  /**
+   * **把若干提交移动到某个提交之前**(上游 `lib/git/reorder.ts` 的 `reorder` 函数)。
+   *
+   * 与 {@link squashCommits} 同一条流水线,只有两处不同(逐字对着上游):
+   * todo 全部是 `pick`(`reorder.ts:63-131`),且**没有**消息文件
+   * (重排不改消息,`reorder.ts:133-142` 的 `opts` 里没有 `gitEditor`)。
+   * @param input.path - 仓库路径。
+   * @param input.toMove - 要移动的提交 sha。
+   * @param input.beforeCommit - 移到它之前;`null` = 移到最前(上游 `:120-126`)。
+   * @param input.lastRetainedCommitRef - 区间下界;`null` ⇒ `--root`。
+   * @param input.noVerify - 上游 `RebaseInteractiveOptions.noVerify`。
+   */
+  public async reorderCommits(input: {
+    path: string;
+    toMove: readonly string[];
+    beforeCommit: string | null;
+    lastRetainedCommitRef: string | null;
+    noVerify?: boolean;
+  }): Promise<{ result: string }> {
+    for (const sha of input.toMove) {
+      this.assertValidRev(sha, '要移动的提交号');
+    }
+    if (input.beforeCommit !== null) {
+      this.assertValidRev(input.beforeCommit, '移动到的位置');
+    }
+    if (input.lastRetainedCommitRef !== null) {
+      this.assertValidRev(input.lastRetainedCommitRef, '区间下界');
+    }
+    const root = await this.gate(input.path);
+    const commits = await this.commitsForTodo(root, input.lastRetainedCommitRef);
+    const todo = reorderTodoLines(
+      toTodoCommits(commits),
+      new Set(input.toMove),
+      input.beforeCommit,
+    );
+    const result = await this.runInteractiveRebase(
+      root,
+      todo,
+      '',
+      input.lastRetainedCommitRef,
+      input.noVerify === true,
+    );
+    return { result };
+  }
+
+  /**
+   * **继续变基** —— 上游 `lib/git/rebase.ts:444-546` 的 `continueRebase`
+   * (`multi-commit` 的冲突档走到一半之后的**唯一**出路)。
+   *
+   * ## 为什么它不是一个「一条 argv」的动作(以及为什么以前没有这条路由)
+   *
+   * 上游那 100 行的顺序是:
+   *
+   * ```ts
+   * for (const [path, resolution] of manualResolutions) { stageManualConflictResolution(…) }
+   * const otherFiles = trackedFiles.filter(f => !manualResolutions.has(f.path))
+   * await stageFiles(repository, otherFiles)                 // :468
+   * const status = await getStatus(repository, false)         // :470
+   * if (status == null) return RebaseResult.Aborted           // :471-476
+   * const rebaseCurrentCommit = await readRebaseHead(repository)   // :478
+   * if (rebaseCurrentCommit === null) return RebaseResult.Aborted  // :479-481
+   * const trackedFilesAfter = status.workingDirectory.files
+   *   .filter(f => f.status.kind !== Untracked)               // :483-485
+   * if (trackedFilesAfter.length === 0) {
+   *   const result = await git(['rebase','--skip', …])        // :522-535
+   *   return parseRebaseResult(result)
+   * }
+   * const result = await git(['rebase','--continue', …])      // :537-542
+   * return parseRebaseResult(result)
+   * ```
+   *
+   * 2026-10-10 之前本插件**没有**这条路由(裁决记在 `README-probe-index.md` §八);
+   * 用户随后裁决「都做」,于是按上面那张表逐跳落在这里。**没有** import 宿主镜像
+   * `src/host/mirror/lib/git/rebase.ts`:那会把镜像的编排层拉进宿主包
+   * (理由与 `mirror-git.ts` 的门缝同源 —— 宿主包只为一件事付那份字节)。
+   * 逐跳的落地见下面每一段的注释。
+   *
+   * ## `manualResolutions` 那一跳为什么是空循环(如实说明)
+   *
+   * 上游的「手工标记为已解决(用我方/用对方)」状态机(`MultiCommitOperation*`)
+   * **整个不在本仓**(`README-probe-index.md` §八)。客户端传上来的
+   * `RebaseConflictState.manualResolutions` 因此恒为空 `Map`
+   * (`changes-view.tsx` 的 `rebaseConflictState`),而 `ContinueRebase` 那颗按钮在
+   * **还有冲突文件时本来就被禁用**(`continue-rebase.tsx:38-46` 的
+   * `getConflictedFiles(...).length > 0`)⇒ 到达这里的前提就是「用户已经在命令行/编辑器里
+   * 解决并 `git add` 过,或本来就没有冲突」。这一跳因此不做事,但**保留位置**,
+   * 将来接上那套状态机时它就在这里。
+   *
+   * ## 与 `runInteractiveRebase` 的关系
+   *
+   * 失败档的判定**逐字复用**同一条口径(退出码 0 / `unresolved conflicts` /
+   * `.git/rebase-merge` 标记 / 其它 ⇒ `'Error'`),理由见那边的方法注释:
+   * 匹配 stderr 会随 git 版本与语言变,磁盘标记不会。
+   * @param input.path - 仓库路径。
+   * @param input.noVerify - 上游 `RebaseInteractiveOptions.noVerify`(`:528`/`:538`)。
+   * @returns `{ result }` —— `RebaseResult` 的字符串值(与 `multi-commit/*` 同一形状)。
+   */
+  public async continueRebase(input: { path: string; noVerify?: boolean }): Promise<{ result: string }> {
+    const root = await this.gate(input.path);
+    const dir = await this.gitDir(root);
+    if (dir === null) {
+      throw new GitServiceError('bad-request', '读不到 .git 目录,无法继续变基。');
+    }
+
+    /*
+     * ① 逐文件 stage(上游 `:450-468`)。
+     *
+     * 上游把 `files` 里**非未跟踪**的那些交给 `stageFiles`;manualResolutions 里的那些
+     * 已经单独 stage 过(那一跳在本仓为空,见方法注释)。我们这里取的是**宿主自己的
+     * status**(而不是客户端传的文件清单):两边必须是同一份事实,否则会出现
+     * 「客户端说 stage 了、索引里没有」这种静默分叉。
+     */
+    const before = await this.status(root);
+    const trackedBefore = before.files.filter((file) => file.untracked !== true).map((file) => file.path);
+    if (trackedBefore.length > 0) {
+      await this.must(addArgv(trackedBefore), root, '暂存手工解决的冲突');
+    }
+
+    /*
+     * ② `.git/REBASE_HEAD` 读不到 ⇒ 变基已经不在进行中(上游 `:478-481` 回 `Aborted`;
+     * 上游那 3 行 `log.warn` 的理由是「接着跑不安全」,我们照旧**不抛错** ——
+     * `Aborted` 是 `RebaseResult` 的合法值,不是失败信封)。
+     */
+    let rebaseHead: string;
+    try {
+      rebaseHead = (await readFile(join(dir, 'REBASE_HEAD'), 'utf8')).trim();
+    } catch {
+      return { result: 'Aborted' };
+    }
+    if (rebaseHead === '') {
+      return { result: 'Aborted' };
+    }
+
+    /*
+     * ③ stage 之后的 tracked 文件(上游 `:483-485`)。`--skip` 与 `--continue` 的判据
+     * 就是「这个提交还有没有内容要提交」:空 ⇒ `--skip`(否则 git 会因为空提交而停)。
+     */
+    const after = await this.status(root);
+    const trackedAfter = after.files.filter((file) => file.untracked !== true);
+    const skip = trackedAfter.length === 0;
+    const argv: readonly string[] = skip
+      ? ['rebase', '--skip', ...(input.noVerify === true ? ['--no-verify'] : [])]
+      : ['rebase', '--continue', ...(input.noVerify === true ? ['--no-verify'] : [])];
+
+    const timeoutMs = 180_000;
+    const res = await this.runner.run(argv, root, {
+      /*
+       * `GIT_EDITOR: ':'`(no-op)—— 上游 `:492-495` 的 `baseOptions.env`。
+       * 不设它时 `git rebase --continue` 会去开编辑器(交互式挂死)。
+       */
+      env: { GIT_EDITOR: ':', ...(this.credentialEnv() ?? {}) },
+      timeoutMs,
+    });
+    if (res.timedOut === true) {
+      throw timeoutFailure(argv, '继续变基', timeoutMs, res.stderr);
+    }
+    if (res.exitCode === 0) {
+      return {
+        result: /^Current branch [^ ]+ is up to date\.$/im.test(res.stdout)
+          ? 'AlreadyUpToDate'
+          : 'CompletedWithoutError',
+      };
+    }
+    if (/unresolved conflicts?/i.test(res.stderr)) {
+      return { result: 'OutstandingFilesNotStaged' };
+    }
+    if ((await this.operationMarkers(root)) === 'rebase') {
+      return { result: 'ConflictsEncountered' };
+    }
+    this.options.log?.(`[continueRebase] git 既没成功也没停在变基中途:${firstLine(res.stderr)}`);
+    return { result: 'Error' };
+  }
+
   /**
    * 删标签(只删本地;远端标签不动)。
    * @param path - 仓库路径。
@@ -1531,6 +2058,320 @@ export class GitService {
       timeoutMs: 60_000,
     });
     return parseUnpushedTags(res.stdout);
+  }
+
+  // ---------- stash 族(上游 `lib/git/stash.ts`,298 行) ----------
+
+  /**
+   * **列 stash**(上游 `getStashes`,`lib/git/stash.ts:45-88`)。
+   *
+   * 解析用的是镜像那份上游 parser(`createLogParser`),字段表来自
+   * `STASH_LOG_FIELDS` —— 与 `stashLogArgv()` 用的是**同一份**,不可能漂移。
+   *
+   * 退出码 `128` = 这个仓库没有 `refs/stash` 引用(从没 stash 过,或根本不是仓库):
+   * 上游把它当**空结果**而不是错误(`:58` 的 `successExitCodes: new Set([0, 128])`、
+   * `:63-65`),这里同向。其余非 0 ⇒ 走既有分类器。
+   *
+   * ⚠️ **一处已实测的登记偏离**:上游在 `:87` 返回
+   * `stashEntryCount: entries.length - 1`。用真仓库量过(见 `docs/probes/stash-probe.mjs`
+   * 的 A 组):3 条 stash 时上游那条表达式的值是 **2**,而 `git stash list | wc -l` 是 **3**
+   * —— 也就是说它是**上游自己的 off-by-one**(那个字段只喂遥测
+   * `stashEntryCount - desktopStashEntryCount`,`app-store.ts:4165-4176`)。
+   * 本函数返回**真总数**(`entries.length`):我们这一侧没有遥测,
+   * 与其逐字搬一个已知会少 1 的数字(那属于「静默给坏数据」),不如如实返回并在
+   * 这里写明分歧。消费方(客户端)判「有没有 stash」用的是 `desktopEntries`,
+   * 与这个数字无关。
+   * @param path - 仓库路径(过 `gate` 白名单)。
+   * @returns `desktopEntries` = **只有带 `!!GitHub_Desktop<…>` 前缀**的那些条目
+   *   (顺序 = git 的默认 reflog 顺序,LIFO,最新在前);
+   *   `stashEntryCount` = `refs/stash` reflog 里的总条数(真值,见上)。
+   */
+  public async stashList(path: string): Promise<{
+    desktopEntries: IStashEntryPayload[];
+    stashEntryCount: number;
+  }> {
+    const root = await this.gate(path);
+    const { parse } = createLogParser(STASH_LOG_FIELDS);
+    const res = await this.runner.run(stashLogArgv(), root, {});
+    if (res.exitCode !== 0 && res.exitCode !== 128) {
+      throw classifyGitFailure(res.stderr, '读取贮藏条目');
+    }
+    if (res.exitCode === 128) {
+      return { desktopEntries: [], stashEntryCount: 0 };
+    }
+    const entries = parse(res.stdout);
+    const desktopEntries: IStashEntryPayload[] = [];
+    for (const { name, message, stashSha, tree, parents } of entries) {
+      const branchName = extractBranchFromStashMessage(message);
+      if (branchName !== null) {
+        desktopEntries.push({
+          name,
+          stashSha,
+          branchName,
+          tree,
+          parents: parents.length > 0 ? parents.split(' ') : [],
+        });
+      }
+    }
+    return { desktopEntries, stashEntryCount: entries.length };
+  }
+
+  /**
+   * **建 stash**(上游 `createDesktopStashEntry`,`lib/git/stash.ts:143-207`)。
+   *
+   * 两步,**顺序不能反**:
+   *  1. 未跟踪文件先整份 `git add`(`:148-155` 的
+   *     `stageFiles(repository, untrackedFilesToStage.map(x => x.withIncludeAll(true)))`。
+   *     `withIncludeAll(true)` 的含义就是「这一行按整份文件纳入」,而我们的
+   *     `addArgv` 是把整个文件加进索引 ⇒ 语义等价)。理由见
+   *     `git-argv.ts` 的 `stashPushArgv` JSDoc(desktop/desktop#8085);
+   *  2. `git stash push -m '!!GitHub_Desktop<branch>'`。
+   *
+   * **失败语义(逐字照抄上游 `:161-199`)**:`git stash push` 在**退出码 1** 时,
+   * 上游去看 stderr 里有没有 `^error: ` 开头的行 ——
+   *  - 有 ⇒ 真的失败,`reject`(我们 ⇒ 走既有分类器抛);
+   *  - 没有 ⇒ 上游认为「stash 其实建成了」并**继续**(`log.info` 后返回 `e.result`)。
+   *    实测有一档确实如此(见探针 B 组),也有一档**不是**:
+   *    unborn 仓库里 `git stash push` 也是退出码 1 且 stderr 无 `error: `,但
+   *    **没有**任何 stash 被建出来(上游 `:164-177` 的注释自己承认了这件事)。
+   *    我们照上游的判据返回 `true`,但**不**因此发「成功」语义的假数据:
+   *    客户端的动作收尾一律重新拉一次 `stash/list`,所以那种情况下
+   *    `stashEntry` 仍为 `null`,空态卡不会出现。
+   *
+   * `stdout === 'No local changes to save\n'` ⇒ 返回 `false`(上游 `:202-204`:
+   * 「没有本地改动可存」在 git 眼里不是错误)。
+   * @param path - 仓库路径。
+   * @param branch - 建 stash 时所在的分支名(进消息,决定它属于哪个分支)。
+   * @param untrackedFiles - 工作区里的**未跟踪**文件路径(仓库内相对路径)。
+   * @returns 是否认为「建成了一条 stash」。
+   */
+  public async createStashEntry(
+    path: string,
+    branch: string,
+    untrackedFiles: readonly string[],
+  ): Promise<boolean> {
+    const root = await this.gate(path);
+    if (untrackedFiles.length > 0) {
+      await this.must(addArgv(untrackedFiles), root, '暂存未跟踪文件(贮藏前)');
+    }
+    const message = createDesktopStashMessage(branch);
+    const res = await this.runner.run(stashPushArgv(message), root, {});
+    if (res.exitCode !== 0) {
+      if (res.exitCode === 1) {
+        // 只看**行首**的 `error: `(上游 `:181` 的 `/^error: /m`)。
+        if (/^error: /m.exec(res.stderr) !== null) {
+          throw classifyGitFailure(res.stderr, '贮藏改动');
+        }
+        // 没有 error: ⇒ 按上游认为「stash 建成了」,继续。
+      } else {
+        throw classifyGitFailure(res.stderr, '贮藏改动');
+      }
+    }
+    if (res.stdout === 'No local changes to save\n') {
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * **丢弃一条 stash**(上游 `dropDesktopStashEntry`,`lib/git/stash.ts:219-229`)。
+   *
+   * 上游是「按 sha 重新列一遍、找到那条条目、用它的 `name` 去 drop」——
+   * **不是**直接用调用方给的 sha 拼引用。这样做的好处是:sha 已经不在 reflog 里
+   * (比如刚被 pop 掉)时**安静地什么都不做**,而不是报一个用户看不懂的 git 错误。
+   * 这里照抄这段判断。
+   *
+   * ⚠️ **一处加固(与上游的差)**:`stashSha` 先过 {@link assertStashSha}。
+   * 上游对「sha 不在 reflog 里」是**安静地什么都不做**,这里保持那个语义(有效 sha、
+   * 只是已经不在清单里 ⇒ no-op);但**形状不对的对象名**(比如 `--all`)一律
+   * `bad-request` —— 否则「传错了 sha」与「这条 stash 已经不在了」在回执上无法区分,
+   * 而调用方(客户端)会以为丢弃成功了。产品路径传的是列表里拿到的 sha,不受影响。
+   * @param path - 仓库路径。
+   * @param stashSha - stash 那条提交的 sha(不是引用名)。
+   */
+  public async dropStashEntry(path: string, stashSha: string): Promise<void> {
+    const sha = this.assertStashSha(stashSha);
+    const root = await this.gate(path);
+    const entry = await this.stashEntryMatchingSha(root, sha);
+    if (entry !== null) {
+      await this.must(stashDropArgv(this.assertStashName(entry.name)), root, '丢弃贮藏');
+    }
+  }
+
+  /**
+   * **把一条 stash 应用回工作区并删掉它**(上游 `popStashEntry`,`lib/git/stash.ts:238-271`)。
+   *
+   * argv 逐字:`git stash pop --quiet <name>`(`:248`)。名字同样来自
+   * 「按 sha 重新列一遍」(`:245` 的 `getStashEntryMatchingSha`)。
+   *
+   * **冲突语义(逐字照抄 `:251-269`)**:上游把 `MergeConflicts` 列进 `expectedErrors`
+   * —— 也就是「pop 出冲突」**不算**要弹给用户的错误。git 在那种情况下退出码 1、
+   * 且**不会**把 stash 删掉(用户还得留着它);而上游的兜底是:
+   * **退出码 1 且 stderr 为空 ⇒ 其实已经应用成功、只是没自动 drop ⇒ 手工 drop**。
+   * 两件事的分界就是 `stderr` 空不空,所以这里必须把 stderr 原样拿到手再判。
+   * 其余失败(冲突带 stderr、别的退出码)⇒ 走既有分类器(冲突会落 `merge-conflicts`)。
+   *
+   * ⚠️ 与 {@link dropStashEntry} 同一处加固:sha 形状不对 ⇒ `bad-request`(理由写在那边)。
+   * @param path - 仓库路径。
+   * @param stashSha - stash 那条提交的 sha。
+   */
+  public async popStashEntry(path: string, stashSha: string): Promise<void> {
+    const sha = this.assertStashSha(stashSha);
+    const root = await this.gate(path);
+    const entry = await this.stashEntryMatchingSha(root, sha);
+    if (entry === null) {
+      return;
+    }
+    const res = await this.runner.run(stashPopArgv(this.assertStashName(entry.name)), root, {});
+    if (res.exitCode === 0) {
+      return;
+    }
+    if (res.exitCode === 1 && res.stderr.length === 0) {
+      /*
+       * ⚠️ **一处有意分歧(2026-10 实测,带读数;这是本族唯一一处不逐字照抄的地方)**
+       *
+       * 上游原文是**直接** `dropDesktopStashEntry(repository, stashSha)`
+       * (`lib/git/stash.ts:262-266`),它的判据是「退出码 1 且 **stderr 为空** ⇒
+       * pop 其实成功了、只是没自动 drop」。**实测这个判据会把冲突档误判成成功**:
+       *
+       * ```
+       * $ git stash pop --quiet refs/stash@{0}     # 故意让 a.txt 冲突
+       * exit=1
+       * stdout(51B) = "The stash entry is kept in case you need it again."
+       * stderr(0B)                                  ← 冲突信息走的是 **stdout**
+       * $ git rev-parse refs/stash                  # git **特意**把存底留着
+       * 03346ce7…   (退出码 0)
+       * ```
+       *
+       * ⇒ 照抄那三行 = 把用户**唯一的一份**存底删掉,而界面上只看到「恢复成功」。
+       * `--quiet` 恰恰是上游自己加的(`:248`),所以这不是偶发:凡是 pop 出冲突就命中。
+       *
+       * 这里把「pop 到底成没成」的判据换成**索引里有没有未合并条目**
+       * (`git ls-files -u`,冲突时它逐条列出 stage 1/2/3;干净应用时为空)。
+       * 还有未合并条目 ⇒ **不 drop**,抛 `merge-conflicts`(叫用户解决后可以再恢复一次)。
+       * 判据是「有没有冲突」,不是「stderr 空不空」—— 其余语义一个字没改。
+       *
+       * **退役条件**:哪天本仓放弃「保留存底」这条取舍(或上游改了那段判据),
+       * 可以回到逐字照抄;在那之前,**不要**把这三行删掉换回裸 drop。
+       */
+      const unmerged = await this.runner.run(['ls-files', '-u'], root, {});
+      if (unmerged.stdout.trim() !== '') {
+        throw new GitServiceError(
+          'merge-conflicts',
+          '恢复贮藏时遇到冲突:这条贮藏**已保留**,解决冲突后可以再恢复一次。',
+        );
+      }
+      // 上游 `:257-266`:pop 成功但没自动 drop ⇒ 手工 drop(判据换成了「索引里没有未合并条目」)。
+      await this.dropStashEntry(root, sha);
+      return;
+    }
+    throw classifyGitFailure(res.stderr, '恢复贮藏');
+  }
+
+  /**
+   * **某条 stash 改了哪些文件**(上游 `getStashedFiles`,`lib/git/stash.ts:279-297`)。
+   *
+   * argv 逐字见 `stashShowFilesArgv`;解析是 `parseRawLogWithNumstat` 的逐字搬运。
+   * 上游传的父提交是 `` `${stashSha}^` ``(`:297`)。
+   * @param path - 仓库路径。
+   * @param stashSha - stash 那条提交的 sha。
+   * @returns 文件清单(含 `AppFileStatus` 形状的状态)与增删总量。
+   */
+  public async getStashedFiles(
+    path: string,
+    stashSha: string,
+  ): Promise<{ files: IStashFileEntry[]; linesAdded: number; linesDeleted: number }> {
+    const root = await this.gate(path);
+    const sha = this.assertStashSha(stashSha);
+    const res = await this.must(stashShowFilesArgv(sha), root, '读取贮藏的文件清单');
+    return parseRawLogWithNumstat(res.stdout, sha, `${sha}^`);
+  }
+
+  /**
+   * **把一条 stash 挪到另一个分支名下**(上游 `moveStashEntry`,`lib/git/stash.ts:95-116`)。
+   *
+   * 三步(argv 逐字):
+   *  1. `git commit-tree <原 stash 的父>… -m 'On <branch>: !!GitHub_Desktop<<branch>>'
+   *     --no-gpg-sign <原 stash 的 tree>`(`:104`);
+   *  2. `git stash store -m <同一条消息> <新提交>`(`:110`);
+   *  3. `dropDesktopStashEntry(原 sha)`(`:115`)。
+   *
+   * 消息里那句 `On <branch>: ` 是**必须的**:`extractBranchFromStashMessage` 的正则
+   * 没有 `^` 锚(`stash.ts:27`),因为它就是为这种消息写的;少了那一截,
+   * 「哪些条目属于哪个分支」仍然能解析,但和 git 自己 `stash store` 出来的消息形状
+   * 不一致(上游 `:100` 逐字如此)。
+   *
+   * ⚠️ **触发点在界面上还没有**(诚实登记):用它的上游弹窗是
+   * `ui/stash-changes/stash-and-switch-branch-dialog.tsx`(切分支时
+   * 「把改动带到新分支」那一档),而那条流程属于**检出/切分支**面,
+   * 不在本泳道接线范围内。本路由先把机制建好,权限/分支校验与其它路由同源。
+   * @param path - 仓库路径。
+   * @param stashSha - 原 stash 的 sha。
+   * @param branchName - 目标分支名(进消息)。
+   * @returns 新建的那条 stash 提交的 sha。
+   */
+  public async moveStashEntry(
+    path: string,
+    stashSha: string,
+    branchName: string,
+  ): Promise<string> {
+    const root = await this.gate(path);
+    const sha = this.assertStashSha(stashSha);
+    const entry = await this.stashEntryMatchingSha(root, sha);
+    if (entry === null) {
+      throw new GitServiceError('bad-request', `找不到贮藏条目 ${sha}。`);
+    }
+    const message = `On ${branchName}: ${createDesktopStashMessage(branchName)}`;
+    const { stdout: commitId } = await this.must(
+      stashCommitTreeArgv(entry.parents, message, entry.tree),
+      root,
+      '把贮藏挪到分支',
+    );
+    await this.must(stashStoreArgv(message, commitId.trim()), root, '把贮藏挪到分支');
+    await this.dropStashEntry(root, sha);
+    return commitId.trim();
+  }
+
+  /**
+   * 按 sha 找一条 **Desktop 建的** stash(上游 `getStashEntryMatchingSha`,`stash.ts:209-212`)。
+   * @param root - **已过 `gate`** 的仓库根(调用方不要再 gate 一次)。
+   * @param sha - stash 提交的 sha。
+   */
+  private async stashEntryMatchingSha(root: string, sha: string): Promise<IStashEntryPayload | null> {
+    const { desktopEntries } = await this.stashList(root);
+    return desktopEntries.find((e) => e.stashSha === sha) ?? null;
+  }
+
+  /**
+   * stash 的 sha 守卫(上游把 sha 直接拼进 `stash show <sha>`,见 `stash.ts:283-293`)。
+   * 这里只放行十六进制对象名(长度 7–64,兼容 sha256 仓库),
+   * 否则 `stash show --all` 这种「以 `-` 开头的东西」会变成选项注入。
+   * @param sha - 调用方给的 sha。
+   * @returns 校验通过的原值。
+   */
+  private assertStashSha(sha: string): string {
+    if (!isSafeObjectName(sha)) {
+      throw new GitServiceError('bad-request', '贮藏条目的提交号不合法。');
+    }
+    return sha;
+  }
+
+  /**
+   * stash **引用名**守卫 —— 列表里那条 `%gD` 的输出(`refs/stash@{N}`)在拼进
+   * `stash pop` / `stash drop` 之前过一遍 {@link isSafeStashName}。
+   *
+   * 这条守卫**不是**「因为 git 不接受 `--end-of-options`」(实测它是接受的,
+   * 见 `git-argv.ts` 的 `isSafeStashName` JSDoc),而是纵深防御:
+   * 名字来自我们自己跑的 `git log -g`,理论上永远是那个形状 ——
+   * 万一解析路径将来变了,这里会**响亮地报内部错误**,而不是把一段任意字符串
+   * 拼进 git 的 argv。
+   * @param name - 待校验的 stash 全名。
+   */
+  private assertStashName(name: string): string {
+    if (!isSafeStashName(name)) {
+      throw new GitServiceError('internal', `贮藏引用名不是预期形状:${name}`);
+    }
+    return name;
   }
 
   // ---------- 历史 ----------
@@ -2003,10 +2844,88 @@ export class GitService {
         ...(this.credentialEnv() !== undefined ? { env: this.credentialEnv() as Readonly<Record<string, string>> } : {}),
         timeoutMs: 180_000,
       }));
+
+      /*
+       * ★ **推送之后的远端刷新** —— 上游 `app-store.ts:5338-5369` 那一步,今天缺的就是它。
+       *
+       * 上游的 `performPush` 在 `pushRepo(...)` 返回、且 `aborted` 检查之后有**四步**:
+       * `fetchRemotes([safeRemote])`(`:5341-5347`)→ `fastForwardBranches`(`:5357`)
+       * → `refreshBranchProtectionState`(`:5363`)→ `_refreshRepository`(`:5369`)。
+       * 我们的 `refreshAfterNetworkAction` 只 `refreshAll()`(**零 fetch**)⇒
+       * 实测缺口是 `refs/remotes/origin/*` 在推送之后**仍然是陈旧的**
+       * (另一个 clone 推过的提交不出现)。见 `docs/push-origin-chain-mirror-audit.md` §5。
+       *
+       * 这一步**走上游那份代码**:`src/host/mirror-git.ts` 的
+       * `fetchRemotesAfterPush` → 镜像 `lib/stores/git-store.ts:1042` 的
+       * `GitStore.fetchRemotes` → `fetch()`(`lib/git/fetch.ts`,逐字)→
+       * `updateRemoteHEAD`(`lib/git/remote.ts`,逐字)。**没有一行是我们重写的。**
+       *
+       * 时序与失败语义**照上游**:
+       *   · 排在 `push` 之后、同一个 `try` 里 ⇒ 推送失败**不会**触发 fetch;
+       *   · `fetchRemote` 走 `performFailableOperation` ⇒ **fetch 失败不把推送判成失败**
+       *     (推送已经成功了),错误经 `GitStore.onDidError` 播进宿主日志;
+       *   · 进度落进**同一个** `syncProgressByRoot`(`kind: 'fetch'`),
+       *     所以客户端那条 `busy` 轮询会看到「推送 → 刷新」连续的一条时间线,
+       *     而不是另起一条。
+       */
+      await this.refreshRemotesAfterPush(root, remote);
     } finally {
       // 上游 `performPush` 的 `updatePushPullFetchProgress(repository, null)`
       // (`app-store.ts:5374`)—— 放在 `finally` 里,失败路径同样作废。
       this.syncProgressByRoot.delete(root);
+    }
+  }
+
+  /**
+   * **推送之后把远端刷新一遍** —— 上游 `app-store.ts:5341-5347` 那一步的宿主入口。
+   *
+   * 实现全在 `src/host/mirror-git.ts`(它去调**镜像的那份** `GitStore.fetchRemotes`);
+   * 这里只做两件宿主才做得了的事:
+   *   1. 把 `git remote get-url <name>` 的**结果 URL** 交给上游 —— 上游的
+   *      `IRemote` 是 `{name, url}`,而它拿 `url` 去 `envForRemoteOperation` 里
+   *      解析代理,所以给一个猜的 URL 是错的;
+   *   2. 把上游的 `IFetchProgress` 折成宿主那条进度契约
+   *      (`SyncProgressPayload`,`kind: 'fetch'`)。
+   *
+   * ⚠️ **吞掉异常是刻意的,不是偷懒**:推送**已经成功**了。上游的
+   * `GitStore.fetchRemote` 内部就把失败折成 `undefined` + 一条 `did-error`
+   * (那一条已被 `mirror-git.ts` 接到宿主日志),所以正常路径根本不会抛;
+   * 这里的 catch 只为挡住「模块加载 / 读远端 URL」这类**与网络无关**的意外,
+   * 免得把一个成功的推送报成失败。
+   *
+   * @param root - 仓库工作区根(已过 `gate`)。
+   * @param remote - 刚推的那个远端名。
+   */
+  private async refreshRemotesAfterPush(root: string, remote: string): Promise<void> {
+    const afterPushFetch = this.options.afterPushFetch;
+    if (afterPushFetch === undefined) {
+      /*
+       * **未注入 ⇒ 不做**(与接线前的行为逐字相同)。
+       *
+       * 这不是「默默跳过」:调用方(生产是 `src/index.ts`)没接这条能力,
+       * 而探针依赖这个默认值来量「没接它」那一档。判据见
+       * `docs/probes/host-mirror-wiring-probe.mjs` 的 B 组阴性对照。
+       */
+      return;
+    }
+    try {
+      const url = firstLine((await this.must(remoteUrlArgv(remote), root, '读取远端地址')).stdout);
+      if (url === '') {
+        this.warn(`远端 ${remote} 没有可用的 URL,推送后的刷新跳过`);
+        return;
+      }
+      await afterPushFetch(root, { name: remote, url }, progress => {
+        this.syncProgressByRoot.set(root, {
+          kind: 'fetch',
+          // 上游 `IProgress.description` 是**可选**的(`models/progress.ts:24`),
+          // 而宿主那条契约的 `description` 是必填的字符串 ⇒ 缺席折成空串。
+          description: progress.description ?? '',
+          value: progress.value,
+          done: false,
+        });
+      });
+    } catch (error) {
+      this.warn(`推送后的远端刷新失败(推送本身已成功):${String(error)}`);
     }
   }
 
@@ -2118,6 +3037,18 @@ export class GitService {
 }
 
 // ---------- 小工具 ----------
+
+/**
+ * `CommitEntry[]`(**log 顺序 = 新 → 旧**)→ todo 拼装需要的两列。
+ *
+ * 上游 `squash.ts:74` / `reorder.ts:64` 也是「从 `commits.length - 1` 往 0 走」,
+ * 所以这里**不排序** —— 保持 `git log` 给的顺序就是上游那份 `getCommits` 的顺序。
+ * `summary` 取 `subject`(同一次 `git log` 的 `%s`)。
+ * @param commits - `logArgv` + `parseLog` 的结果。
+ */
+function toTodoCommits(commits: readonly CommitEntry[]): ITodoCommit[] {
+  return commits.map((c) => ({ sha: c.sha, summary: c.subject }));
+}
 
 function firstLine(out: string): string {
   for (const line of out.split('\n')) {

@@ -88,8 +88,24 @@ export interface GitRunOptions {
   signal?: AbortSignal;
   /** 写到子进程 stdin 的内容。 */
   input?: string;
-  /** 额外环境变量(凭据注入用;显式给的会覆盖剥离结果)。 */
-  env?: Readonly<Record<string, string>>;
+  /**
+   * 额外环境变量(凭据注入用;显式给的会覆盖剥离结果)。
+   *
+   * ## 值写成 `undefined` 是**墓碑(tombstone)**,不是「没给这个键」
+   *
+   * 语义 = 「把父环境里的同名项**删掉**」。这不是我们发明的:宿主
+   * `@deepseek-ai/dsh-subprocess-local` 的 `childEnv()` 逐字写着「an explicit
+   * `undefined` tombstone removes an ordinary ambient entry」(实测源码
+   * `node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner-launch-*.js` 的
+   * `childEnv`:非 win32 分支是 `{...scrubbedParentEnv(), ...extra}`,而 Node 的
+   * `child_process` 拼 `envPairs` 时**跳过值为 `undefined` 的键** ⇒ 该键真的不存在)。
+   *
+   * 为什么需要它:上游 `lib/git/rebase.ts:585` 写的是
+   * `GIT_SEQUENCE_EDITOR: undefined`,目的正是「保证这个键**不存在**」,
+   * 好让 git 回落去用它那条 `-c sequence.editor=…`。设成**空串不等价**:
+   * git 用 `getenv()`,空串也算「设了」⇒ 它会去执行一个空命令而失败。
+   */
+  env?: Readonly<Record<string, string | undefined>>;
   /** 超时毫秒;缺省 30s。 */
   timeoutMs?: number;
   /**
@@ -178,7 +194,11 @@ export interface SubprocessLike {
     };
     graceMs: number;
     signal?: AbortSignal;
-    env?: Readonly<Record<string, string>>;
+    /**
+     * 同 `GitRunOptions.env` —— `undefined` 是**墓碑**(删掉父环境里的同名项),
+     * 由宿主的 `childEnv()` 兑现。
+     */
+    env?: Readonly<Record<string, string | undefined>>;
   }): SpawnedHandle;
 }
 
@@ -326,8 +346,8 @@ function findNonStringArg(argv: readonly string[]): string | null {
 async function mergeSpawnEnv(
   provider: GitSpawnEnvProvider | undefined,
   cwd: string,
-  explicit: Readonly<Record<string, string>> | undefined,
-): Promise<Readonly<Record<string, string>> | undefined> {
+  explicit: Readonly<Record<string, string | undefined>> | undefined,
+): Promise<Readonly<Record<string, string | undefined>> | undefined> {
   let extra: Readonly<Record<string, string>> | undefined;
   if (provider !== undefined) {
     try {
