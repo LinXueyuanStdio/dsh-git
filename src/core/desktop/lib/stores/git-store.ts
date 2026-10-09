@@ -63,17 +63,48 @@
  *    (即 §2.4 的 `git-argv.ts` → `git-service.ts` → `routes.ts` → `api.ts` 四层),
  *    而不是继续在这里补类型。
  *
- * ### 当前唯一的消费方
+ * ### 消费方(**两个**,不是一个)
  *
- * `lib/stores/updates/update-remote-url.ts`(上游逐字,45 行,已落在同目录
- * `updates/update-remote-url.ts`):它只用两个成员 ——
- *   · `defaultRemote`(上游 `git-store.ts:1406` 的 `public get defaultRemote(): IRemote | null`,字段 `_defaultRemote` 在 `:148`、在 `loadRemotes()` 的 `:1292` 被赋值);
- *   · `setRemoteURL(name, url)`(上游 `git-store.ts:1534`)。
+ * 1. `lib/stores/updates/update-remote-url.ts`(上游逐字,45 行,已落在同目录
+ *    `updates/update-remote-url.ts`):它只用两个成员 ——
+ *      · `defaultRemote`(上游 `git-store.ts:1406` 的 `public get defaultRemote(): IRemote | null`,字段 `_defaultRemote` 在 `:148`、在 `loadRemotes()` 的 `:1292` 被赋值);
+ *      · `setRemoteURL(name, url)`(上游 `git-store.ts:1534`)。
+ *    ⚠️ **它今天不构成「类型位置上真的被用」的证据**:client 根
+ *    (`src/client/**` + `src/core/desktop/**`)对它**零 import**(实证
+ *    `grep -rn "update-remote-url" src/client src/core` 只命中注释与文件自身;
+ *    唯一真的 import 它的是 **host 根**的 `src/host/mirror/lib/stores/app-store.ts:334`,
+ *    那一份走 host 根的同名文件)。
+ *
+ * 2. `src/client/co-authors-row.tsx`(**2026-10 本轮新增**)—— 上游
+ *    `ui/changes/commit-message.tsx:827-848` 的 `renderCoAuthorInput()` 在我们这一侧的
+ *    落点。它只取 `Pick<GitStore, 'setCoAuthors'>`(写侧那一个)——
+ *    为什么只取一个:`defaultRemote` / `setRemoteURL` 是我们类里**没有**的宿主侧能力,
+ *    整体结构性满足做不到,见那个文件里 `ICoAuthorsRowProps.store` 的 JSDoc。
+ *
+ * 3. `src/client/store.ts` 的 `GitStore` **类** —— 它以
+ *    `implements Pick<GitStore, 'setShowCoAuthoredBy' | 'setCoAuthors'>` 把那两个
+ *    **写**方法钉成编译期契约(少一个就是 TS2420),并由
+ *    `src/client/co-authors-row.tsx` 的 `ICoAuthorsRowProps.store` 在调用点消费
+ *    (`Pick<GitStore, 'setCoAuthors'>`)。而 `showCoAuthoredBy` / `coAuthors` 这两个
+ *    **读**成员今天在类型面上被 `src/client/store.ts` 的快照字段同名投影
+ *    (`Snapshot.showCoAuthoredBy` / `Snapshot.coAuthors`),消费点是报告里给出的
+ *    `changes-view.tsx` 编辑。
+ *
+ * ⚠️ **如实记账**:本文件自己的第 4 条说「只声明已落地消费方真正碰过的成员」。
+ * 共同作者这四条是**有意**偏离那一条的:它们的落地消费方有两个
+ * (`co-authors-row.tsx` 已落地;`changes-view.tsx` 的挂载编辑在报告里、未落地),
+ * 而 `setShowCoAuthoredBy` 在编辑落地前**只有类型、没有调用点**。
+ * 仍然写在这里的理由:那是上游的**存储层**契约(上游这四个成员就长在
+ * `GitStore` 上),写到我们自己的 `store.ts` 里就**丢了上游的名字**,
+ * 而本仓的规矩是替身保留上游名字与签名。
+ * **退役条件**:`docs/changes-container-switch.md` 的容器切换落地后,
+ * 这份替身要么换成真实的宿主门面、要么被上游那份文件取代。
  *
  * @module dsh-git/core/desktop/lib/stores/git-store
  */
 
 import { IRemote } from '../../models/remote'
+import { Author } from '../../models/author'
 
 /**
  * 上游 `lib/stores/git-store.ts:112` 的 `export class GitStore extends BaseStore`。
@@ -87,6 +118,47 @@ export type GitStore = {
    * 后备字段 `_defaultRemote`(`:148`)在 `loadRemotes()`(`:1292`)里被赋值。
    */
   readonly defaultRemote: IRemote | null
+
+  /*
+   * ==========================================================================
+   * 共同作者(Co-Authored-By)—— 2026-10 本轮新增。
+   *
+   * ⚠️ **两个只读属性必须排在方法定义之前**:lint 的 `member-ordering` 是只拦上升的
+   * 棘轮 —— 把它们写在 `setRemoteURL` 之后会新增 2 条
+   * `Member … should be declared before all method definitions`(实测过一次)。
+   * 这不是风格洁癖,它顺便让「读面」与「写面」在文件里分成两段。
+   *
+   * 上游的**存储**是每仓库一份的 `GitStore`(`lib/stores/git-store-cache.ts:6-31`
+   * 的 `Map<string, GitStore>`),**不是**偏好/localStorage —— 实证:
+   * `grep -n localStorage references/desktop/app/src/lib/stores/git-store.ts` **0 命中**,
+   * 字段是普通成员 `_showCoAuthoredBy`(`:138`,初值 `false`)/ `_coAuthors`
+   * (`:140`,初值 `[]`)。状态面在 `lib/app-state.ts:826,835`(`IChangesState`),
+   * 由 `app-store.ts:1466-1470` 那条投影从 `gitStore` 抄进去。
+   * ==========================================================================
+   */
+
+  /**
+   * 上游 `git-store.ts:957-959` ——
+   * `public get showCoAuthoredBy(): boolean`,后备字段 `_showCoAuthoredBy`(`:138`,
+   * **初值 `false`**)。
+   *
+   * 语义上它不是孤立的布尔量:上游 `setShowCoAuthoredBy(false)`(`:1434-1442`)
+   * **顺带清空** `_coAuthors`;而 `restoreCoAuthorsFromCommit()`(`:915-919`)在从
+   * 既有提交的 trailer 反推出非空 coAuthors 时会把它**自动置 true**。
+   */
+  readonly showCoAuthoredBy: boolean
+
+  /**
+   * 上游 `git-store.ts:965-967` ——
+   * `public get coAuthors(): ReadonlyArray<Author>`,后备字段 `_coAuthors`(`:140`,
+   * **初值 `[]`**)。
+   *
+   * 类型 `Author` 是判别联合(`models/author.ts:45`:`KnownAuthor` | `UnknownAuthor`)——
+   * 只有 `KnownAuthor` 才会变成 trailer(上游 `commit-message.tsx:582` 的
+   * `.filter(isKnownAuthor)`)。
+   */
+  readonly coAuthors: ReadonlyArray<Author>
+
   /**
    * 上游 `git-store.ts:1534` ——
    * `public async setRemoteURL(name: string, url: string): Promise<boolean>`。
@@ -94,4 +166,25 @@ export type GitStore = {
    * 再 `loadRemotes()` + `emitUpdate()` ⇒ **一次真的 git 调用** ⇒ 归 host(见文件头第 1 条)。
    */
   setRemoteURL(name: string, url: string): Promise<boolean>
+
+  /**
+   * 上游 `git-store.ts:1434-1442` ——
+   * `public setShowCoAuthoredBy(showCoAuthoredBy: boolean)`,**返回 void**
+   * (方法体末尾是 `this.emitUpdate()`,实现归我们这一层)。
+   *
+   * ⚠️ **关掉时清空**:`if (!showCoAuthoredBy) { this._coAuthors = [] }`(`:1437-1438`)。
+   * 这条不是细节 —— 它是「移除共同作者」那条路的**唯一**落点(用户在菜单里
+   * 点「Remove co-authors」,coAuthors 随之归零)。
+   */
+  setShowCoAuthoredBy(showCoAuthoredBy: boolean): void
+
+  /**
+   * 上游 `git-store.ts:1448-1451` ——
+   * `public setCoAuthors(coAuthors: ReadonlyArray<Author>)`,**返回 void**。
+   *
+   * 上游写入点只有一个:`ui/changes/filter-changes-list.tsx:1028-1029`
+   * (`onCoAuthorsUpdated` → `dispatcher.setCoAuthors(repository, coAuthors)`
+   * → `app-store.ts:8858` 的 `_setCoAuthors`)。
+   */
+  setCoAuthors(coAuthors: ReadonlyArray<Author>): void
 }

@@ -255,6 +255,22 @@ export class API {
    * @param endpoint - 上游的 `endpoint`(api.github.com 或 GHES 的 `.../api/v3`)。
    * @param token - 账号 token;本替身从不使用它(不发任何请求)。
    */
+  /**
+   * 上游 `lib/api.ts:842`:
+   * ```ts
+   * public static fromAccount(account: Account): API {
+   *   return new API(account.endpoint, account.token, account.copilotEndpoint)
+   * }
+   * ```
+   * 我们的构造器只有两个参数(copilot 属于 §1.3 排除的应用层)⇒ 第三项不传。
+   * **这是抄进来的 `lib/stores/commit-status-store.ts:283` 唯一的取客户端入口**
+   * (`API.fromAccount(account)`),所以它必须存在,否则整条链在类型上就断了。
+   * @param account - 账号(令牌不再使用:请求经宿主代理,令牌只存在宿主)。
+   */
+  public static fromAccount(account: Account): API {
+    return new API(account.endpoint, account.token)
+  }
+
   public constructor(
     public readonly endpoint: string,
     public readonly token: string,
@@ -277,4 +293,340 @@ export class API {
       `GitHub API 在浏览器半不可用(lib/api.ts 的最小替身,只覆盖 avatar 的 import):${this.endpoint}`,
     )
   }
+
+  // -------------------------------------------------------------------------
+  // CI 面(2026-10-07「抄优先」):check-runs / 老式 commit status
+  // -------------------------------------------------------------------------
+
+  /**
+   * 把注入的传输拿过来;没注入就抛——**不静默返回假数据**。
+   * @param what - 出错信息里点名的上游方法。
+   */
+  private transportOf(what: string): IGitHubTransport {
+    if (githubTransport === null) {
+      throw new Error(
+        `GitHub 传输层未注入(lib/api.ts 的 ${what};浏览器半应由 src/client/ci-transport.ts 注入 gh-api.ts)`,
+      )
+    }
+    return githubTransport
+  }
+
+  /**
+   * 上游 `lib/api.ts:1409-1436`(`fetchRefCheckRuns`,含 `Accept: antiope-preview`)。
+   * 路径与分页逐字:`repos/{owner}/{name}/commits/{encodeURIComponent(ref)}/check-runs?per_page=100`。
+   * @returns `{total_count, check_runs}`;失败回 `null`(上游同样 `return null` 而不是抛)。
+   */
+  public async fetchRefCheckRuns(owner: string, name: string, ref: string): Promise<IAPIRefCheckRuns | null> {
+    const transport = this.transportOf('fetchRefCheckRuns')
+    const safeRef = encodeURIComponent(ref)
+    try {
+      return (await transport.request(
+        `repos/${owner}/${name}/commits/${safeRef}/check-runs?per_page=100`,
+        { accept: 'application/vnd.github.antiope-preview+json' },
+      )) as IAPIRefCheckRuns
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 上游 `lib/api.ts:1383-1406`(`fetchCombinedRefStatus`)。
+   * 路径与分页逐字:`repos/{owner}/{name}/commits/{encodeURIComponent(ref)}/status?per_page=100`。
+   */
+  public async fetchCombinedRefStatus(owner: string, name: string, ref: string): Promise<IAPIRefStatus | null> {
+    const transport = this.transportOf('fetchCombinedRefStatus')
+    const safeRef = encodeURIComponent(ref)
+    try {
+      return (await transport.request(
+        `repos/${owner}/${name}/commits/${safeRef}/status?per_page=100`,
+      )) as IAPIRefStatus
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 上游 `lib/api.ts` 的 `rerequestCheckSuite`(`POST repos/{o}/{r}/check-suites/{id}/rerequest`)。
+   * 被 `commit-status-store.ts:538-550` 的 `rerequestCheckSuite` 调用。
+   */
+  public async rerequestCheckSuite(owner: string, name: string, checkSuiteId: number): Promise<boolean> {
+    const transport = this.transportOf('rerequestCheckSuite')
+    return this.postOk(transport, `repos/${owner}/${name}/check-suites/${checkSuiteId}/rerequest`)
+  }
+
+  /** 上游 `rerunJob`(`POST repos/{o}/{r}/actions/jobs/{id}/rerun`;`commit-status-store.ts:552-564`)。 */
+  public async rerunJob(owner: string, name: string, jobId: number): Promise<boolean> {
+    const transport = this.transportOf('rerunJob')
+    return this.postOk(transport, `repos/${owner}/${name}/actions/jobs/${jobId}/rerun`)
+  }
+
+  /** 上游 `rerunFailedJobs`(`POST repos/{o}/{r}/actions/runs/{id}/rerun-failed-jobs`;`commit-status-store.ts:566-578`)。 */
+  public async rerunFailedJobs(owner: string, name: string, workflowRunId: number): Promise<boolean> {
+    const transport = this.transportOf('rerunFailedJobs')
+    return this.postOk(transport, `repos/${owner}/${name}/actions/runs/${workflowRunId}/rerun-failed-jobs`)
+  }
+
+  /** 上游 `fetchCheckSuite`(`GET repos/{o}/{r}/check-suites/{id}`;`commit-status-store.ts:580-592`)。 */
+  public async fetchCheckSuite(owner: string, name: string, checkSuiteId: number): Promise<IAPICheckSuite | null> {
+    const transport = this.transportOf('fetchCheckSuite')
+    try {
+      return (await transport.request(`repos/${owner}/${name}/check-suites/${checkSuiteId}`)) as IAPICheckSuite
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 上游 `fetchWorkflowRunJobs`(`GET repos/{o}/{r}/actions/runs/{id}/jobs`)。
+   * 被 `lib/ci-checks/ci-checks.ts:340` 的 `getLatestPRWorkflowRunsLogsForCheckRun` 调用
+   * (拿 job 的 `html_url` 与 `steps`)。
+   */
+  public async fetchWorkflowRunJobs(owner: string, name: string, id: number): Promise<IAPIWorkflowJobs | null> {
+    const transport = this.transportOf('fetchWorkflowRunJobs')
+    try {
+      return (await transport.request(`repos/${owner}/${name}/actions/runs/${id}/jobs`)) as IAPIWorkflowJobs
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 上游 `fetchPRActionWorkflowRunByCheckSuiteId`
+   * (`GET repos/{o}/{r}/actions/runs?check_suite_id={id}` ⇒ 取 `.workflow_runs[0]`)。
+   * 被 `ci-checks.ts:451` 走「按 check suite」那条分支时调用。
+   */
+  public async fetchPRActionWorkflowRunByCheckSuiteId(owner: string, name: string, checkSuiteId: number): Promise<IAPIWorkflowRun | null> {
+    const transport = this.transportOf('fetchPRActionWorkflowRunByCheckSuiteId')
+    try {
+      const page = (await transport.request(
+        `repos/${owner}/${name}/actions/runs?check_suite_id=${checkSuiteId}`,
+      )) as IAPIWorkflowRuns
+      return page.workflow_runs[0] ?? null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 上游 `fetchPRWorkflowRunsByBranchName`
+   * (`GET repos/{o}/{r}/actions/runs?branch={branch}`;GHES 的回落路径,`ci-checks.ts:482`)。
+   */
+  public async fetchPRWorkflowRunsByBranchName(owner: string, name: string, branchName: string): Promise<IAPIWorkflowRuns | null> {
+    const transport = this.transportOf('fetchPRWorkflowRunsByBranchName')
+    try {
+      return (await transport.request(
+        `repos/${owner}/${name}/actions/runs?branch=${encodeURIComponent(branchName)}`,
+      )) as IAPIWorkflowRuns
+    } catch {
+      return null
+    }
+  }
+
+  /** `POST` 成功即 `true`(上游那三个 `rerun*`/`rerequest*` 的返回语义)。 */
+  private async postOk(transport: IGitHubTransport, path: string): Promise<boolean> {
+    try {
+      await transport.request(path, { method: 'POST' })
+      return true
+    } catch {
+      return false
+    }
+  }
+}
+
+/**
+ * 上游 `lib/api.ts:2350-2355` 的 `getAccountForEndpoint` **已经在上面 `:127` 有了**
+ * (那是为 `lib/get-account-for-repository.ts` 补的,实现与上游逐字一致)——
+ * CI 这一族(`lib/stores/commit-status-store.ts:541,555,571,585`)复用它,不另起一份。
+ */
+
+// ---------------------------------------------------------------------------
+// 传输注入点(浏览器半把 `gh-api.ts` 装进来;`core` 不 import `client`)
+// ---------------------------------------------------------------------------
+
+/**
+ * 一次 GitHub REST 调用的最小契约。与 `src/client/gh-api.ts` 的 `gh<T>()` 同形:
+ * 成功回**解开的 JSON**,失败**抛**。
+ *
+ * 为什么是注入而不是直接在 `lib/api.ts` 里 import `gh-api.ts`:
+ *  - `lib/api.ts` 在 `src/core/desktop/**`(镜像层),`gh-api.ts` 在 `src/client/**`
+ *    (适配层);core → client 的反向依赖会让 host 半的类型程序也把浏览器传输拖进去;
+ *  - 注入点让**探针**可以装一个内存桩(本仓的探针纪律:`api.github.com` 一次都不碰)。
+ */
+export interface IGitHubTransport {
+  request(
+    path: string,
+    init?: { readonly method?: string; readonly body?: unknown; readonly accept?: string },
+  ): Promise<unknown>
+}
+
+let githubTransport: IGitHubTransport | null = null
+
+/** 装入/清空传输(浏览器半 `src/client/ci-transport.ts` 调用;传 `null` 复原)。 */
+export function setGitHubTransport(next: IGitHubTransport | null): void {
+  githubTransport = next
+}
+
+// ---------------------------------------------------------------------------
+// CI 面的类型(逐字取自上游 `lib/api.ts`,每条标了上游行号)
+// ---------------------------------------------------------------------------
+
+/** 上游 `lib/api.ts:346`,逐字。 */
+export type APIRefState = 'failure' | 'pending' | 'success' | 'error'
+
+/** 上游 `lib/api.ts:350-354`,逐字。 */
+export enum APICheckStatus {
+  Queued = 'queued',
+  InProgress = 'in_progress',
+  Completed = 'completed',
+}
+
+/** 上游 `lib/api.ts:357-366`,逐字。 */
+export enum APICheckConclusion {
+  ActionRequired = 'action_required',
+  Canceled = 'cancelled',
+  TimedOut = 'timed_out',
+  Failure = 'failure',
+  Neutral = 'neutral',
+  Success = 'success',
+  Skipped = 'skipped',
+  Stale = 'stale',
+}
+
+/** 上游 `lib/api.ts:372-378`,逐字。 */
+export interface IAPIRefStatusItem {
+  readonly state: APIRefState
+  readonly target_url: string | null
+  readonly description: string
+  readonly context: string
+  readonly id: number
+}
+
+/** 上游 `lib/api.ts:381-385`,逐字。 */
+export interface IAPIRefStatus {
+  readonly state: APIRefState
+  readonly total_count: number
+  readonly statuses: ReadonlyArray<IAPIRefStatusItem>
+}
+
+/** 上游 `lib/api.ts:402-404`,逐字。 */
+export interface IAPIRefCheckRunApp {
+  readonly name: string
+}
+
+/** 上游 `lib/api.ts:407-411`,逐字。 */
+export interface IAPIRefCheckRunOutput {
+  readonly title: string | null
+  readonly summary: string | null
+  readonly text: string | null
+}
+
+/** 上游 `lib/api.ts:413-415`,逐字。 */
+export interface IAPIRefCheckRunCheckSuite {
+  readonly id: number
+}
+
+/**
+ * 上游 `lib/api.ts:387-399`,逐字。
+ * ⚠️ 注意 `pull_requests` 的元素类型上游是 `IAPIPullRequest`(上游 `:636-647`)——
+ * 这里**照抄那个引用**,因为 `getLatestCheckRunsById` 只读它的 `length`。
+ */
+export interface IAPIRefCheckRun {
+  readonly id: number
+  readonly url: string
+  readonly status: APICheckStatus
+  readonly conclusion: APICheckConclusion | null
+  readonly name: string
+  readonly check_suite: IAPIRefCheckRunCheckSuite
+  readonly app: IAPIRefCheckRunApp
+  readonly completed_at: string
+  readonly started_at: string
+  readonly html_url: string
+  readonly pull_requests: ReadonlyArray<IAPIPullRequest>
+}
+
+/** 上游 `lib/api.ts:636-647`,逐字(类型引用需要,运行期用不到)。 */
+export interface IAPIPullRequest {
+  readonly number: number
+  readonly title: string
+  readonly created_at: string
+  readonly updated_at: string
+  readonly user: IAPIIdentity
+  readonly head: IAPIPullRequestRef
+  readonly base: IAPIPullRequestRef
+  readonly body: string
+  readonly state: 'open' | 'closed'
+  readonly draft?: boolean
+}
+
+/** 上游 `lib/api.ts` 的 `IAPIPullRequestRef`(只保留 `sha`/`ref`/`label`,被 check run 那条链引用)。 */
+export interface IAPIPullRequestRef {
+  readonly sha: string
+  readonly ref: string
+  readonly label: string
+}
+
+/** 上游 `lib/api.ts:417-423`,逐字。 */
+export interface IAPICheckSuite {
+  readonly id: number
+  readonly rerequestable: boolean
+  readonly runs_rerequestable: boolean
+  readonly status: APICheckStatus
+  readonly created_at: string
+}
+
+/** 上游 `lib/api.ts:425-428`,逐字。 */
+export interface IAPIRefCheckRuns {
+  readonly total_count: number
+  readonly check_runs: IAPIRefCheckRun[]
+}
+
+/** 上游 `lib/api.ts:430-433`(`interface IAPIWorkflowRuns`,非导出 ⇒ 这里导出给注入层用)。 */
+export interface IAPIWorkflowRuns {
+  readonly total_count: number
+  readonly workflow_runs: ReadonlyArray<IAPIWorkflowRun>
+}
+
+/** 上游 `lib/api.ts:435-448`,逐字。 */
+export interface IAPIWorkflowRun {
+  readonly id: number
+  /**
+   * The workflow_id is the id of the workflow not the individual run.
+   **/
+  readonly workflow_id: number
+  readonly cancel_url: string
+  readonly created_at: string
+  readonly logs_url: string
+  readonly name: string
+  readonly rerun_url: string
+  readonly check_suite_id: number
+  readonly event: string
+}
+
+/** 上游 `lib/api.ts:450-453`,逐字。 */
+export interface IAPIWorkflowJobs {
+  readonly total_count: number
+  readonly jobs: ReadonlyArray<IAPIWorkflowJob>
+}
+
+/** 上游 `lib/api.ts:456-465`,逐字。 */
+export interface IAPIWorkflowJob {
+  readonly id: number
+  readonly name: string
+  readonly status: APICheckStatus
+  readonly conclusion: APICheckConclusion | null
+  readonly completed_at: string
+  readonly started_at: string
+  readonly steps: ReadonlyArray<IAPIWorkflowJobStep>
+  readonly html_url: string
+}
+
+/** 上游 `lib/api.ts:467-475`,逐字。 */
+export interface IAPIWorkflowJobStep {
+  readonly name: string
+  readonly number: number
+  readonly status: APICheckStatus
+  readonly conclusion: APICheckConclusion | null
+  readonly completed_at: string
+  readonly started_at: string
+  readonly log: string
 }

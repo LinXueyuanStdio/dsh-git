@@ -380,3 +380,202 @@ export function parseGithubRemoteText(text: string): { owner: string; repo: stri
   }
   return null;
 }
+
+// ---------- stash:文件清单(`git stash show <sha> --raw --numstat -z …`) ----------
+
+/**
+ * 子模块的文件模式。git 用它标记 submodule(取值依据见上游
+ * `lib/git/log.ts:20-21` 的注释与它给的 git 源码链接)。
+ */
+const SUBMODULE_FILE_MODE = '160000';
+
+/**
+ * `AppFileStatus` 的 **JSON 投影** —— 字段名与取值和镜像的
+ * `models/status.ts`(`AppFileStatusKind` / `SubmoduleStatus`)**逐字相同**,
+ * 所以客户端可以零映射地把它当成 `AppFileStatus` 用。
+ *
+ * 为什么不在 host 侧构造 `CommittedFileChange` 实例:那是客户端模型类,
+ * 而 HTTP 信封只能带纯 JSON。把**判别联合**原样搬过线,比在两端各写一份
+ * 「字母 → kind」的映射安全(一份映射,一个真源)。
+ */
+export interface IStashFileStatusJson {
+  readonly kind: string;
+  readonly oldPath?: string;
+  readonly renameIncludesModifications?: boolean;
+  readonly submoduleStatus?: {
+    readonly commitChanged: boolean;
+    readonly untrackedChanges: boolean;
+    readonly modifiedChanges: boolean;
+  };
+}
+
+/** {@link parseRawLogWithNumstat} 的一项 —— 上游 `CommittedFileChange` 的 JSON 投影。 */
+export interface IStashFileEntry {
+  readonly path: string;
+  readonly status: IStashFileStatusJson;
+  /** 上游 `CommittedFileChange.commitish` = 传进来的 `sha`。 */
+  readonly commitish: string;
+  /** 上游 `CommittedFileChange.parentCommitish` = 传进来的 `<sha>^`。 */
+  readonly parentCommitish: string;
+}
+
+/**
+ * 上游 `mapSubmoduleStatusFileModes`(`lib/git/log.ts:23-42`,逐字搬运)。
+ *
+ * 只有三种组合会被认成「子模块状态」:两侧都是 160000 且 `M`(子模块的提交被换过),
+ * 或 `D`/`A` 的一侧是 160000。其余一律 `undefined`(普通文件)。
+ */
+function mapSubmoduleStatusFileModes(
+  status: string,
+  srcMode: string,
+  dstMode: string,
+):
+  | { commitChanged: boolean; untrackedChanges: boolean; modifiedChanges: boolean }
+  | undefined {
+  return srcMode === SUBMODULE_FILE_MODE
+    && dstMode === SUBMODULE_FILE_MODE
+    && status === 'M'
+    ? { commitChanged: true, untrackedChanges: false, modifiedChanges: false }
+    : (srcMode === SUBMODULE_FILE_MODE && status === 'D')
+      || (dstMode === SUBMODULE_FILE_MODE && status === 'A')
+      ? { commitChanged: false, untrackedChanges: false, modifiedChanges: false }
+      : undefined;
+}
+
+/**
+ * 原始状态字母 → `AppFileStatus` 形状(上游 `mapStatus`,`lib/git/log.ts:50-115`,逐字搬运)。
+ *
+ * 与 `status-porcelain.ts` 的 `mapStatus` **不是**同一个东西:那一份的输入是
+ * `git status --porcelain` 的**两位码**,输出是我们的两行制 `ChangedFile`;这一份的输入是
+ * `--raw` 的**单字母**,输出是 Desktop 的 `AppFileStatus` 判别联合(为选图标而设计)。
+ * 两者的输入输出都不同,合并不了。
+ * @param rawStatus - `--raw` 的状态字段(可能带重命名相似度,如 `R100`)。
+ * @param oldPath - 重命名/复制的**源**路径(`R`/`C` 才有)。
+ * @param srcMode - 源文件模式(八进制字符串,如 `100644` / `160000`)。
+ * @param dstMode - 目标文件模式。
+ */
+export function mapRawStatusToAppFileStatus(
+  rawStatus: string,
+  oldPath: string | undefined,
+  srcMode: string,
+  dstMode: string,
+): IStashFileStatusJson {
+  const status = rawStatus.trim();
+  const submoduleStatus = mapSubmoduleStatusFileModes(status, srcMode, dstMode);
+
+  if (status === 'M') {
+    return { kind: 'Modified', submoduleStatus };
+  }
+  if (status === 'A') {
+    return { kind: 'New', submoduleStatus };
+  }
+  if (status === '?') {
+    return { kind: 'Untracked', submoduleStatus };
+  }
+  if (status === 'D') {
+    return { kind: 'Deleted', submoduleStatus };
+  }
+  if (status === 'R' && oldPath !== undefined) {
+    return { kind: 'Renamed', oldPath, submoduleStatus, renameIncludesModifications: false };
+  }
+  if (status === 'C' && oldPath !== undefined) {
+    return { kind: 'Copied', oldPath, submoduleStatus, renameIncludesModifications: false };
+  }
+  // `git log -M --name-status` 会给出 `RXXX`(XXX = 相似度百分比)。
+  if (/R[0-9]+/.test(status) && oldPath !== undefined) {
+    return { kind: 'Renamed', oldPath, submoduleStatus, renameIncludesModifications: status !== 'R100' };
+  }
+  // `git log -C --name-status` 会给出 `CXXX`。
+  if (/C[0-9]+/.test(status) && oldPath !== undefined) {
+    return { kind: 'Copied', oldPath, submoduleStatus, renameIncludesModifications: false };
+  }
+  return { kind: 'Modified', submoduleStatus };
+}
+
+/** 上游 `isCopyOrRename`(`lib/git/log.ts:117-121`)。 */
+function isCopyOrRename(status: IStashFileStatusJson): boolean {
+  return status.kind === 'Copied' || status.kind === 'Renamed';
+}
+
+/**
+ * 上游 `forceUnwrap`(`lib/fatal-error.ts`)在本模块的等价物:拿不到就**抛**,
+ * 绝不把 `undefined` 当成合法值混过去(那会变成「清单里凭空少一个文件」)。
+ */
+function forceUnwrap<T>(message: string, value: T | null | undefined): T {
+  if (value === null || value === undefined) {
+    throw new Error(message);
+  }
+  return value;
+}
+
+/**
+ * 解析 `diff -z --raw --numstat` 的输出(上游 `parseRawLogWithNumstat`,
+ * `lib/git/log.ts:283-328`,逐字搬运)。
+ *
+ * 上游注释里的样例(那里按行写开,实际全以 `\0` 分隔):
+ *
+ * ```
+ * :100644 100644 5716ca5 db3c77d M\0file_one_path\0:100644 100644 0835e4f 28096ea M\0file_two_path\0
+ * 1\t0\tfile_one_path\0
+ * 1\t0\tfile_two_path\0
+ * ```
+ *
+ * **重命名/复制是两段**:`--raw` 段把 `oldPath` 与 `path` 放在**两条**记录里
+ * (`R`/`C` 才有),numstat 段同样两个路径各占一条。这就是 `lines.at(++i)` 与
+ * `i += 2` 的来历。
+ *
+ * ⚠️ **它返回的是「文件」,不是「每个文件的增删数」**:上游只用 numstat 段累加
+ * **总量**(`linesAdded` / `linesDeleted`)并推进游标;单个文件的增删数由
+ * **取 diff 的那条路由**给(`diffNumstatArgv`)。我们的 stash 文件清单消费方只需要
+ * path + status(文件行的渲染不显示增删数),所以这里与上游同形。
+ * @param out - `git stash show <sha> --raw --numstat -z --format=format: --no-show-signature --` 的 stdout。
+ * @param sha - stash 那条提交的 sha(上游 `getStashedFiles` 传的是参数 `stashSha`)。
+ * @param parentCommitish - 上游传 `` `${stashSha}^` ``。
+ */
+export function parseRawLogWithNumstat(
+  out: string,
+  sha: string,
+  parentCommitish: string,
+): { files: IStashFileEntry[]; linesAdded: number; linesDeleted: number } {
+  const files: IStashFileEntry[] = [];
+  let linesAdded = 0;
+  let linesDeleted = 0;
+  let numStatCount = 0;
+  const lines = out.split('\0');
+
+  for (let i = 0; i < lines.length - 1; i++) {
+    const line = lines[i];
+    if (line.startsWith(':')) {
+      const lineComponents = line.split(' ');
+      const srcMode = forceUnwrap('Invalid log output (srcMode)', lineComponents[0]?.replace(':', ''));
+      const dstMode = forceUnwrap('Invalid log output (dstMode)', lineComponents[1]);
+      const status = forceUnwrap('Invalid log output (status)', lineComponents.at(-1));
+      const oldPath = /^R|C/.test(status)
+        ? forceUnwrap('Missing old path', lines.at(++i))
+        : undefined;
+
+      const path = forceUnwrap('Missing path', lines.at(++i));
+
+      files.push({
+        path,
+        status: mapRawStatusToAppFileStatus(status, oldPath, srcMode, dstMode),
+        commitish: sha,
+        parentCommitish,
+      });
+    } else {
+      const match = /^(\d+|-)\t(\d+|-)\t/.exec(line);
+      const [, added, deleted] = forceUnwrap('Invalid numstat line', match);
+      linesAdded += added === '-' ? 0 : parseInt(added, 10);
+      linesDeleted += deleted === '-' ? 0 : parseInt(deleted, 10);
+
+      // 重命名/复制的 numstat 段把两个路径放成两条独立记录,跳过它们。
+      const first = files[numStatCount];
+      if (first !== undefined && isCopyOrRename(first.status)) {
+        i += 2;
+      }
+      numStatCount++;
+    }
+  }
+
+  return { files, linesAdded, linesDeleted };
+}

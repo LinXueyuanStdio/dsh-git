@@ -42,6 +42,28 @@ export function repoRootArgv(): readonly string[] {
   return ['rev-parse', '--show-toplevel'];
 }
 
+/**
+ * `git var GIT_AUTHOR_IDENT` —— **git 这一次提交真正会用的作者身份**。
+ *
+ * 上游 `references/desktop/app/src/lib/git/var.ts:23-30`(`getAuthorIdentity`),
+ * argv 逐字;成功码是 **`{0, 128}`**(`:28`)。
+ *
+ * ## 为什么它不等价于 `config --get user.name`
+ *
+ * 上游 `var.ts:5-18` 的注释把差别写死了:没配 name/email 时 git **自己会造**一个
+ * 身份(`user@hostname`),`git var` 拿到的正是那一份;而 `config --get` 只会回 `null`。
+ * 它还会带上 system 级配置、`GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` 环境与
+ * `user.useConfigOnly` 的裁决 —— 后者的表现就是退出码 **128**
+ * (`var.ts:32-35`:此时上游回 `null`,**不是**错误)。
+ *
+ * ⚠️ 我们**只**把 stdout 原样交给客户端,不在这里正则解析:解析器是上游
+ * `models/commit-identity.ts` 的 `CommitIdentity.parseIdentity`,那份**已经逐字在树**,
+ * 再写一份就是第二份必然漂移的真源(见 `src/client/changes-view.tsx` 的调用点)。
+ */
+export function authorIdentArgv(): readonly string[] {
+  return ['var', 'GIT_AUTHOR_IDENT'];
+}
+
 export function remoteListArgv(): readonly string[] {
   return ['remote'];
 }
@@ -425,6 +447,23 @@ export function pullArgv(opts: { remote: string; rebase: boolean; ffOnly: boolea
  * `opts.progress` 加 `--progress`：位置与上游 `lib/git/push.ts:77-79` **逐字同**——
  * 三处 `--set-upstream` / `--force-with-lease` / `--no-verify` 之后、`--` 之前。
  * 理由同 {@link fetchArgv}：不显式加，管道 stderr 上一条进度行都没有。
+ *
+ * ## 这份 argv 与上游那份文件的关系（2026-10-08 实测，别凭印象）
+ *
+ * 上游的真源**已经逐字节在镜像里**：`src/core/desktop/lib/git/push.ts`
+ * （`cmp` 无输出；判据 `docs/probes/push-origin-chain-probe.mjs` 的 A1）。
+ * 本函数是它的**手写转写**，逐条对照见 `docs/push-origin-chain-mirror-audit.md` §1：
+ * 7 档 argv 按「**同名 ⇒ 省 `:dst`**」这一条规则规范化之后 **7/7 逐字相同**
+ * （探针 A2/A2b），而那一条差异**在真远端上惰性**（A2c：两种写法推完远端 sha 逐字节相同）。
+ *
+ * 两处**上游有、这里没有**（都属登记偏离，不要顺手"补"上）：
+ *  1. 上游推完会 `fetchRemotes([safeRemote])`（`app-store.ts:5341-5347`），我们的
+ *     `refreshAfterNetworkAction` 只 `refreshAll()` ⇒ 别的分支的 remote-tracking 会陈旧
+ *     （探针 B1/B2/B3 把承重条件量出来了）；
+ *  2. `opts.tags` 至今**零调用点**（`git-service.ts` 的调用点不传、路由签名只有
+ *     `force`/`noVerify`）⇒ 一次「推送到 origin」从不带标签。上游会
+ *     `args.push(...tagsToPush)`（`push.ts:117-119`）。**要不要把宿主现算的清单塞进来
+ *     是一个产品决策**（两个选项的真远端读数见探针 D 组），不是接线细节。
  */
 export function pushArgv(opts: {
   remote: string;
@@ -679,6 +718,63 @@ export function cherryPickArgv(ref: string): readonly string[] {
 }
 
 /**
+ * **交互式 rebase**(squash / reorder 的**唯一** git 调用)。
+ *
+ * 上游:`rebaseInteractive`(`references/desktop/app/src/lib/git/rebase.ts:576-633`,
+ * 实测 `awk END{NR}` = **633** 行,ledger §1.2.1 记的 `:576-634` 上界差 1)。
+ * 逐字对照(2026-10 本轮**逐行复核过**,不是抄 ledger 的结论):
+ *
+ * ```text
+ * rebase.ts:619-626
+ *   ['-c',
+ *    `sequence.editor=cat "${pathOfGeneratedTodo}" >`,   // :621
+ *    'rebase',
+ *    ...(opts?.noVerify ? ['--no-verify'] : []),          // :623
+ *    '-i',
+ *    ref]                                                 // :625(616: null ⇒ '--root')
+ * ```
+ *
+ * ## env 是这条 argv 的**一半**(不设它 = 什么都不发生)
+ *
+ * `rebase.ts:582-588` 的 `IGitStringExecutionOptions.env`:
+ *
+ * ```text
+ * GIT_SEQUENCE_EDITOR: undefined,          // :585 —— 必须是「不存在」,不是空串
+ * GIT_EDITOR: opts?.gitEditor ?? ':'       // :586;gitEditor 由调用方给(squash 给消息文件)
+ * ```
+ *
+ * 为什么 `undefined` 而不是 `''`:git 用的是 `getenv()`,**设成空串也算设了**
+ * ⇒ 它会去执行一个空命令而失败。只有「这个键在子进程环境里不存在」才让 git
+ * 回落去用 `-c sequence.editor=…`。本仓的 `dsh-subprocess-local` 恰好支持
+ * 「显式 `undefined` 墓碑」把父环境里的同名项删掉(见 `git-runner.ts` 的
+ * `GitRunOptions.env` 注释),所以这里能**逐字**复刻上游。
+ *
+ * ## 它**不是**「一条 argv 就完事」的那类命令吗?
+ *
+ * 就**发起**而言,它是一条 argv(与 `continueRebase` 那种「先 stage 再在
+ * `--skip`/`--continue` 之间自己选」的多步流程**不同**)。但它**不是一次就结束的操作**:
+ * `parseRebaseResult`(`rebase.ts:416-434`)在 `GitError.RebaseConflicts` 时
+ * **成功返回** `RebaseResult.ConflictsEncountered` —— 仓库此时停在 rebase 中途,
+ * 续跑只能由 `continueRebase`(`:444-546`)接。所以本路由的响应把
+ * `ConflictsEncountered` 当**成功值**交出去,而调用方必须知道「此刻还没有 continue 路由」。
+ * @param todoPath - 宿主生成的 todo 文件绝对路径(会进 `-c` 的值,由 git 交给 `sh -c`)。
+ * @param lastRetainedCommitRef - 区间下界(上游是 `<sha>^`);`null` ⇒ 该提交是分支根 ⇒ `--root`。
+ * @param opts.noVerify - 上游 `RebaseInteractiveOptions.noVerify`。
+ */
+export function rebaseInteractiveArgv(
+  todoPath: string,
+  lastRetainedCommitRef: string | null,
+  opts: { noVerify?: boolean } = {},
+): readonly string[] {
+  const argv = ['-c', `sequence.editor=cat "${todoPath}" >`, 'rebase'];
+  if (opts.noVerify === true) {
+    argv.push('--no-verify');
+  }
+  argv.push('-i', lastRetainedCommitRef === null ? '--root' : lastRetainedCommitRef);
+  return argv;
+}
+
+/**
  * 建标签。
  *
  * 上游:`createTag`(`references/desktop/app/src/lib/git/tag.ts:13-21`)——
@@ -787,4 +883,219 @@ export function unpushedTagsArgv(remote: string): readonly string[] {
  */
 export function pushDeleteRemoteBranchArgv(remote: string, branch: string): readonly string[] {
   return ['push', '--delete', '--', remote, branch];
+}
+
+// ---------- stash 族(上游 `lib/git/stash.ts`,298 行) ----------
+
+/**
+ * Desktop 给 stash 消息打的**魔数前缀**。
+ *
+ * 上游:`references/desktop/app/src/lib/git/stash.ts:19`
+ * `export const DesktopStashEntryMarker = '!!GitHub_Desktop'`(**逐字**)。
+ * 它的作用是把「Desktop 建的 stash」与「在命令行里建的 stash」分开:
+ * 只有带这个前缀的条目才会被认成「当前分支的 stash」并出现在 Changes 页签上。
+ */
+export const DESKTOP_STASH_ENTRY_MARKER = '!!GitHub_Desktop';
+
+/**
+ * 从 stash 消息里取出分支名(上游 `stash.ts:27` 的 `desktopStashEntryMessageRe`
+ * + `:273-276` 的 `extractBranchFromMessage`,逐字)。
+ *
+ * 上游的正则是 `/!!GitHub_Desktop<(.+)>$/`;**没有 `^`** —— 这是刻意的:
+ * `git stash store`/`commit-tree` 造出来的消息形如 `On <branch>: !!GitHub_Desktop<<branch>>`
+ * (`:100`),前缀 `On …:` 必须被这句正则跳过。匹配到空串也算「不是 Desktop 的条目」
+ * (`:275` 的 `match[1].length === 0`)。
+ * @param message - `git log -g --format=%gs` 里的 stash 消息(主题行)。
+ * @returns 分支名;不是 Desktop 建的条目时 `null`。
+ */
+export function extractBranchFromStashMessage(message: string): string | null {
+  const match = /!!GitHub_Desktop<(.+)>$/.exec(message);
+  return match === null || match[1].length === 0 ? null : match[1];
+}
+
+/**
+ * Desktop 的 stash 消息(上游 `stash.ts:136-138` 的 `createDesktopStashMessage`,逐字)。
+ * @param branchName - 建 stash 时所在的分支名。
+ */
+export function createDesktopStashMessage(branchName: string): string {
+  return `${DESKTOP_STASH_ENTRY_MARKER}<${branchName}>`;
+}
+
+/**
+ * 列 stash(上游 `stash.ts:45-59` 的 `getStashes`)。
+ *
+ * 上游拼的是 `git(['log', '-g', ...formatArgs, 'refs/stash', '--'], …)`,
+ * 而 `formatArgs` 来自 `createLogParser`(`lib/git/git-delimiter-parser.ts:22-24`):
+ *
+ * ```ts
+ * const format = Object.values({
+ *   name: '%gD', stashSha: '%H', message: '%gs', tree: '%T', parents: '%P',
+ * }).join('%x00')
+ * const formatArgs = ['-z', `--format=${format}`]
+ * ```
+ *
+ * ⇒ 展开后**逐字**就是本函数返回的这 7 个元素(顺序也一样:`-g` 在 `formatArgs` 前、
+ * `refs/stash` 在其后)。本仓把它写成常量是因为 `core/git-argv.ts` 是**纯 argv 层**
+ * (不引 `Buffer`,见该层文件头);解析仍在 host 侧用镜像那份 `createLogParser`。
+ *
+ * 退出码语义(上游 `:58`、`:63-65`):`successExitCodes: {0, 128}`,
+ * **128 = 没有 `refs/stash` 引用**(没 stash 过 / 根本不是仓库)⇒ 空结果,不是错误。
+ */
+export function stashLogArgv(): readonly string[] {
+  const format = Object.values(STASH_LOG_FIELDS).join('%x00');
+  return ['log', '-g', '-z', `--format=${format}`, 'refs/stash', '--'];
+}
+
+/**
+ * `git log -g` 那条 stash 列表的 `--format` 字段表(**唯一真源**)。
+ *
+ * 上游把它内联在 `getStashes` 里(`stash.ts:46-52`)交给 `createLogParser`:
+ * `{ name: '%gD', stashSha: '%H', message: '%gs', tree: '%T', parents: '%P' }`。
+ * 这里把它提成常量,是因为**同一条格式串有两个消费方**:
+ *  - {@link stashLogArgv} 拼 `--format=`(本文件,纯 argv 层);
+ *  - `GitService.stashList` 用镜像那份 `createLogParser(STASH_LOG_FIELDS)` 解析。
+ * 两份各写一遍必然漂移(漂移的表现是「解析出来的字段错位」这种静默坏数据),
+ * 所以只留这一份。字段**顺序**与上游逐字相同(`%gD %H %gs %T %P`)。
+ */
+export const STASH_LOG_FIELDS = {
+  name: '%gD',
+  stashSha: '%H',
+  message: '%gs',
+  tree: '%T',
+  parents: '%P',
+} as const;
+
+/**
+ * 建 stash(上游 `stash.ts:159` 的 `createDesktopStashEntry`,逐字)。
+ *
+ * ```ts
+ * const args = ['stash', 'push', '-m', message]
+ * ```
+ *
+ * ⚠️ **它前面还有一步**(上游 `:148-155`):所有**未跟踪**文件要先
+ * `stageFiles(repository, untrackedFilesToStage.map(x => x.withIncludeAll(true)))`
+ * —— 即「未跟踪文件先整份 `git add`」。理由是 `git stash push` 默认**不碰**
+ * 未跟踪文件(上游注释直指 desktop/desktop#8085:否则那些文件会跟着切分支跑掉)。
+ * 那一步在本仓是既有的 `addArgv`(`git add -- <paths>`),由
+ * `GitService.createStashEntry` 按同一顺序先跑。
+ * @param message - stash 消息,**必须是** {@link createDesktopStashMessage} 的产物。
+ */
+export function stashPushArgv(message: string): readonly string[] {
+  return ['stash', 'push', '-m', message];
+}
+
+/**
+ * 把某条 stash 应用回工作区并**删掉它**(上游 `stash.ts:248`,逐字)。
+ *
+ * ```ts
+ * const args = ['stash', 'pop', '--quiet', `${stashToPop.name}`]
+ * ```
+ *
+ * `--quiet` 是上游刻意加的(`:248`):pop 成功时 git 本来会往 stdout 打一行
+ * `Dropped refs/stash@{0}`,而那行没有任何消费方。
+ *
+ * 失败语义(上游 `:244`、`:249-269`):`expectedErrors: {MergeConflicts}`;
+ * 另有「退出码 1 且 **stderr 为空** ⇒ 其实 pop 成功了、只是没自动 drop,
+ * 于是手工 `dropDesktopStashEntry`」这一档(见 `GitService.popStashEntry`)。
+ * @param name - stash 的**全名**(`refs/stash@{N}`,来自 {@link stashLogArgv} 的 `%gD`)。
+ */
+export function stashPopArgv(name: string): readonly string[] {
+  return ['stash', 'pop', '--quiet', name];
+}
+
+/**
+ * 丢弃一条 stash(上游 `stash.ts:226`,逐字)。
+ *
+ * ```ts
+ * const args = ['stash', 'drop', entryToDelete.name]
+ * ```
+ * @param name - stash 的**全名**(`refs/stash@{N}`)。
+ */
+export function stashDropArgv(name: string): readonly string[] {
+  return ['stash', 'drop', name];
+}
+
+/**
+ * 把一条 stash 的**文件清单**取出来(上游 `stash.ts:283-293`,逐字)。
+ *
+ * ```ts
+ * const args = [
+ *   'stash', 'show', stashSha, '--raw', '--numstat', '-z',
+ *   '--format=format:', '--no-show-signature', '--',
+ * ]
+ * ```
+ *
+ * `--format=format:` 把 stash 自身那条提交头**压空**(只留文件段),
+ * `-z` 让路径以 NUL 结尾(含换行/引号的路径安全),`--raw --numstat` 同时给
+ * 状态字母与增删行数 —— 这正是上游 `parseRawLogWithNumstat`
+ * (`lib/git/log.ts:283`,`(stdout, stashSha, `${stashSha}^`)`)要的两段。
+ * @param stashSha - stash 那条提交的 sha(**不是**引用名)。
+ */
+export function stashShowFilesArgv(stashSha: string): readonly string[] {
+  return [
+    'stash', 'show', stashSha, '--raw', '--numstat', '-z',
+    '--format=format:', '--no-show-signature', '--',
+  ];
+}
+
+/**
+ * 移到别的分支时**重建**一条 stash 提交(上游 `stash.ts:104`,逐字)。
+ *
+ * ```ts
+ * const parentArgs = parents.flatMap(p => ['-p', p])
+ * const { stdout: commitId } = await git(
+ *   ['commit-tree', ...parentArgs, '-m', message, '--no-gpg-sign', tree], …
+ * )
+ * ```
+ *
+ * `--no-gpg-sign`:这是一条**内部**提交(把 stash 的树挂到新分支名下),
+ * 不该被用户的 `commit.gpgsign` 拦下来(那会让「切分支」在开了签名的机器上失败)。
+ * @param parents - 原 stash 提交的父提交(**顺序即上游 `%P` 的顺序**)。
+ * @param message - 新消息:上游 `:100` 是 `` `On ${branchName}: ${createDesktopStashMessage(branchName)}` ``。
+ * @param tree - 原 stash 提交的树(`%T`)。
+ */
+export function stashCommitTreeArgv(
+  parents: readonly string[],
+  message: string,
+  tree: string,
+): readonly string[] {
+  return [
+    'commit-tree',
+    ...parents.flatMap((p) => ['-p', p]),
+    '-m', message,
+    '--no-gpg-sign',
+    tree,
+  ];
+}
+
+/**
+ * 把 {@link stashCommitTreeArgv} 造出来的提交**登记成一条 stash**(上游 `stash.ts:110`,逐字)。
+ *
+ * ```ts
+ * await git(['stash', 'store', '-m', message, commitId.trim()], …)
+ * ```
+ * @param message - 与 {@link stashCommitTreeArgv} **同一条**消息(否则列表里的分支名会不一致)。
+ * @param sha - `commit-tree` 的 stdout(**上游这里 trim 过**)。
+ */
+export function stashStoreArgv(message: string, sha: string): readonly string[] {
+  return ['stash', 'store', '-m', message, sha];
+}
+
+/**
+ * stash 引用的**形态**守卫。
+ *
+ * 上游把 `%gD` 的输出(`refs/stash@{N}`)直接拼进 `stash pop` / `stash drop` 的 argv
+ * (`stash.ts:226,248`)。本仓的通用约定是「用户给的 revision 一律放在 `--end-of-options`
+ * 之后」,但这两条**刻意不加**(argv 逐字照上游),改用这个形态白名单顶替。
+ *
+ * ⚠️ **实测更正**(不要把下面这条当成「不加是因为加了会坏」):
+ * `git stash drop --end-of-options 'refs/stash@{0}'` 在 git 2.x 上**被正确接受**
+ * (`Dropped refs/stash@{0} (618cad83…)`,退出码 0)—— 也就是说这里不加
+ * `--end-of-options` 纯粹是「argv 逐字照抄上游」的取舍,**不是** git 的限制。
+ * 白名单因此是**纵深防御**(调用方传进来的名字必须是 `%gD` 会产出的形状),
+ * 而它比 `--end-of-options` 更强:连 `refs/heads/main` 这种合法的 revision 也拒。
+ * @param name - 待校验的 stash 全名。
+ */
+export function isSafeStashName(name: string): boolean {
+  return /^refs\/stash@\{\d+\}$/.test(name);
 }

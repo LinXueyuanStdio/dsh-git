@@ -60,6 +60,7 @@
  * @module dsh-git/core/desktop/ui/dispatcher
  */
 
+import { Disposable } from 'event-kit'
 import { CloningRepository } from '../../models/cloning-repository'
 import { Popup } from '../../models/popup'
 import { Repository } from '../../models/repository'
@@ -74,6 +75,17 @@ import type { UnreachableCommitsTab } from '../history/unreachable-commits-dialo
  */
 import type { FoldoutType } from '../../lib/app-state'
 import type { FetchType } from '../../models/fetch'
+/*
+ * CI 面(2026-10-07)的三个类型 —— 都是 `import type`(只出现在签名位置,
+ * 不产生运行期 import 边):
+ *  - `GitHubRepository`:CIStatus / CICheckRunPopover 传的仓库;
+ *  - `ICombinedRefCheck` / `IRefCheck`:合成状态与单条 check(来自**本轮抄进来的**
+ *    `lib/ci-checks/ci-checks.ts`);
+ *  - `IAPICheckSuite`:`fetchCheckSuite` 的返回(来自上面的 `lib/api.ts` 替身)。
+ */
+import type { GitHubRepository } from '../../models/github-repository'
+import type { ICombinedRefCheck, IRefCheck } from '../../lib/ci-checks/ci-checks'
+import type { IAPICheckSuite } from '../../lib/api'
 
 /**
  * 上游 `ui/dispatcher/dispatcher.ts:405` —— 把一个弹窗压入栈。
@@ -258,5 +270,112 @@ export class Dispatcher {
   /** 上游 `:1090`。双击宽度手柄复位。 */
   public resetPushPullButtonWidth(): Promise<void> {
     return Promise.resolve()
+  }
+
+  /*
+   * =====================================================================
+   * CI 面(2026-10-07「抄优先」):`ui/check-runs/**` 经由这 7 个方法与
+   * 应用层对话。**只给类型面**,行为在 `src/client/ci-dispatcher.ts` 的门面上
+   * (与顶栏同步面 / History 面同一形状:替身给类型,门面给行为)。
+   *
+   * | 方法 | 上游位置 | 调用点 |
+   * |---|---|---|
+   * | `tryGetCommitStatus(repository, ref, branchName?)` | `ui/dispatcher/dispatcher.ts:2741` | `ui/branches/ci-status.tsx:44,78`、`ci-check-run-popover.tsx:92,105` |
+   * | `subscribeToCommitStatus(repository, ref, callback, branchName?)` | 同上 `:2760` | `ci-status.tsx:57`、`ci-check-run-popover.tsx:122` |
+   * | `openInBrowser(url)` | 同上 `:1417` | `ci-check-run-popover.tsx:167,180` |
+   * | `incrementMetric(metric)` | 同上 `:1306` | `ci-check-run-popover.tsx:168,181`、`ci-check-run-rerun-dialog.tsx:77` |
+   * | `rerequestCheckSuites(repository, checkSuiteId)` | 同上 `:2992` | `ci-check-run-rerun-dialog.tsx:67` |
+   * | `manualRefreshSubscription(repository, ref, pendingChecks)` | 同上 `:2769` | `ci-check-run-rerun-dialog.tsx:72` |
+   * | `fetchCheckSuite(repository, checkSuiteId)` | 同上 `:3010` | `ci-check-run-rerun-dialog.tsx:100` |
+   *
+   * 两条**必需的收窄**(逐条说明,与前面 19 个方法同一纪律):
+   *  - `tryGetCommitStatus` 的上游签名第三参是 `branchName?: string`;`ci-status.tsx:44`
+   *    只传两个参数 ⇒ 这里保留默认参;
+   *  - `incrementMetric` 的上游参数是一个巨大的 `IMetricName` 联合(上游 `:1306`
+   *    那个 `keyof` 表,我们没搬)⇒ 这里收窄成 `string`,**只放宽参数类型**,
+   *    调用点的字面量仍然逐个可读;真正的统计面在本仓不存在,门面里是空操作。
+   */
+
+  /**
+   * 上游 `:2741`。**同步**取缓存里的合成状态(没有就回 `null`,组件据此先渲染旧值)。
+   * 行为在 `src/client/ci-dispatcher.ts`(委托给抄进来的 `CommitStatusStore.tryGetStatus`)。
+   */
+  public tryGetCommitStatus(
+    repository: GitHubRepository,
+    ref: string,
+    branchName?: string
+  ): ICombinedRefCheck | null {
+    void repository
+    void ref
+    void branchName
+    return null
+  }
+
+  /**
+   * 上游 `:2760-2768`,签名逐字(含 `event-kit` 的 `Disposable` 返回类型 ——
+   * `ci-check-run-popover.tsx:87` 把它存成 `Disposable | null`,结构替身少一个
+   * `disposed` 字段都会是 `TS2741`)。
+   */
+  public subscribeToCommitStatus(
+    repository: GitHubRepository,
+    ref: string,
+    callback: (status: ICombinedRefCheck | null) => void,
+    branchName?: string
+  ): Disposable {
+    void repository
+    void ref
+    void callback
+    void branchName
+    return new Disposable(() => undefined)
+  }
+
+  /** 上游 `:1417`。在系统浏览器里打开一个 URL。 */
+  public openInBrowser(url: string): void {
+    void url
+  }
+
+  /** 上游 `:1306`。统计打点(本仓没有统计面;门面里是空操作)。 */
+  public incrementMetric(metric: string): void {
+    void metric
+  }
+
+  /**
+   * 上游 `:2793-2797`,签名逐字:`(repository, checkRuns, failedOnly)` ⇒
+   * 每条 check 一个布尔(是否请求成功)。`ci-check-run-rerun-dialog.tsx:67` 传**三个**
+   * 参数(第二参是 `this.state.rerunnable`,即 `ReadonlyArray<IRefCheck>`)。
+   */
+  public rerequestCheckSuites(
+    repository: GitHubRepository,
+    checkRuns: ReadonlyArray<IRefCheck>,
+    failedOnly: boolean
+  ): Promise<ReadonlyArray<boolean>> {
+    void repository
+    void checkRuns
+    void failedOnly
+    return Promise.resolve([])
+  }
+
+  /**
+   * 上游 `:2769`。把给定的几条 check 手动置回 pending(重跑后立刻反馈)。
+   */
+  public manualRefreshSubscription(
+    repository: GitHubRepository,
+    ref: string,
+    pendingChecks: ReadonlyArray<IRefCheck>
+  ): Promise<void> {
+    void repository
+    void ref
+    void pendingChecks
+    return Promise.resolve()
+  }
+
+  /** 上游 `:3010`。取一个 check suite 的详情(rerun 弹窗判可用性)。 */
+  public fetchCheckSuite(
+    repository: GitHubRepository,
+    checkSuiteId: number
+  ): Promise<IAPICheckSuite | null> {
+    void repository
+    void checkSuiteId
+    return Promise.resolve(null)
   }
 }

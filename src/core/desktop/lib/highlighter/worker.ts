@@ -1,39 +1,88 @@
-/**
- * **dsh-git 手写替身(shim)** —— 上游 `app/src/lib/highlighter/worker.ts`(88 行)。
- *
- * 上游 `new Worker(...)` 起一个 Electron 渲染进程 worker,把 CodeMirror 模式的
- * 词法分析放到另一个线程;worker 文件 `lib/highlighter/worker.ts` 自己又 import
- * `node:path` 与 `./types`。浏览器半里起 worker 需要打包器支持 `new Worker(new URL(...))`,
- * 而我们没有把 CodeMirror 的词法表搬过来 —— 所以这里保留**同名同签名**的 `highlight()`,
- * 返回空 token 表 `{}`(= 上游 `worker.ts:39-41` 在「没有内容或没有需要的行」时的
- * 返回值,即**不高亮**),调用方 `syntax-highlighting/index.ts` 会走它原有的
- * 「没有 token」分支。
- *
- * 也就是说:接口保留、调用点保留、降级路径是上游自己的路径;只是当前不产出高亮。
- * 要接通真高亮,把 CodeMirror 模式表与 worker 打包进来后替换本文件即可。
- * @module dsh-git/core/desktop/lib/highlighter/worker
- */
+import { ITokens, IHighlightRequest } from './types'
+import { encodePathAsUrl } from '../../lib/path'
 
-import type { ITokens } from './types'
+const highlightWorkers = new Array<Worker>()
+const maxIdlingWorkers = 2
+const workerMaxRunDuration = 5 * 1000
+const workerUri = encodePathAsUrl(__dirname, 'highlighter.js')
 
 /**
- * 上游 :30 —— `(contentLines, basename, extension, tabSize, lines) => Promise<ITokens>`。
- * 返回 `{}` 表示这一行没有 token。
+ * Request an automatic detection of the language and highlight
+ * the contents provided.
+ *
+ * @param contents  The actual contents which is to be used for
+ *                  highlighting.
+ * @param basename  The file basename of the path in question as returned
+ *                  by node's basename() function (i.e. without a leading dot).
+ * @param extension The file extension of the path in question as returned
+ *                  by node's extname() function (i.e. with a leading dot).
+ * @param tabSize   The width of a tab character. Defaults to 4. Used by the
+ *                  stream to count columns. See CodeMirror's StringStream
+ *                  class for more details.
+ * @param lines     An optional filter of lines which needs to be tokenized.
+ *
+ *                  If undefined or empty all lines will be tokenized
+ *                  and returned. By passing an explicit set of lines we can
+ *                  both minimize the size of the response object (which needs
+ *                  to be serialized over the IPC boundary) and, for stateless
+ *                  modes we can significantly speed up the highlight process.
  */
 export function highlight(
   contentLines: ReadonlyArray<string>,
-  _basename: string,
-  _extension: string,
-  _tabSize: number,
+  basename: string,
+  extension: string,
+  tabSize: number,
   lines: Array<number>
 ): Promise<ITokens> {
+  // Bail early if there's no content to highlight or if we don't
+  // need any lines from this file.
   if (!contentLines.length || !lines.length) {
     return Promise.resolve({})
   }
 
-  // 词法器尚未接进来:显式留一行日志,避免「高亮静默不生效」难以发现。
-  console.info(
-    `[dsh-git] highlighter.worker.highlight:词法器未接入,${lines.length} 行将不高亮。`
-  )
-  return Promise.resolve({})
+  // Get an idle worker or create a new one if none exist.
+  const worker = highlightWorkers.shift() || new Worker(workerUri)
+
+  return new Promise<ITokens>((resolve, reject) => {
+    let timeout: null | number = null
+
+    const clearTimeout = () => {
+      if (timeout) {
+        window.clearTimeout(timeout)
+        timeout = null
+      }
+    }
+
+    worker.onerror = ev => {
+      clearTimeout()
+      worker.terminate()
+      reject(ev.error || new Error(ev.message))
+    }
+
+    worker.onmessage = ev => {
+      clearTimeout()
+      if (highlightWorkers.length < maxIdlingWorkers) {
+        highlightWorkers.push(worker)
+      } else {
+        worker.terminate()
+      }
+      resolve(ev.data as ITokens)
+    }
+
+    const request: IHighlightRequest = {
+      contentLines,
+      basename,
+      extension,
+      tabSize,
+      lines,
+      addModeClass: true,
+    }
+
+    worker.postMessage(request)
+
+    timeout = window.setTimeout(() => {
+      worker.terminate()
+      reject(new Error('timed out'))
+    }, workerMaxRunDuration)
+  })
 }
