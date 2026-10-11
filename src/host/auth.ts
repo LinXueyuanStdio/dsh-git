@@ -23,6 +23,11 @@ import type { RepoRegistry, RemoteRepoLite } from './repo-registry.ts';
 // 运行期一走到「未登录时列远程仓库」就 `ReferenceError`,而 routes 的 catch 把
 // 它当成普通异常折成 internal;`not-signed-in` 这条「正常状态」因此永远走不到。
 import { GitServiceError } from './git-service.ts';
+/*
+ * 令牌响应的**唯一**解析器(设备码与续期共用同一套字段)。
+ * 反向依赖不存在:`token-refresh.ts` 只从 `credential-bridge.ts` 取类型/工厂,不 import 本文件。
+ */
+import { parseTokenResponse } from './token-refresh.ts';
 
 /**
  * github.com 的 OAuth 端点。
@@ -93,17 +98,127 @@ export interface DeviceFlowStart {
   interval: number;
 }
 
-/** Device Flow 轮询结果。 */
+/**
+ * Device Flow 轮询结果。
+ *
+ * ⚠️ `pending` 这一支有两个字段,是因为 GitHub 的 `slow_down` **必须**被遵守(2026-11 实测):
+ * 它除了让我们放慢,还会给出**新的 `interval`**;不照办的话下一次还是 `slow_down`、
+ * 而且每次再加 5 秒,令牌**永远**不会下发(现场就是"浏览器里授权了,界面一直停在等待授权")。
+ *  - `slowDown` —— 这一轮收到了 `slow_down`(客户端据此退避);
+ *  - `interval` —— GitHub 明确要求的下一个间隔(秒)。**只在 `slow_down` 时给**,
+ *    缺失时由客户端按「+5 秒」的规则自增。
+ */
 export type DeviceFlowPoll =
-  | { status: 'pending'; slowDown?: boolean }
+  | { status: 'pending'; slowDown?: boolean; interval?: number }
   | { status: 'done'; state: AuthState }
   | { status: 'error'; message: string };
 
 export interface AuthDeps {
   registry: RepoRegistry;
-  /** OAuth App Client ID;缺省 = 不提供设备码登录。 */
+  /** OAuth App / GitHub App 的 Client ID;缺省 = 不提供设备码登录。 */
   clientId: string;
+  /**
+   * **内置 App 的 slug**(`github.com/apps/<slug>`)—— 只在生效的 Client ID 就是内置那一份时给,
+   * 用来拼「安装入口」。用户自带 App 时必须是空串:我们不知道他的 slug,编一个链接等于骗人。
+   */
+  appSlug?: string;
   log?: (message: string) => void;
+}
+
+/**
+ * 令牌续期器的**结构切面**(实现是 `token-refresh.ts` 的 `GithubTokenRefresher`)。
+ *
+ * 为什么在本文件里只认这个形状、而不是 import 那个类:续期器要等**凭据服务**到位才能建
+ * (它要往 `refs.GITHUB_REFRESH_TOKEN` 写),而本类在那之前就构造好了 ⇒ 用
+ * {@link GithubAuth.useTokenRefresher} 事后装进来。与 `RepoRegistry.useTokenHome()` 同一个形状。
+ */
+export interface IAuthTokenRefresher {
+  /** 立刻续期一次;`true` = 新令牌已装上(调用方可以重试那次请求)。 */
+  refreshNow(): Promise<boolean>;
+  /** 设备码登录拿到新令牌时登记 refresh token 与有效期。 */
+  acceptIssued(input: {
+    readonly refreshToken: string;
+    readonly expiresInSec: number | null;
+  }): Promise<void>;
+  /** 换账号 / 登出:清掉 refresh token 与到期时间。 */
+  clear(): Promise<void>;
+}
+
+/**
+ * **GitHub App 的安装状态** —— 「授权」与「安装」是两件事,这个类型就是那个区分。
+ *
+ * 现场(2026-11):设备码**授权成功**、令牌也拿到了,但 `GET /user/installations` 回
+ * `total_count: 0` ⇒ 之后**所有仓库级**端点一律 403,而 GitHub 只回一句
+ * `Resource not accessible by integration`(不解释、也不说下一步)。界面因此只能在各个页签里
+ * 各报一次同样的错。这一支就是把它翻成「你该去点 Install」。
+ */
+export type AuthInstallationStatus =
+  /** 没有令牌。 */
+  | { readonly kind: 'not-signed-in' }
+  /**
+   * 登录了,但令牌不是 **GitHub App 的用户令牌**(`ghu_`)⇒ 没有"安装"这个概念
+   * (PAT 与 OAuth App 令牌都归这里)。界面**不提示**,免得对着 PAT 用户喊"去安装"。
+   */
+  | { readonly kind: 'not-app-token' }
+  /** 查不动(网络 / 端点不支持 / 非 200)⇒ 一律**不提示**:不确定的事不许当结论。 */
+  | { readonly kind: 'unknown' }
+  /** 已安装(至少一处)。`count` = 安装数,给文案用。 */
+  | { readonly kind: 'installed'; readonly count: number }
+  /** 查询成功但**一处都没装** —— 这就是要引导的那一档。`installUrl` 可能为空(用户自带 App)。 */
+  | { readonly kind: 'not-installed'; readonly installUrl: string };
+
+/**
+ * 这枚令牌是不是 **GitHub App 的用户令牌**。
+ *
+ * 判据是**前缀**(GitHub 的公开约定):`ghu_` = GitHub App user-to-server、
+ * `gho_` = OAuth App、`ghp_` / `github_pat_` = PAT、`ghs_` = 安装令牌。
+ * 为什么不能只看"有没有令牌":只有 App 令牌才有"安装"这一步,拿 PAT 去问 `/user/installations`
+ * 得到的答案与"要不要点 Install"无关(而且我们根本没发那次请求,见 {@link installationStatusOf})。
+ * @param token - 宿主里的令牌(只在 host 半,永不进浏览器)。
+ */
+export function isGithubAppUserToken(token: string): boolean {
+  return token.startsWith('ghu_');
+}
+
+/**
+ * 「安装状态」的**唯一判据**(纯函数)—— 从「发了没有 / 回了什么」翻成界面要的那一支。
+ *
+ * 为什么把这件事抽出来:它有 5 种结果,而其中**只有一种**该在界面上说话。混在一起的典型
+ * 后果是「查询失败」被当成「没安装」,于是用户被送去装一个可能已经装好的 App。
+ *
+ * | 输入 | 结果 |
+ * |---|---|
+ * | 没登录 | `not-signed-in` |
+ * | 不是 App 令牌(PAT / OAuth App) | `not-app-token`(从**不**发请求) |
+ * | 请求失败(异常 / 非 200 / 没有 `total_count`) | `unknown` |
+ * | 200 且 `total_count > 0` | `installed` |
+ * | 200 且 `total_count === 0` | `not-installed`(带安装入口) |
+ *
+ * @param input - 见类型里的字段说明。
+ * @returns 界面可直接分支的状态。
+ */
+export function installationStatusOf(input: {
+  readonly signedIn: boolean;
+  readonly appUserToken: boolean;
+  /** 实际拿到的 HTTP 状态;`null` = 没发请求 / 请求抛了。 */
+  readonly httpStatus: number | null;
+  /** 响应里的 `total_count`;拿不到就是 `null`。 */
+  readonly totalCount: number | null;
+  /** 内置 App 的安装入口;用户自带 App 时是空串。 */
+  readonly installUrl: string;
+}): AuthInstallationStatus {
+  if (!input.signedIn) {
+    return { kind: 'not-signed-in' };
+  }
+  if (!input.appUserToken) {
+    return { kind: 'not-app-token' };
+  }
+  if (input.httpStatus !== 200 || input.totalCount === null) {
+    return { kind: 'unknown' };
+  }
+  return input.totalCount > 0
+    ? { kind: 'installed', count: input.totalCount }
+    : { kind: 'not-installed', installUrl: input.installUrl };
 }
 
 /** GitHub API 错误(带状态码与可操作文案)。 */
@@ -203,13 +318,62 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * 设备码响应里的令牌**形态** —— 给日志的一句事实(2026-11:为「OAuth App 还是 GitHub App」取证)。
+ *
+ * ## 为什么必须先把这件事钉住
+ *
+ * 两种 App 在这一步**只差 JSON 字段**:
+ *  - OAuth App 的令牌默认**不过期** ⇒ 响应里只有 `access_token`,存下来就完了;
+ *  - GitHub App 的用户令牌**默认 8 小时后过期**(官方文档:*By default, the user access
+ *    token expires after 8 hours*,配 `refresh_token` 续期)⇒ 响应里还有 `expires_in` 与
+ *    `refresh_token`。而 {@link GithubAuth.pollDeviceFlow} **只消费 `access_token`**、
+ *    没有任何续期逻辑 ⇒ 8 小时后 `/user`、`/user/repos`、`/user/emails` 与 `git push`
+ *    会**静默**开始 401(用户看到的是「昨天还好好的」)。
+ *
+ * 所以先记一行事实,再决定「在 host 里实现续期」还是「在 App 的设置里关掉 expiring tokens」
+ * (后者是官方文档里的 optional feature,可 opt in / out)。令牌前缀是同一件事的第二份证据 ——
+ * GitHub 的令牌前缀是稳定的公开约定(`gho_` = OAuth App 用户令牌、`ghu_` = GitHub App 用户令牌、
+ * `ghp_` / `github_pat_` = PAT、`ghs_` = 安装令牌)。
+ *
+ * ⚠️ **只报形状,绝不报值**:令牌只报**前缀**,`refresh_token` 只说有/没有,`expires_in` 是秒数。
+ *
+ * @param json - `POST /login/oauth/access_token` 的 JSON 响应。
+ * @returns 供日志使用的一句;`expires_in` 缺失 = 令牌不过期。
+ */
+export function describeDeviceTokenShape(json: Record<string, unknown>): string {
+  const token = typeof json.access_token === 'string' ? json.access_token : '';
+  const prefix = /^[a-z]+_/.exec(token)?.[0] ?? '(无前缀)';
+  const expiresIn = typeof json.expires_in === 'number' ? json.expires_in : null;
+  const hasRefresh = typeof json.refresh_token === 'string' && json.refresh_token !== '';
+  if (expiresIn === null) {
+    return `前缀 ${prefix},令牌不过期(响应里没有 expires_in)`;
+  }
+  return `前缀 ${prefix},令牌 ${expiresIn} 秒后过期;refresh_token ${hasRefresh ? '有' : '没有'}`
+    + (hasRefresh ? '' : ' ⚠️ 没有 refresh_token ⇒ 到期后只能重新登录一次');
+}
+
 export class GithubAuth {
   private login = '';
   private viaDeviceFlow = false;
   /** 最近一次 GitHub 响应的 core 限额剩余(页脚展示)。 */
   private lastRemaining: number | null = null;
+  /**
+   * 续期器;**凭据服务到位之后**才装上(`useTokenRefresher`)。
+   * `null` = 这个 profile 没有可用的凭据服务 ⇒ 没有续期可言,401 原样抛给上层。
+   */
+  private refresher: IAuthTokenRefresher | null = null;
 
   constructor(private readonly deps: AuthDeps) {}
+
+  /**
+   * 装上续期器 —— 与 `RepoRegistry.useTokenHome()` 同一个形状与同一个时机
+   * (凭据服务到位后由 `startTokenHome()` 调)。
+   * @param refresher - 见 {@link IAuthTokenRefresher}。
+   */
+  public useTokenRefresher(refresher: IAuthTokenRefresher): void {
+    this.refresher = refresher;
+  }
 
   rateRemaining(): number | null {
     return this.lastRemaining;
@@ -218,25 +382,61 @@ export class GithubAuth {
   /**
    * 代理一次 GitHub REST 调用:令牌留在 host,浏览器不接触它,
    * 顺带绕开 CORS 与匿名限额。
-   * @param input - 方法、路径(或完整 URL)、可选 body 与 Accept。
+   *
+   * ## 条件请求(`etag` / `ifModifiedSince`)—— 2026-10 追加
+   *
+   * 为什么必须支持:GitHub 的**条件请求命中 304 时不消耗主限额**
+   * (`docs/probes/notifications-etag-free-probe.mjs` 实测:同一个头连续打 10 次,
+   * `x-ratelimit-used` 差 **0**;同装置的**无条件**对照打 10 次差 **10** ⇒
+   * 仪器能看见计费,「没涨」才有意义)。没有这一层,通知轮询每轮 16 次请求
+   * 就是 16 次**真**消耗;有了它,稳态是「16 次 round-trip、0 额度」。
+   *
+   * ⚠️ **304 不是错误**:`Response.ok` 对 304 是 `false`(它只认 200-299),
+   * 所以下面在 `!res.ok` 之前**先**把 304 单独分出来返回,否则每一次
+   * 「内容没变」都会被折成 `GithubApiError`(浏览器半会把整轮当失败)。
+   * 与 204 一样,304 **没有响应体**,不许去 `res.json()`。
+   *
+   * @param input - 方法、路径(或完整 URL)、可选 body / Accept / 条件头。
    */
   async ghProxy(input: {
     method?: string;
     path: string;
     body?: unknown;
     accept?: string;
-  }): Promise<{ status: number; json: unknown; link: string | null; remaining: number | null }> {
-    const token = this.deps.registry.githubToken();
+    /** `If-None-Match`:上一轮的 ETag。 */
+    etag?: string;
+    /** `If-Modified-Since`:上一轮的 `Last-Modified`(RFC 1123)。 */
+    ifModifiedSince?: string;
+  }): Promise<{
+    status: number;
+    json: unknown;
+    link: string | null;
+    remaining: number | null;
+    /** 这一轮的 ETag,下一轮原样回传。 */
+    etag: string | null;
+    /** 这一轮的 `Last-Modified`,下一轮原样回传。 */
+    lastModified: string | null;
+  }> {
     const url = input.path.startsWith('http') ? input.path : `${this.endpoint()}${input.path}`;
-    const headers: Record<string, string> = githubHeaders(token, input.accept ?? 'application/vnd.github+json');
-    if (input.body !== undefined) headers['content-type'] = 'application/json';
-    let res: Response;
-    try {
-      res = await fetch(url, {
+    /** 用给定令牌把这次调用的头部拼出来(重试时要用**新**令牌重算,见 `fetchWithRenewal`)。 */
+    const initFor = (current: string): RequestInit => {
+      const headers: Record<string, string> = githubHeaders(current, input.accept ?? 'application/vnd.github+json');
+      if (input.body !== undefined) headers['content-type'] = 'application/json';
+      if (input.etag !== undefined) {
+        headers['if-none-match'] = input.etag;
+      }
+      if (input.ifModifiedSince !== undefined) {
+        headers['if-modified-since'] = input.ifModifiedSince;
+      }
+      return {
         method: input.method ?? 'GET',
         headers,
         ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
-      });
+      };
+    };
+    let res: Response;
+    try {
+      res = await this.fetchWithRenewal(url, initFor);
     } catch (error) {
       throw new GithubApiError(`GitHub 请求失败:${messageOf(error)}`, 502);
     }
@@ -245,6 +445,20 @@ export class GithubAuth {
     const remainingNumber = remaining === null ? null : Number(remaining);
     if (remainingNumber !== null && Number.isFinite(remainingNumber) && resource !== 'search') {
       this.lastRemaining = remainingNumber;
+    }
+    /*
+     * 304 先返回:它不是错误(条件请求命中),而且**没有响应体**。
+     * 仍然把两个验证器带回去 —— 304 通常也带 `etag`,下一轮可以继续用它。
+     */
+    if (res.status === 304) {
+      return {
+        status: 304,
+        json: null,
+        link: res.headers.get('link'),
+        remaining: remainingNumber,
+        etag: res.headers.get('etag'),
+        lastModified: res.headers.get('last-modified'),
+      };
     }
     let json: unknown = undefined;
     if (res.status !== 204) {
@@ -256,7 +470,14 @@ export class GithubAuth {
         : `HTTP ${res.status}`;
       throw new GithubApiError(mapGithubMessage(res.status, message), res.status);
     }
-    return { status: res.status, json, link: res.headers.get('link'), remaining: remainingNumber };
+    return {
+      status: res.status,
+      json,
+      link: res.headers.get('link'),
+      remaining: remainingNumber,
+      etag: res.headers.get('etag'),
+      lastModified: res.headers.get('last-modified'),
+    };
   }
 
   /** 当前状态(含当前账号的端点)。 */
@@ -298,10 +519,11 @@ export class GithubAuth {
     if (!state.signedIn) {
       return { emails: [] };
     }
-    const token = this.deps.registry.githubToken();
     let res: Response;
     try {
-      res = await fetch(`${state.endpoint}/user/emails`, { headers: githubHeaders(token) });
+      res = await this.fetchWithRenewal(`${state.endpoint}/user/emails`, (current) => ({
+        headers: githubHeaders(current),
+      }));
     } catch (error) {
       throw new GitServiceError('internal', `无法连接 ${state.endpoint} 读取账号邮箱:${messageOf(error)}`);
     }
@@ -334,6 +556,53 @@ export class GithubAuth {
   }
 
   /**
+   * 「这个 GitHub App 装到我的账号上了吗」—— 账号页那条安装引导的数据源。
+   *
+   * ## 为什么要问这一句
+   *
+   * GitHub App 的**授权**(设备码 / OAuth)与**安装**是两件事:授权只给出"你是谁 + 这个 App
+   * 被授予了哪些权限",而**仓库访问**要求 App 被**安装**到对应账号/组织。实测(2026-11):
+   * 授权成功后 `GET /user/installations` 仍会回 `total_count: 0`,此时仓库级端点一律 403
+   * 且 GitHub 只回一句 `Resource not accessible by integration` —— 用户完全无从下手。
+   *
+   * ## 只在**确实有资格问**的时候问
+   *
+   * 判据全在 {@link installationStatusOf}:不是 App 令牌(PAT / OAuth App)**根本不发请求**
+   * (那个端点对它们没有"安装"语义),查询失败一律归 `unknown`(不许把不确定说成"没安装")。
+   * 请求本身打 `/user/installations`(用户级端点,**不需要**任何仓库权限,所以未安装时它也回 200)。
+   *
+   * @returns 见 {@link AuthInstallationStatus}。
+   */
+  public async installationStatus(): Promise<AuthInstallationStatus> {
+    const appSlug = this.deps.appSlug ?? '';
+    // 安装入口只在**内置 App** 时给:用户自带 App 的 slug 我们不知道,编一个链接等于骗人。
+    const installUrl = appSlug === '' ? '' : `https://github.com/apps/${appSlug}/installations/new`;
+    const token = this.deps.registry.githubToken();
+    const base = {
+      signedIn: token !== '',
+      appUserToken: isGithubAppUserToken(token),
+      installUrl,
+    };
+    if (!base.signedIn || !base.appUserToken) {
+      return installationStatusOf({ ...base, httpStatus: null, totalCount: null });
+    }
+    try {
+      const res = await this.fetchWithRenewal(`${this.endpoint()}/user/installations?per_page=1`, (current) => ({
+        headers: githubHeaders(current),
+      }));
+      const json = await res.json().catch(() => null) as unknown;
+      const totalCount =
+        typeof json === 'object' && json !== null && typeof (json as { total_count?: unknown }).total_count === 'number'
+          ? (json as { total_count: number }).total_count
+          : null;
+      return installationStatusOf({ ...base, httpStatus: res.status, totalCount });
+    } catch (error) {
+      this.deps.log?.(`[dsh-git] 查询 GitHub App 安装状态失败(不影响登录): ${messageOf(error)}`);
+      return installationStatusOf({ ...base, httpStatus: null, totalCount: null });
+    }
+  }
+
+  /**
    * git 子进程用的凭据环境。
    *
    * 用 `url.<token>@<host>/.insteadOf`(经 GIT_CONFIG_KEY/VALUE 环境变量注入,
@@ -363,7 +632,17 @@ export class GithubAuth {
 
   async startDeviceFlow(): Promise<DeviceFlowStart> {
     if (this.deps.clientId === '') {
-      throw new GithubApiError('host 未配置 GitHub OAuth App Client ID,无法使用设备码登录。', 400);
+      /*
+       * 这句会**直接显示在设备码面板里**(2026-11 起失败不再静默),所以它必须说清"缺什么"。
+       * 走到这里只有两种情形:被某层显式写成 `off`,或这个构建里没有内置值
+       * (见 `src/index.ts` 的 `BUILTIN_CLIENT_ID`)。⚠️ 不写任何具体 Client ID。
+       */
+      throw new GithubApiError(
+        'host 未配置 Client ID(被显式关闭,或本构建未内置),无法使用设备码登录:'
+        + '可设 DSH_GIT_CLIENT_ID 环境变量,或在 profile 的 cordis.patch.yml 里填 config.clientId。'
+        + '(Personal Access Token 登录不受影响。)',
+        400,
+      );
     }
     const body = new URLSearchParams({ client_id: this.deps.clientId, scope: 'repo' });
     const res = await fetch(DEVICE_CODE_URL, {
@@ -402,21 +681,49 @@ export class GithubAuth {
     });
     const json = await res.json().catch(() => null) as Record<string, unknown> | null;
     if (json === null) return { status: 'error', message: `轮询失败(HTTP ${res.status})。` };
-    const token = typeof json.access_token === 'string' ? json.access_token : '';
-    if (token !== '') {
-      await this.deps.registry.setGithubToken(token);
+    /*
+     * 用**共用**的解析器(与续期那一步同一个:`src/host/token-refresh.ts` 的
+     * `parseTokenResponse`)—— 响应形状是同一套,解析只该有一处。
+     */
+    const parsed = parseTokenResponse(json);
+    if (parsed.kind === 'ok') {
+      /*
+       * 先记**令牌形态**(会不会过期、有没有 refresh_token),再落盘 —— 理由见
+       * `describeDeviceTokenShape()`:GitHub App 的用户令牌默认 8 小时过期,这一行是现场
+       * 唯一能回答"要不要靠续期"的证据(续期本身见 `token-refresh.ts`)。
+       */
+      this.deps.log?.(`[dsh-git] 设备码登录拿到的令牌形态:${describeDeviceTokenShape(json)}`);
+      await this.deps.registry.setGithubToken(parsed.accessToken);
       // 设备码流程**只可能**产出 github.com 的令牌(端点见文件头的 DEVICE_CODE_URL
       // 说明),所以这里把端点显式写回默认值 —— 否则「先登企业账号、再走设备码」
       // 会把 github.com 的令牌拿去打企业端点。
       await this.deps.registry.setGithubEndpoint(DEFAULT_GITHUB_ENDPOINT);
+      /*
+       * 把 refresh token 与有效期交给续期器(它写 `refs.GITHUB_REFRESH_TOKEN` 并排定时器)。
+       * access token 上面已经写过了 —— 同一件事不许两处写。
+       */
+      await this.refresher?.acceptIssued({
+        refreshToken: parsed.refreshToken,
+        expiresInSec: parsed.expiresInSec,
+      });
       this.viaDeviceFlow = true;
-      const login = await this.fetchLogin(token, DEFAULT_GITHUB_ENDPOINT);
+      const login = await this.fetchLogin(parsed.accessToken, DEFAULT_GITHUB_ENDPOINT);
       this.login = login ?? '';
       return { status: 'done', state: await this.state() };
     }
-    const error = typeof json.error === 'string' ? json.error : '';
+    const error = parsed.kind === 'error' ? parsed.error : '';
     if (error === 'authorization_pending') return { status: 'pending' };
-    if (error === 'slow_down') return { status: 'pending', slowDown: true };
+    if (error === 'slow_down') {
+      /*
+       * ⚠️ **必须把 GitHub 给的新 `interval` 带出去**(2026-11 实测):
+       * `slow_down` 的响应里就带着它(实测 10 → 15 → 20 …每次 +5),客户端据此退避。
+       * 旧实现把这一支压成裸 `{slowDown:true}`、客户端又完全忽略它 ⇒ 客户端继续按原节奏打,
+       * GitHub 每次都回 `slow_down` 并继续加码,**令牌永远不下发**(现场表现:已经授权但界面
+       * 一直停在「等待授权」,磁盘上也没有令牌)。缺失时才由客户端按 +5 秒自增。
+       */
+      const next = typeof json.interval === 'number' && Number.isFinite(json.interval) ? json.interval : undefined;
+      return next === undefined ? { status: 'pending', slowDown: true } : { status: 'pending', slowDown: true, interval: next };
+    }
     if (error === 'expired_token') return { status: 'error', message: '设备码已过期,请重新登录。' };
     if (error === 'access_denied') return { status: 'error', message: '你取消了授权。' };
     return { status: 'error', message: `登录失败:${error || 'unknown'}` };
@@ -442,6 +749,12 @@ export class GithubAuth {
     }
     await this.deps.registry.setGithubToken(trimmed);
     await this.deps.registry.setGithubEndpoint(resolved);
+    /*
+     * PAT 没有续期可言 ⇒ 让续期器把上一枚 refresh token 与到期时间清掉。
+     * 不清的后果很具体:8 小时后台上的 access token 还是那枚 PAT,而续期器会拿着
+     * **上一个账号**的 refresh token 去换一枚新令牌,把 PAT 悄悄顶掉。
+     */
+    await this.refresher?.clear();
     this.viaDeviceFlow = false;
     this.login = login;
     return this.state();
@@ -456,6 +769,11 @@ export class GithubAuth {
   async logout(): Promise<void> {
     await this.deps.registry.setGithubToken('');
     await this.deps.registry.setGithubEndpoint('');
+    /*
+     * 登出 = 「别再留我的令牌」:refresh token 与到期时间一起清掉(同一条语义,
+     * 见 `TokenHome.write('')` 的注释)。
+     */
+    await this.refresher?.clear();
     this.login = '';
     this.viaDeviceFlow = false;
   }
@@ -476,7 +794,7 @@ export class GithubAuth {
     const repos: RemoteRepoLite[] = [];
     for (let page = 1; page <= 5; page++) {
       const url = `${this.endpoint()}/user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member&page=${page}`;
-      const res = await fetch(url, { headers: githubHeaders(token) });
+      const res = await this.fetchWithRenewal(url, (current) => ({ headers: githubHeaders(current) }));
       if (!res.ok) {
         if (res.status === 401) throw new GithubApiError('Token 已失效,请重新登录。', 401);
         throw new GithubApiError(`列出远程仓库失败(HTTP ${res.status})。`, res.status);
@@ -517,9 +835,45 @@ export class GithubAuth {
     return this.deps.registry.githubEndpoint();
   }
 
+  /**
+   * 带**一次**自动续期的取数:401 ⇒ 让 {@link AuthDeps.renewToken} 换新令牌 ⇒ 用新令牌重试一次。
+   *
+   * ## 为什么是"一次"
+   *
+   * 重试一次足够覆盖"令牌刚过期"这个唯一的正常场景;再多就是拿失效凭据反复打 GitHub
+   * (而且 401 也意味着别的坏事,反复重试只会把真正的错因埋掉)。
+   *
+   * ## 为什么头部要用回调重建
+   *
+   * 重试时必须用**新**令牌重新算 `Authorization`(以及调用方那些 `if-none-match` /
+   * `content-type`),所以这里接的是一个 `(token) => RequestInit` 工厂,而不是一个现成的 init。
+   *
+   * @param url - 完整 URL。
+   * @param init - 用给定令牌构造请求头/体。
+   * @returns 响应(**没有**续期可用时就是第一次的响应,原样交给上层判 401)。
+   */
+  private async fetchWithRenewal(
+    url: string,
+    init: (token: string) => RequestInit,
+  ): Promise<Response> {
+    const token = this.deps.registry.githubToken();
+    const res = await fetch(url, init(token));
+    if (res.status !== 401 || this.refresher === null) {
+      return res;
+    }
+    const renewed = await this.refresher.refreshNow();
+    if (!renewed) {
+      return res;
+    }
+    this.deps.log?.('[dsh-git] 令牌已过期,自动续期后用新令牌重试这一次请求。');
+    return await fetch(url, init(this.deps.registry.githubToken()));
+  }
+
   private async fetchLogin(token: string, endpoint: string): Promise<string | null> {
     try {
-      const res = await fetch(`${endpoint}/user`, { headers: githubHeaders(token) });
+      const res = await this.fetchWithRenewal(`${endpoint}/user`, (current) => ({
+        headers: githubHeaders(current),
+      }));
       if (!res.ok) return null;
       const json = await res.json().catch(() => null) as { login?: unknown } | null;
       return typeof json?.login === 'string' ? json.login : null;
@@ -555,10 +909,28 @@ function accountEmailError(status: number, endpoint: string): GitServiceError {
   return new GitServiceError('internal', `读取账号邮箱失败(HTTP ${status},端点 ${endpoint})。`);
 }
 
-/** GitHub 错误 → 可操作中文提示。 */
-function mapGithubMessage(status: number, upstream: string): string {
+/**
+ * GitHub 错误 → 可操作中文提示。
+ *
+ * 导出是给探针用的(纯函数,判据只此一处):每一条都要能在离线用例里钉住。
+ * @param status - HTTP 状态码。
+ * @param upstream - GitHub 回的 `message` 原文。
+ */
+export function mapGithubMessage(status: number, upstream: string): string {
   if (status === 401) return 'Token 无效或已过期,请在设置里重新登录。';
   if (status === 403 && /rate limit/i.test(upstream)) return 'GitHub 限额用尽,请稍后再试。';
+  if (status === 403 && /resource not accessible by integration/i.test(upstream)) {
+    /*
+     * GitHub App 的"授权 ≠ 安装"(2026-11 现场):未安装时 GitHub 只回这一句,不解释也不给下一步。
+     * 这里补上**可操作**的三条(按现场出现频率排):没安装 / 权限没勾全 / 改过权限还没重新授权,
+     * 外加最容易漏的第 4 条:装是装了、但**安装范围不含这个仓库**。
+     * ⚠️ 文案里不许出现具体 Client ID 或 App 名字(用户可能自带 App);安装入口由账号页那条
+     * 引导给(见 `installationStatus()`),那里才知道 slug。
+     */
+    return '这个 App 没有权限访问该资源(Resource not accessible by integration):'
+      + '最常见的原因是它还没被"安装"到对应账号/仓库 —— GitHub App 的「授权」和「安装」是两件事;'
+      + '其次要确认 App 的权限勾全了、改过权限之后重新登录授权过一次、且安装范围包含这个仓库。';
+  }
   if (status === 403) return `没有权限执行该操作:${upstream}`;
   if (status === 404) return '找不到该资源(可能是私有仓未授权,或已被删除)。';
   if (status === 422) return `请求被 GitHub 拒绝:${upstream}`;

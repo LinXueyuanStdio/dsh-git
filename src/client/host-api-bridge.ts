@@ -34,8 +34,8 @@
  */
 
 import { api } from './api.ts';
-import type { AuthStatePayload } from './api.ts';
-import { narrowed } from './payload.ts';
+import type { AuthInstallationPayload, AuthStatePayload } from './api.ts';
+import { narrowed, reportDiagnostic } from './payload.ts';
 import type { Shape } from './payload.ts';
 import { getDotComAPIEndpoint } from '../core/desktop/lib/api.ts';
 import { isDotCom } from '../core/desktop/lib/endpoint-capabilities.ts';
@@ -144,6 +144,48 @@ export async function loadAccountEmails(): Promise<AccountEmailsResult> {
     return { kind: 'ok', emails: checked.value.emails };
   } catch (error) {
     return { kind: 'error', message: `读取账号邮箱时出错:${String(error)}` };
+  }
+}
+
+/** `auth/installation` 的五档形状(与 `api.ts` 的 `SHAPES['auth/installation']` 同义,同上一条纪律)。 */
+const INSTALLATION_SHAPE: Shape = {
+  anyOf: [
+    { record: { kind: { literal: ['not-signed-in'] } } },
+    { record: { kind: { literal: ['not-app-token'] } } },
+    { record: { kind: { literal: ['unknown'] } } },
+    { record: { kind: { literal: ['installed'] }, count: 'number' } },
+    { record: { kind: { literal: ['not-installed'] }, installUrl: 'string' } },
+  ],
+};
+
+/**
+ * 拉「这个 GitHub App 装到我账号上了吗」;拿不到就回 `null`(界面据此**不提示**)。
+ *
+ * ## 为什么这里的失败是"什么都不说",与 `loadAccountEmails()` 相反
+ *
+ * 邮箱是用户要的数据(读不到必须说);而这一条是**辅助提示** —— 查询失败、老 host 没有
+ * 这条路由(`call()` 会把它变成 `ok:false`)、载荷畸形,这三种情况的正确反应都是**不提示**,
+ * 而不是在账号页挂一句「安装状态读取失败」把用户吓一跳。唯一例外是载荷畸形:它意味着
+ * 契约漂了(host/client 版本错位),所以记一条**诊断**(用户看不见,探针/控制台看得见),
+ * 然后照样不提示。
+ *
+ * 回来的五档里,**只有 `not-installed` 该在界面上说话**(判据全在 host 半的
+ * `installationStatusOf()`,这里不重复判断)。
+ */
+export async function loadInstallationStatus(): Promise<AuthInstallationPayload | null> {
+  try {
+    const result = await api.installationStatus();
+    if (!result.ok) {
+      return null;
+    }
+    const checked = narrowed<AuthInstallationPayload>(result.value, INSTALLATION_SHAPE);
+    if (!checked.ok) {
+      reportDiagnostic('载荷被拒', 'auth/installation', checked.message);
+      return null;
+    }
+    return checked.value;
+  } catch {
+    return null;
   }
 }
 

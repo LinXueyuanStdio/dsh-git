@@ -12,16 +12,39 @@
       # ----------------------------------------------------------------------
       # 可选配置。
       #
-      # clientId:GitHub OAuth App 的 Client ID,**只有填了才启用「设备码登录」**。
-      #   不填不影响使用:设置里仍可用 Personal Access Token 登录(细粒度 Token 需要
-      #   Contents R / Issues RW / Pull requests RW / Actions RW;经典 Token 用 repo)。
+      # clientId:「设备码登录」用哪个 App(OAuth App 或 GitHub App 都行)。
+      #   **省略它就是包内内置的 GitHub App**(开箱可用设备码)。它的 Client ID **只登记在代码里**
+      #   (`src/index.ts` 的 `BUILTIN_CLIENT_ID`)—— 公开值(设备码流程不需要 client secret),
+      #   但不在文档/本文件里重复:「用哪个 App」不该到处复制。
+      #   ⚠️ 内置的是 GitHub App,两条要知道:
+      #      ① 仓库访问要求先把它**安装**到你的账号/组织 —— 没安装的表现是「登录成功但列表为空」;
+      #         安装入口:https://github.com/apps/dsh-git-local/installations/new
+      #      ② 它的用户令牌默认 **8 小时**过期 —— 插件会**自动续期**(提前 5 分钟换新,重启后靠
+      #         「401 → 续期 → 重试一次」兜底)。若续期被 GitHub 拒(日志里 `incorrect_client_credentials`),
+      #         就在 App 的 Optional Features 里关掉 "User-to-server token expiration",
+      #         或给部署侧一个 `DSH_GIT_CLIENT_SECRET`(env,不进仓库)。
       #
-      #   自己建一个 OAuth App 即可(免费,不需要 Copilot):
-      #     https://github.com/settings/developers → New OAuth App
-      #     任意填 Homepage URL;勾选 "Enable Device Flow";Callback URL 可留空/随便填。
-      #   设备码流程**不需要 client secret**,所以只把 Client ID 放这里没有泄密风险。
+      #   填自己的 App = **覆盖**内置值,优先级:
+      #       config.clientId > DSH_GIT_CLIENT_ID > 包内内置值
+      #   环境变量那一层(不进任何受版本控制的文件):
+      #       DSH_GIT_CLIENT_ID=Ov23li… dsh
+      #   想**关掉**设备码、只用 Personal Access Token:任意一层写 `off`(大小写不敏感)。
+      #   host 半启动日志里 `clientId` 后面那一句会说明实际生效的是哪一层:
+      #       自定义(config.clientId) / 自定义(DSH_GIT_CLIENT_ID) / 内置(包内默认)
+      #       / 已关闭(显式 off) / 未配置        ← 只报来源,不报值
+      #
+      #   PAT 一直可用(细粒度 Token 需要 Contents R / Issues RW / Pull requests RW /
+      #   Actions RW;经典 Token 用 repo)。
+      #
+      #   自己建 App(免费,不需要 Copilot)时勾上 "Enable Device Flow":
+      #     · OAuth App:https://github.com/settings/developers(插件会请求 scope=repo);
+      #     · GitHub App:权限需要 Contents RW / Issues RW / Pull requests RW / Actions RW /
+      #       Checks R / Commit statuses R / Metadata R(必选)/ Account ▸ Email addresses R。
+      #       (上面那两条 GitHub App 的注意事项同样适用。)
       #   然后取消下面两行的注释并填入:
       #
       # config:
       #   clientId: Ov23liXXXXXXXXXXXXXXXX
+      #   # 或者干脆关掉设备码:
+      #   # clientId: 'off'
       # ----------------------------------------------------------------------

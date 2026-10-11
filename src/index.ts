@@ -30,6 +30,11 @@ import {
   createCredentialBridge, GITHUB_TOKEN_REF,
   type CredentialService, type TokenHome,
 } from './host/credential-bridge.ts';
+/*
+ * 令牌续期(GitHub App 的用户令牌 8 小时过期)。它自己会建第二条凭据引用
+ * (`GITHUB_REFRESH_TOKEN`),所以这里只需要一个工厂 + 一个 bootstrap。
+ */
+import { createTokenRefresher } from './host/token-refresh.ts';
 import { createGitHandler, ROUTE_PREFIX } from './host/routes.ts';
 // ★ 长连接(上游 `AliveStore` + 真 `@github/alive-client`)的宿主生命周期。
 import { AliveService } from './host/alive.ts';
@@ -62,9 +67,12 @@ export const inject = ['webServer', 'subprocess', 'storageDomain'];
  * 判据与 cookbook 见 `references/deepseek-harness/docs/cookbook/adding-a-settings-card.md`。
  *
  * 两条不同的语义,不要混:
- *  - `clientId` —— **部署期**配置(这个部署用哪个 GitHub OAuth App),
- *    **刻意不标 volatile** ⇒ 不进设置表单。它由 profile 的 `cordis.patch.yml`
- *    的 `config:` 填,这里是它的**声明与激活期校验**。
+ *  - `clientId` —— **部署期**配置(这个部署用哪个 App),**刻意不标 volatile** ⇒ 不进设置表单。
+ *    它由 profile 的 `cordis.patch.yml` 的 `config:` 填,这里是它的**声明与激活期校验**。
+ *    ⚠️ 这里**只声明、不给默认值**:三层优先级(`config.clientId` > `DSH_GIT_CLIENT_ID` >
+ *    `BUILTIN_CLIENT_ID` 常量,即包内内置的 GitHub App,见下)与 `off` 哨兵见 {@link resolveClientId}。
+ *    为什么默认值不能写进 schema:环境变量的值一旦进 `default()`,就会被 `Config.toJSON()`
+ *    投影成设置卡片的数据源、**广播到浏览器**;而只写死常量又表达不出「部署可覆盖」这一层。
  *  - `autoSec` —— **用户偏好**(Pulls 页签的自动刷新周期,秒;0 = 关闭),
  *    标 `.volatile()` ⇒ 在宿主的「设置 ▸ 插件」里可编辑,值落进 profile patch。
  *    它接的是老的 `gw.autoSec` 孤儿:那个键在 `src/client/pulls-view.tsx` 只有
@@ -89,6 +97,192 @@ export const Config = schemastery.object({
  * (`.volatile()` 的字段在这里是 `Volatile<number>` 引用,不是裸 number)。
  */
 export type PluginConfig = ReturnType<typeof Config>;
+
+/**
+ * **包内内置的 Client ID** —— 开箱即可用设备码登录的那一个。
+ *
+ * ## 它是谁(注册信息,只登记在**代码**里)
+ *
+ * 内置的是 **GitHub App**(不是 OAuth App):
+ *  - App ID `5260675`、slug **`dsh-git-local`**、Owner `@LinXueyuanStdio`;
+ *  - 公开页 <https://github.com/apps/dsh-git-local>、**安装入口**
+ *    <https://github.com/apps/dsh-git-local/installations/new>(为什么必须先安装,见下面「与 App 类型」第 2 条);
+ *  - **Enable Device Flow 已勾选**(设备码流程必需;没勾时 GitHub 回 `device_flow_disabled`);
+ *  - **Request user authorization (OAuth) during installation**:2026-11 已由 App 侧处理掉
+ *    (注册页那个回调 `http://localhost:3000/api/github/app/callback` 没有服务在听;设备码流程本来
+ *    就不需要 redirect URI —— 只有将来补 web flow 时才要重新给一个能用的回调)。
+ *
+ * ## ⚠️ 这条值的**唯一落点就是下面那一行**(2026-11 的明确要求)
+ *
+ * 需求原话:*"我说的是文档里不要写 clientid,代码里可以写 clientid"* —— 所以:
+ *  - **代码里**:就是本常量(这份注释也不再重复字面值,免得同一个值在注释里各存一份);
+ *  - **文档里**:README / CHANGELOG / `cordis.patch.yml` 的注释 / 启动日志 / 报错文案**都不写**
+ *    (前两者会随 npm 包发布、第三份会被复制进用户 profile,都是"用户能看到的地方");
+ *  - **日志里**:只报**来源**(见 {@link describeClientIdSource});令牌那侧只报前缀。
+ *
+ * 为什么这条区分有意义:Client ID 本身是**公开值**(设备码流程不需要 client secret,授权页 URL 里
+ * 就带着它),但它同时是"这个部署用哪个 App"的**身份** —— 文档里到处复制它,等于把"某个 App 是所有人
+ * 的默认身份"这件事写死;而代码里有一个默认值,只是让"什么都没配"也能用设备码。
+ *
+ * ## 三层来源与优先级(唯一解析点是 {@link resolveClientId})
+ *
+ *  1. `config.clientId`(profile 的 `cordis.patch.yml`)—— 用户/部署自己的 App,**最高**;
+ *  2. `DSH_GIT_CLIENT_ID` 环境变量 —— 部署方覆盖;
+ *  3. **本常量** —— 开箱默认;
+ *  4. 前两层任一层写 `off` ⇒ **显式关闭**设备码(只用 PAT);三层都空 ⇒ 未配置,界面只给 PAT。
+ *
+ * 撤回开关只有一个:把本常量改回空串 =「包里不再内置」,其余几层照旧。
+ *
+ * ## 与 App 类型有关的两件事(自带 App 的人要知道)
+ *
+ *  1. `startDeviceFlow()` 会带 `scope=repo`(`src/host/auth.ts`)。**OAuth App 需要它**;
+ *     GitHub App 的授权不吃 scope(官方文档:*No other scopes are supported for GitHub Apps*),
+ *     实测 `POST /login/device/code` 带与不带都是 HTTP 200 且形状相同 ⇒ 对两种 App 都安全
+ *     (⇒ 不存在"因为 scope 所以 GitHub App 登不上"这条缺口)。
+ *  2. GitHub App 的**用户令牌默认 8 小时过期**(官方文档:*By default, the user access token
+ *     expires after 8 hours*)。**2026-11 起已自动续期**(`host/token-refresh.ts`;此前只消费
+ *     ⇒ 到期后静默 401(证据靠那行「令牌形态」);另外 GitHub App 的仓库访问**要求先安装该 App**
+ *     (官方文档:*The app can only access resources in an account where it is installed*),
+ *     没安装时的表现是「登录成功但一个仓库都没有」。
+ *
+ * ## 代价:per-application 限额是**所有安装共享**的
+ *
+ * device flow 验证码提交 **50 次/小时/应用**、签发 access token **2,000 次/小时/应用**
+ * (超了短时无法签发),所以"用户填自己的 App"那条覆盖路径不只为了治理,也为额度。
+ */
+const BUILTIN_CLIENT_ID = 'Iv23liOoOOSLjIsppbzf';
+
+/**
+ * 内置 App 的 **slug**(`https://github.com/apps/<slug>`)—— 唯一用途是拼**安装入口**。
+ *
+ * 为什么需要它:GitHub App 的「授权」与「安装」是两件事,而**安装入口**是 slug 拼出来的
+ * (`/installations/new`);`GET /user/installations` 只能告诉我们"装没装",给不出这个链接。
+ *
+ * ⚠️ **只在生效的 Client ID 就是上面那份内置值时**才把它交给 host
+ * (见 `new GithubAuth({ …, appSlug })`)—— 用户自带 App 时我们不知道他的 slug,
+ * 编一个链接等于把人送到别人的 App 上。
+ */
+const BUILTIN_APP_SLUG = 'dsh-git-local';
+
+/**
+ * **部署侧覆盖**用的环境变量 —— 优先级在 `config.clientId` 之下、内置值之上。
+ *
+ * ```bash
+ * DSH_GIT_CLIENT_ID=Ov23li… dsh      # 或写进启动器的环境
+ * DSH_GIT_CLIENT_ID=off   dsh        # 关掉设备码,只用 PAT
+ * ```
+ *
+ * 为什么要有它(而 `config.clientId` 已经能覆盖):这一层是**部署期**的旋钮
+ * (`Config` 那条注释里的划分),改它不用动用户的 profile,也不要求重新发版。
+ *
+ * ⚠️ **与 `GITHUB_TOKEN` 那条「环境变量是只读覆盖」的方向相反**,别照抄那个直觉:
+ * 那条守的是「令牌轮换不许被插件写回」,这条守的是「**用户可以覆盖部署默认值**」。
+ */
+const ENV_CLIENT_ID = 'DSH_GIT_CLIENT_ID';
+
+/**
+ * 「显式关闭设备码」的哨兵 —— `config.clientId` 或 `DSH_GIT_CLIENT_ID` 写这个值即生效。
+ *
+ * 为什么需要一个哨兵,而不是「空串 = 关闭」:三层来源里**空串只能表示「这一层没有」**
+ * (schema 的默认值也是空串,解析层分不出「省略」与「显式填空」)。若拿空串当关闭,
+ * 它会**静默落到下一层**(填 `clientId: ''` 却仍然用内置 App)——那正是文档撒谎的经典形态。
+ * 这个值不会与真实 Client ID 撞车(GitHub 的是 `Iv23li…` / `Ov23li…` / `Iv1.…`),
+ * 大小写不敏感(YAML 里写 `OFF` 也算)。
+ */
+const CLIENT_ID_OFF = 'off';
+
+/** 生效的 Client ID 是从哪儿来的(`off` = 显式关闭;`none` = 三层都空 ⇒ 设备码不可用)。 */
+export type ClientIdSource = 'config' | 'env' | 'builtin' | 'off' | 'none';
+
+/** {@link resolveClientId} 的结果。 */
+export interface IResolvedClientId {
+  /** 实际交给 `GithubAuth` 的值;空串 = 未配置。 */
+  readonly clientId: string;
+  /** 它来自哪一条来源。诊断行只报这个,**永远不报值本身**。 */
+  readonly source: ClientIdSource;
+}
+
+/**
+ * 解析「这次激活用哪个 Client ID」:
+ * **`config.clientId` > `DSH_GIT_CLIENT_ID` > 包内内置值 > 未配置**,任一层写 `off` 即关闭。
+ *
+ * 为什么是纯函数、且 `env` 可注入:这条优先级是**用户可见的契约**
+ * (「我在 profile 里填自己的 App,能不能盖掉内置那个?」「我不想用内置的,怎么关?」)。把 `process.env`
+ * 焊死在函数体里,它就只剩「起一台 host、观察日志」这一条验证路径;
+ * 参数化之后探针可以离线把三档一次性钉住。
+ *
+ * 三档的**后果**不同,所以调用方不该只问「配没配」:
+ *  - `config` / `env` ⇒ 用户或部署自己的 App(限额归那个 App);
+ *  - `builtin` ⇒ 包内 GitHub App(**所有**安装共享 per-application 限额,且见该常量上的三条已知缺口);
+ *  - `off` ⇒ 设备码整条关掉,`auth/device-start` 会抛「未配置 Client ID」,界面只给 PAT;
+ *  - `none` ⇒ 同上,差别只在「没人配」而不是「有人关」—— 诊断行必须把这两件事分开说。
+ *
+ * 各层都 `.trim()`:环境变量与 YAML 里最常见的两种脏值是首尾空格与空串,而空串必须
+ * **等于**「这一层没有」—— 否则 `deviceFlow` 会变成 true、按钮出现了却点不通。
+ *
+ * @param configured - `Config.clientId`(`resolveConfig()` 求值后的值;老 host 可能不给)。
+ * @param env - 进程环境(默认 `process.env`,探针可注入)。
+ * @returns 生效值与来源。
+ */
+export function resolveClientId(
+  configured: string | undefined,
+  env: Record<string, string | undefined> = process.env,
+): IResolvedClientId {
+  const fromConfig = (configured ?? '').trim();
+  if (isClientIdOff(fromConfig)) {
+    return { clientId: '', source: 'off' };
+  }
+  if (fromConfig !== '') {
+    return { clientId: fromConfig, source: 'config' };
+  }
+  const fromEnv = (env[ENV_CLIENT_ID] ?? '').trim();
+  if (isClientIdOff(fromEnv)) {
+    return { clientId: '', source: 'off' };
+  }
+  if (fromEnv !== '') {
+    return { clientId: fromEnv, source: 'env' };
+  }
+  const builtin = BUILTIN_CLIENT_ID.trim();
+  if (builtin !== '') {
+    return { clientId: builtin, source: 'builtin' };
+  }
+  return { clientId: '', source: 'none' };
+}
+
+/**
+ * 这一层的值是不是「显式关闭」哨兵(大小写不敏感,见 {@link CLIENT_ID_OFF})。
+ * @param value - 已 `trim()` 过的某一层取值。
+ */
+function isClientIdOff(value: string): boolean {
+  return value.toLowerCase() === CLIENT_ID_OFF;
+}
+
+/**
+ * 来源 → 启动诊断行末尾那一句。
+ *
+ * 为什么必须区分三档而不是二元(`''` / 非空):含糊的一句「已配置」会让人以为
+ * 「配了就是能用、且额度是自己的」。同一条理由的先例是 `account-emails.tsx` 的
+ * `describePatOutcome()` —— 那里也必须把「确认落在同一实例」与「无法确认」分开说。
+ * ⚠️ 这里**只报来源,不报值**:Client ID 不是密钥,但把它写进日志/工单只会带来
+ * 「同一个 App 被到处引用」的困惑,而排查一个「设备码登不上」并不需要看到它。
+ *
+ * @param source - {@link resolveClientId} 给的来源。
+ * @returns 诊断行里 `clientId ` 之后的那一句。
+ */
+export function describeClientIdSource(source: ClientIdSource): string {
+  switch (source) {
+    case 'config':
+      return '自定义(config.clientId,设备码可用)';
+    case 'env':
+      return `自定义(${ENV_CLIENT_ID},设备码可用)`;
+    case 'builtin':
+      return '内置(包内默认,设备码可用)';
+    case 'off':
+      return `已关闭(显式 ${CLIENT_ID_OFF},仅 PAT)`;
+    default:
+      return '未配置(仅 PAT 可用)';
+  }
+}
 
 /** 宿主 ctx 的最小结构切面(只用到的几个服务)。 */
 interface HostCtx {
@@ -327,7 +521,22 @@ export function apply(ctx: Context, config?: PluginConfig): () => void {
   };
 
   // ---------- 服务 ----------
-  const auth = new GithubAuth({ registry, clientId: (config?.clientId ?? '').trim(), log });
+  /*
+   * Client ID 的**唯一解析点**(配置 > `DSH_GIT_CLIENT_ID` > 未配置,见 `resolveClientId()`)。
+   * 这里解析一次、两处消费:①`GithubAuth` 用它决定设备码能不能用(`deviceFlow`);
+   * ②下面那条启动诊断行报**来源**。
+   */
+  const clientId = resolveClientId(config?.clientId);
+  const auth = new GithubAuth({
+    registry,
+    clientId: clientId.clientId,
+    /*
+     * 安装入口只在**内置 App** 生效时给:用户自带 App 的 slug 我们不知道,
+     * 而 `installationStatus()` 会把空串如实翻成"没有链接"(见 `BUILTIN_APP_SLUG`)。
+     */
+    appSlug: clientId.source === 'builtin' ? BUILTIN_APP_SLUG : '',
+    log,
+  });
   // 系统动作的目标路径限制在同一份 allowedRoots 内(与 git 服务一致)。
   const system = new SystemService(host, () => registry.allowedRoots());
 
@@ -573,7 +782,9 @@ export function apply(ctx: Context, config?: PluginConfig): () => void {
    *  1. 建桥(初始缓存为空,`bootstrap()` 之后才有值);
    *  2. 安装到 registry;
    *  3. `bootstrap()`:取凭据服务里的值;
-   *  4. 挂上热发布监听:外部改了 `.credentials.yaml` 之后不用重启。
+   *  4. 建**续期器**(同一套凭据策略的另一条引用 `GITHUB_REFRESH_TOKEN`)并装到 `GithubAuth`,
+   *     再把它的定时器挂进 effect(2026-11 新增 —— GitHub App 的用户令牌 8 小时过期);
+   *  5. 挂上热发布监听:外部改了 `.credentials.yaml` 之后不用重启。
    */
   const startTokenHome = async (): Promise<void> => {
     const service = tokenBridge.service;
@@ -592,6 +803,44 @@ export function apply(ctx: Context, config?: PluginConfig): () => void {
     const settled = home.source();
     log(`[dsh-git] GitHub 令牌来源 ${settled}(引用 ${GITHUB_TOKEN_REF})`
       + (settled === 'memory' ? ' —— 只在本次运行的内存里,重启后需要重新登录' : ''));
+    /*
+     * ---- **令牌续期**(2026-11 新增)----
+     *
+     * GitHub App 的用户令牌 8 小时后过期(见 `host/token-refresh.ts` 文件头)。这里建续期器:
+     * 它的 refresh token 走**同一套凭据策略**的另一条引用 `refs.GITHUB_REFRESH_TOKEN`
+     * (`createTokenRefresher` 内部自己建那个桥),access token 的读写仍旧经 `registry`
+     * —— 两条引用各只有一个写者。
+     *
+     * `bootstrap()` **要 await**:`start()` 会先读一次 refresh token 判断"该不该马上换一枚";
+     * 读之前没装载过的话那个判断恒假。
+     */
+    const { refresher, bootstrap: bootstrapRefresh } = createTokenRefresher({
+      service,
+      clientId: clientId.clientId,
+      /*
+       * **可选**的 client secret:官方文档说设备码产出的令牌续期**不需要**它,但实测那条路径
+       * 会用 `incorrect_client_credentials` 拒掉不带 secret 的请求(见 `token-refresh.ts` 里
+       * 那一段)。所以给部署侧留一个**环境变量**入口 —— 只在这里读,绝不落进仓库 / profile,
+       * 也绝不打印。
+       */
+      clientSecret: (process.env.DSH_GIT_CLIENT_SECRET ?? '').trim(),
+      readAccessToken: () => registry.githubToken(),
+      writeAccessToken: (token) => registry.setGithubToken(token),
+      log,
+    });
+    await bootstrapRefresh();
+    if (disposed) {
+      return;
+    }
+    /*
+     * 装上之后 `GithubAuth` 的 401 重试才有地方问新令牌(见 `useTokenRefresher`);
+     * `start()`/`stop()` 挂进 effect:定时器随插件卸载而停(不留孤儿定时器)。
+     */
+    auth.useTokenRefresher(refresher);
+    ctx.effect(() => {
+      refresher.start();
+      return () => { refresher.stop(); };
+    }, 'dsh-git: github token renew');
     ctx.effect(() => {
       const off = host.on?.('credentials/reference-updated', (ref) => {
         if (ref === GITHUB_TOKEN_REF) {
@@ -695,12 +944,14 @@ export function apply(ctx: Context, config?: PluginConfig): () => void {
       // 因为旧实例的注册行没有任何版本信息,白费了很多时间。
       // `自动刷新`/`clientId` 两项是**声明了 Config 之后**才有的可读回证据:
       // 它们证明 schema 真的被 `resolveConfig()` 求值过(默认值也生效),而不是只被导出。
+      // `clientId` 这一项还报**来源**(config / 环境变量 / 未配置):这三档的后果不同 ——
+      // 「配了」既不等于「能用」,也不等于「限额是自己的 App」(见 `resolveClientId()`)。
       //
       // ⚠️ **这一行刻意不报令牌来源**:它先于 `startTokenHome()` 完成,那时还没有值
       // 可报。来源由 `startTokenHome()` 在 `bootstrap()` **之后**单独记一行。
       log(`[dsh-git] 已注册 ${ROUTE_PREFIX}/* (build ${BUILD_STAMP} UTC;本地仓库 ${registry.list().length} 个,`
         + `存储 ${storage.persistent ? '持久化' : '仅内存'}${storage.error === null ? '' : `,存储错误: ${storage.error}`};`
-        + `Pulls 自动刷新 ${config?.autoSec.get() ?? 0} 秒;clientId ${(config?.clientId ?? '') === '' ? '未配置(仅 PAT 可用)' : '已配置'})`);
+        + `Pulls 自动刷新 ${config?.autoSec.get() ?? 0} 秒;clientId ${describeClientIdSource(clientId.source)})`);
       if (tokenBridge.service === null) {
         // 这里 `service` 仍为 null 通常只是**时序**:路由不等凭据接线,而 `ctx.inject`
         // 的回调要到稍后才跑 —— 实测同一秒内:`已注册` → 这一行 → `令牌来源

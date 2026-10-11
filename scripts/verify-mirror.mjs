@@ -119,7 +119,15 @@ const EXPECTED = new Map([
       'import 了 lib/copilot-*、lib/databases/**、ui/secret-scanning/** —— §1.3 排除。' +
       '仓库列表一个网络请求都不需要,只用 getHTMLURL/getDotComAPIEndpoint(逐字取自上游)' +
       '与 GitHubAccountType 类型(镜像里 models/owner.ts 早已 import)。' +
-      '两处刻意偏离:process.env 的两个调试变量按「未设置」处理。',
+      '两处刻意偏离:process.env 的两个调试变量按「未设置」处理。' +
+      '⚠️ **2026-10 加宽(功能点 7.14)**:新增 `fetchMentionables(owner, name, etag)`' +
+      '(**抛错替身** —— 上游那 30 行要 `If-None-Match` 与自定义 `Accept`,而本 shim 的' +
+      '注入契约 `IGitHubTransport.request(path, {method, body, accept})` 表达不了这两样;' +
+      '唯一调用者是镜像 `GitHubUserStore.updateMentionables`,而它在本仓没有产品调用者),' +
+      '并把 `fetchUser` 的**声明**从 `{avatar_url}` 加宽到 `github-user-store.getByLogin`' +
+      '真正读的六格(`type/id/login/name/email/avatar_url`)—— **方法体仍然抛**,' +
+      '因为改成走传输会让 `ui/lib/avatar.tsx` 的现有路径从「必抛」变成真的打 api.github.com,' +
+      '那是另一个面的行为改动;逐条理由写在文件里那两个方法的 JSDoc。',
   ],
   [
     'lib/helpers/non-fatal-exception.ts',
@@ -514,6 +522,77 @@ const EXPECTED = new Map([
       '删掉不改行为(JSX 的编译目标与这个 import 无关)。' +
       '**逐字的是其余 200+ 行**(类体、正则、`exactMatch`、`renderItem` 全未改)。',
   ],
+  /*
+   * --- 2026-10 功能点 7.14 / 7.16 新增的**三个** autocompletion 镜像件 ---
+   *
+   * 它俩与本条上面那两条同源:清单构造器 + emoji / issues 两个 provider。
+   * 逐条理由与退役条件写在各自文件头里(本仓惯例:登记与文件内注释同源)。
+   */
+  [
+    'ui/autocompletion/emoji-autocompletion-provider.tsx',
+    '功能点 7.16 的四个缺件之一(用户裁决「做」):提交信息两个输入框换成镜像' +
+      '`AutocompletingInput`/`AutocompletingTextArea` 之后,`build-autocompletion-providers.ts`' +
+      '这份清单里第一个 provider 就是它。**一处偏离**:上游 `:1` 的' +
+      '`import * as React from \'react\'` 删掉 —— 上游 `jsx: "react"`(经典运行时)必需它,' +
+      '我们是 `jsx: "react-jsx"`(自动运行时)且本文件没有一处 `React.` 引用 ⇒ 留着就是一条' +
+      '**新** TS6133(`noUnusedLocals`,实测 `0 → 1` 直接把 `check-types` 判红),' +
+      '而本文件是**新文件**、不能靠改基线消掉(`--write-baseline` 是明令禁止的动作)。' +
+      '删掉不改行为(JSX 的编译目标与这个 import 无关)。' +
+      '**逐字的是其余 159 行**(正则、排序、`renderItem`/`renderHighlightedTitle`、' +
+      '`getItemAriaLabel`、`getCompletionText` 全未改)。' +
+      '⚠️ 它的**数据源**今天不存在(`references/desktop/gemoji/` 是空目录、全树没有' +
+      '`emoji.json`)⇒ 清单里那个 provider 是**空表上的**(登记在' +
+      '`src/client/commit-autocompletion.ts` 的文件头),不是「接上了」。',
+  ],
+  [
+    'ui/autocompletion/issues-autocompletion-provider.tsx',
+    '同上(7.16 的四个缺件之一)。**两处偏离**(逐条与文件头的登记块同源):' +
+      '① 上游 `:3` 的 `import { IssuesStore, IIssueHit } from \'../../lib/stores/issues-store\'`' +
+      '换成**就地声明的两个结构类型** —— 那个模块在 client 根不存在,而它的上游原文要' +
+      '`lib/databases/**`(dexie,不在 `package.json`、也不在 `node_modules`,实测),' +
+      '真身在 host 根(`src/host/mirror/lib/stores/issues-store.ts`),两个根不能互相 import;' +
+      '手法与 `user-autocompletion-provider.tsx` 的偏离②③逐字同源;' +
+      '② `renderItem` 里的 `<TooltippedContent …>{item.title}</TooltippedContent>` 换成' +
+      '`React.createElement(TooltippedContent, props, item.title)` —— `@types/react@18` 的' +
+      '类组件没有隐式 `children`,JSX 写法是 TS2769(**同一条诊断已在存量' +
+      '`ui/branches/branch-list-item.tsx:116` 上**,那条登记在 `type-baseline.json`;' +
+      '本文件是新文件,不能新增未登记诊断);同一手法已登记在' +
+      '`ui/lib/author-input/author-input.tsx` 的 EXPECTED 上。' +
+      '⇒ 上游 `:1` 的 `import * as React from \'react\'` 因此**保留且被用到**(无 TS6133)。' +
+      '⚠️ 它的**数据源**今天不存在(客户端没有 issues 库/账户/`fetchIssues`)⇒ 登记为**空**,' +
+      '见 `src/client/commit-autocompletion.ts`。',
+  ],
+  [
+    'ui/autocompletion/build-autocompletion-providers.ts',
+    '同上(7.16 的四个缺件之一,也是**整份清单唯一的构造点**)。**一处偏离**:' +
+      '上游 `:14` 的 `import { GitHubUserStore, IssuesStore } from \'../../lib/stores\'`' +
+      '换成两条直指定义点的 import(`github-user-store` 真身 + `issues-autocompletion-provider`' +
+      '里那份已登记的结构类型)。理由:上游那个 `lib/stores/index.ts` 是 re-export 13 个模块的' +
+      '`export *` 桶,本仓 client 根只有 4 个 ⇒ 逐字补桶会把 9 个不存在的模块(kaptar/' +
+      'GitHub API/dexie/§1.3 应用层)一次带进来。' +
+      '⚠️ `:12` 的 `from \'.\'`(`./index` 桶)**保留**:三个缺件补齐之后那个桶 re-export 的' +
+      '六个模块全部在树里(这也是四条既有「绕开桶」偏离的回收条件 —— 那四条本轮**刻意不动**, ' +
+      '见报告)。',
+  ],
+  [
+    'lib/stores/github-user-store.ts',
+    '功能点 7.14 的第一个缺件(用户裁决「做」):`CoAuthorAutocompletionProvider` /' +
+      '`UserAutocompletionProvider` 要的那个 store。**一处偏离**:上游 `:4-7` 的' +
+      '`import { GitHubUserDatabase, IMentionableUser } from \'../databases/github-user-database\'`' +
+      '换成**就地声明的两个结构类型**(`IMentionableUser` / `IMentionableCacheEntry` /' +
+      '`GitHubUserDatabase` 的四个成员,签名逐字取自上游原文)。理由:那个模块在 client 根' +
+      '**整个目录都不存在**,而它的上游原文 `:1-2` 要 `dexie`(不在 `package.json`、也不在' +
+      '`node_modules`,实测)+ `lib/databases/base-database.ts` ⇒ 逐字抄进来在客户端程序里' +
+      '**编译不过**;本仓明令禁止 `npm install` 与新增依赖。手法与' +
+      '`user-autocompletion-provider.tsx` 的偏离②③**逐字同源**。' +
+      '**逐字的是其余 195 行**(`MaxFetchFrequency`/`QueryCacheTimeout`/`getByLogin`/' +
+      '`updateMentionables`/`getMentionableUsers`/`getMentionableUsersMatching`/' +
+      '`matchMentionableUsers` 全未改)。' +
+      '⚠️ **值面另有两个接缝**(不在本文件里):`lib/api.ts` 的方法体仍是抛错替身、' +
+      '`GitHubUserDatabase` 的实例由 `src/client/commit-autocompletion.ts` 提供' +
+      '(登记为「空数据源」)⇒ **一个用户都补不出来**,而那正是「GitHub 数据面不存在」' +
+      '这条真阻塞者的落点。',
+  ],
   [
     'ui/lib/author-input/author-input.tsx',
     '只改 import 说明符:上游 `:3-8` 从 `\'../../autocompletion\'`(即 `export *` 桶' +
@@ -693,6 +772,15 @@ const EXPECTED = new Map([
    *  2. 用户改判「偏好设置弹窗统一英文」;
    *  3. 上游自己做了 i18n,`references/desktop` 的这四份文件不再含英文字面量。
    * ⚠️ 四条登记是**同一处裁决的四个文件**,必须同批撤除。
+   *
+   * ---
+   *
+   * ⭐ **2026-10 追加第六条:`ui/preferences/prompts.tsx`**(登记在下面,紧跟
+   * `appearance.tsx` 之后)。它是同一条「统一中文」裁决,但**不是顺手补的** ——
+   * 该页原在保真度账本里是**整页删除**,2026-10 用户裁决「可以加 Prompts 页」之后
+   * 才第一次上屏(`src/client/preferences-pages.tsx` 的 `TABS` + `case 'prompts'`)。
+   * ⇒ 上面那个「四个文件」的计数在本轮之后一律读作**五条 + Prompts 这一条**;
+   * 「统一中文」的退役条件(三条)对它**逐字适用**。
    */
   [
     'ui/preferences/accessibility.tsx',
@@ -721,7 +809,13 @@ const EXPECTED = new Map([
       '⚠️ 两处 `__DARWIN__ ? a : b` 的**三元结构逐字保留**,只是两个分支的中文相同(中文没有大小写之分);' +
       '这一点是刻意的:把三元删掉才是**结构改动**,不在本次授权范围内。' +
       '**没有动的**:`<h2>GitHub.com</h2>` / `<h2>GitHub Enterprise</h2>`(品牌名)、' +
-      '`(GitHub.com)` / `(GitHub Enterprise)` 后缀、`Unknown sign in type: ${type}`(assertNever 的开发者信息)。',
+      '`(GitHub.com)` / `(GitHub Enterprise)` 后缀、`Unknown sign in type: ${type}`(assertNever 的开发者信息)。' +
+      '**2026-11 追加 —— 两个结构插槽(不是文案)**:`IAccountsProps` 多了可选的 ' +
+      '`patSignInAction` / `patSignInForm`,分别渲染在 GitHub.com 的动作行(登录 / 退出登录按钮' +
+      '之后)与 GitHub.com 那一段之后;`renderSignIn(SignInType.DotCom)` 因此把 `CallToAction` ' +
+      '包进一个 `Row`。理由:我们的「PAT 令牌登录」入口必须与那个登录按钮同一行,而那段 DOM 只有本组件' +
+      '能渲染(页级兄弟节点够不到)。**两个插槽都是可选的,不传时 DOM 与上游逐字相同**;' +
+      '消费方是 `src/client/preferences-pages.tsx`(传 `PatSignInAction` / `PatSignInForm`)。',
   ],
   [
     'ui/preferences/git.tsx',
@@ -833,6 +927,46 @@ const EXPECTED = new Map([
       '③ 上游把 `static/` 挪出 `app/`(镜像同构路径不再成立)—— 重新核对资产来源后再定。' +
       '撤除时**同时**删掉本条登记,并同步更新 `docs/probes/appearance-theme-swatch-probe.mjs` 的' +
       '期望(它的 A1 会因此翻红,那是**正确**的)。',
+  ],
+  [
+    'ui/preferences/prompts.tsx',
+    '有意偏离(用户裁决:统一中文 —— 第六条,`accessibility.tsx` / `accounts.tsx` / ' +
+      '`git.tsx` / `appearance.tsx` / `ui/lib/git-config-user-form.tsx` 同批,见上面那段总注释)。' +
+      '**整页**本地化(17 处,每处只改字符串内容;另在 import 之后加了一段「有意偏离」说明注释,19 行)。' +
+      '逐处对照(左=上游原文 / 上游行号,右=现在):' +
+      '`:181` `Ask me where I want the changes to go` → `问我改动要跟到哪里`;' +
+      '`:183` `Always bring my changes to my new branch` → `总是把改动带到我的新分支`;' +
+      '`:185` `Always stash and leave my changes on the current branch` → `总是贮藏改动、留在当前分支`;' +
+      '`:205` `If I have changes and I switch branches...` → `如果我有改动却要切换分支……`;' +
+      '`:222` `Committing changes hidden by filter` → `提交被筛选隐藏的改动`;' +
+      '`:238` `Show a confirmation dialog before...` → `在这些操作前显示确认框……`;' +
+      '`:242` `Removing repositories` → `移除仓库`;' +
+      '`:251` `Discarding changes` → `丢弃改动`;' +
+      '`:260` `Discarding changes permanently` → `永久丢弃改动`;' +
+      '`:269` `Discarding stash` → `丢弃贮藏`;' +
+      '`:278` `Checking out a commit` → `检出某次提交`;' +
+      '`:287` `Force pushing` → `强制推送`;' +
+      '`:296` `Undo commit` → `撤销提交`;' +
+      '`:305` `Overriding commit message with generated message` → `用生成的信息覆盖提交信息`;' +
+      '`:314` `Removing worktrees` → `移除 worktree`;' +
+      '`:327` `<h2>Commit Length</h2>` → `<h2>提交摘要长度</h2>`;' +
+      '`:329` `Show commit length warning` → `显示提交摘要长度提示`(与 `src/client/prefs.ts:360` 那句中译逐字一致:同一个控件在中译里只有一个说法)。' +
+      '**没有动的**:`assertNever(\`Unknown uncommitted changes strategy: ${key}\`)`(开发者信息,' +
+      '不上屏;与 accounts.tsx 那条同一条判据)、`id="switch-branch-heading"` / ' +
+      '`id="show-confirm-dialog-heading"`(前者是适配层删除规则「第 13 条」的锚点、后者是' +
+      '`aria-labelledby` 与适配层删除规则「第 12 条」的锚点,**都是 DOM 协议值**)、' +
+      '`className="advanced-section"` 一族、prop 面、状态机、`RadioGroup` 的 key 顺序。' +
+      '**为什么这条偏离是上屏的前提**(不是「顺手改镜像」):本页在保真度账本里原是' +
+      '**整页删除**(`integrations` / `prompts` / `advanced`),2026-10 用户裁决' +
+      '「可以加 Prompts 页」之后才渲染 —— 而本仓的「统一中文」是**用户裁决**,不是风格偏好。' +
+      '**判据**:`docs/probes/preferences-uitune-probe.mjs` 的 C 组(真 Chrome 读**六个页面上' +
+      '实际渲染出来的** textContent:`prompts` 一组的 `REQUIRED` **7** 串必须出现(两处节标题 + 5 条控件文案),' +
+      '`FORBIDDEN` 里新加 **16** 条英文原文必须**一个都不出现**(17 处本地化里 `Commit Length` 与' +
+      '`Show commit length warning` 各占一条,前者同时是节标题)' +
+      '`docs/probes/preferences-prompts-probe.mjs`' +
+      '的 `S`/`H` 组(节标题与逐行文案在真 Chrome 里点名)。' +
+      '**退役条件**:同上面那段总注释的三条(i18n 落地 / 用户改判统一英文 / 上游自己做 i18n);' +
+      '撤除时**同时**删掉本条登记与文件内那段说明注释,并把本文件还原成上游原文。',
   ],
   // 注:`lib/diff-parser.ts` 与 `ui/diff/text-diff-expansion.ts` 原本登记在这里
   // (上一轮把 `diff-helpers` 的说明符钉到我们自建的 `.ts` 孪生文件上)。

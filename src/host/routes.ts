@@ -396,6 +396,66 @@ function bool(body: Record<string, unknown>, key: string): boolean {
 }
 
 /**
+ * **提交 trailer 的唯一校验点**(功能点 7.15)。
+ *
+ * 三种输入三种结局,逐条说明(这不是风格问题,是**静默缺陷**的边界):
+ *
+ * | 载荷 | 结局 | 为什么 |
+ * |---|---|---|
+ * | 字段**缺失** / `null` | `undefined`(⇒ 不追加任何 trailer) | 改前的载荷就没有这个字段,那条路径必须**逐字节不变** |
+ * | `[]` | 空数组(⇒ 同样不追加) | 「没有共同作者」是合法状态,不是畸形 |
+ * | 数组,但任一项不是 `{token:非空 string, value:非空 string}` | 抛 `bad-request` | 「界面收了、提交里没有」是本仓最贵的那类静默缺陷;宁可响亮地拒绝 |
+ * | 不是数组(字符串 / 对象 …) | 抛 `bad-request` | 同上 |
+ *
+ * 另外两条**注入防护**(都有具体后果,不是洁癖):
+ *  · `token` 里出现 `=` ⇒ 会用掉 `--trailer token=value` 的那个分隔符,
+ *    结果是一条**含义被改掉**的 trailer(例如 token 变成 `Co-Authored-By=X`
+ *    而 value 是 `Y`)。⇒ 拒绝;
+ *  · `token` / `value` 里出现 `\n` / `\r` ⇒ 那等于往提交消息里**插任意行**
+ *    (commit message 是纯文本,`interpret-trailers` 按行解析)。
+ *    ⇒ 拒绝。
+ *
+ * 空字符串 token / value 同样拒绝(`--trailer '=x'` / `--trailer 'x='` 是畸形输入,
+ * git 的行为取决于版本 —— 不把它的解释权交给 git)。
+ *
+ * @param body - 已解析的请求体。
+ * @param key - 字段名(调用方固定传 `'trailers'`;留成参数是为了让本函数可被
+ *   其它路由复用而不必复制)。
+ * @returns 合法 trailer 数组;字段缺失时为 `undefined`。
+ * @throws GitServiceError(`bad-request`)当字段在场但畸形。
+ */
+function trailerList(
+  body: Record<string, unknown>,
+  key: string,
+): ReadonlyArray<{ readonly token: string; readonly value: string }> | undefined {
+  const v = body[key];
+  if (v === undefined || v === null) {
+    return undefined;
+  }
+  if (!Array.isArray(v)) {
+    throw new GitServiceError('bad-request', `${key} 必须是数组(每一项形如 {token, value})。`);
+  }
+  return v.map((one, index): { readonly token: string; readonly value: string } => {
+    if (typeof one !== 'object' || one === null) {
+      throw new GitServiceError('bad-request', `${key}[${index}] 不是对象。`);
+    }
+    const item = one as Record<string, unknown>;
+    const token = item.token;
+    const value = item.value;
+    if (typeof token !== 'string' || token === '' || typeof value !== 'string' || value === '') {
+      throw new GitServiceError('bad-request', `${key}[${index}] 的 token / value 必须是非空字符串。`);
+    }
+    if (token.includes('=')) {
+      throw new GitServiceError('bad-request', `${key}[${index}] 的 token 不能含 '='(它会用掉 --trailer 的分隔符)。`);
+    }
+    if (/[\r\n]/.test(token) || /[\r\n]/.test(value)) {
+      throw new GitServiceError('bad-request', `${key}[${index}] 的 token / value 不能含换行(那会往提交消息里插行)。`);
+    }
+    return { token, value };
+  });
+}
+
+/**
  * 建路由处理器:调用方把它注册到 webServer 的 prefix 路由上。
  * @param deps - 依赖集合。
  */
@@ -967,6 +1027,13 @@ export function createGitHandler(deps: RouteDeps): (request: IncomingMessage, re
     'commit': async (body) => {
       const message = str(body, 'message') ?? '';
       const paths = strList(body, 'files');
+      /*
+       * 共同作者的 trailer(功能点 7.15)。**缺失 = 没有 trailer**(与改前逐字节相同);
+       * **在但畸形 = `bad-request`**,绝不静默丢掉 —— 「界面收了、提交里没有」是本仓
+       * 最贵的那类静默缺陷,而 trailer 恰恰是「用户以为写了、`git log` 里没有」的重灾区。
+       * 校验规则(逐条)见 `trailerList`。
+       */
+      const trailers = trailerList(body, 'trailers');
       return deps.git.commit(requirePath(body), {
         message,
         ...(str(body, 'description') !== undefined ? { description: str(body, 'description') as string } : {}),
@@ -974,6 +1041,7 @@ export function createGitHandler(deps: RouteDeps): (request: IncomingMessage, re
         noVerify: bool(body, 'noVerify'),
         signoff: bool(body, 'signoff'),
         allowEmpty: bool(body, 'allowEmpty'),
+        ...(trailers !== undefined ? { trailers } : {}),
         paths,
       });
     },
@@ -1542,6 +1610,15 @@ export function createGitHandler(deps: RouteDeps): (request: IncomingMessage, re
      * (上游在渲染进程直接调,我们只能借宿主令牌)。
      */
     'auth/emails': async () => deps.auth.accountEmails(),
+    /**
+     * 「这个 GitHub App 安装到我账号上了吗」—— 账号页那条安装引导的数据源。
+     *
+     * 必须在 host 半(要令牌),而且这是「授权 ≠ 安装」那件事的**唯一现场证据**:
+     * 未安装时 `GET /user/installations` 回 200 + `total_count: 0`,而仓库级端点会 403
+     * (`Resource not accessible by integration`)。五档结果与判据见 `host/auth.ts` 的
+     * `AuthInstallationStatus` / `installationStatusOf`。
+     */
+    'auth/installation': async () => deps.auth.installationStatus(),
     'auth/logout': async () => {
       await deps.auth.logout();
       return { ok: true };
@@ -1556,14 +1633,32 @@ export function createGitHandler(deps: RouteDeps): (request: IncomingMessage, re
       const method = str(body, 'method') ?? 'GET';
       const accept = str(body, 'accept');
       const payload = body.body;
+      /*
+       * 条件请求的两个验证器(`src/host/auth.ts` 的 `ghProxy` 有完整理由:
+       * GitHub 命中 304 时**不消耗主限额**,实测同一头连打 10 次 `used` 差 0,
+       * 而无条件对照差 10)。**不校验格式** —— 它们是上一轮 GitHub 自己回的值,
+       * 原样回传即可;传一个畸形的值只会让 GitHub 回 200(不是 304),
+       * 退化成「不省额度」而不是错误状态。
+       */
+      const etag = str(body, 'etag');
+      const ifModifiedSince = str(body, 'ifModifiedSince');
       try {
         const result = await deps.auth.ghProxy({
           method,
           path,
           ...(payload === undefined ? {} : { body: payload }),
           ...(accept !== undefined ? { accept } : {}),
+          ...(etag === undefined ? {} : { etag }),
+          ...(ifModifiedSince === undefined ? {} : { ifModifiedSince }),
         });
-        return { status: result.status, json: result.json, link: result.link, remaining: result.remaining };
+        return {
+          status: result.status,
+          json: result.json,
+          link: result.link,
+          remaining: result.remaining,
+          etag: result.etag,
+          lastModified: result.lastModified,
+        };
       } catch (error) {
         // GitHub 的 4xx 也要把 message 交给界面,而不是折成 internal。
         throw new GitServiceError('internal', error instanceof Error ? error.message : String(error));

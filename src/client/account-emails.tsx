@@ -54,11 +54,12 @@ import type { ChangeEvent, FormEvent, ReactNode } from 'react';
 import { Account } from '../core/desktop/models/account.ts';
 import { isAttributableEmailFor } from '../core/desktop/lib/email.ts';
 
-import type { AuthStatePayload } from './api.ts';
+import type { AuthInstallationPayload, AuthStatePayload } from './api.ts';
 import {
   DOTCOM_ENDPOINT,
   deviceFlowSupportsEndpoint,
   loadAccountEmails,
+  loadInstallationStatus,
   normalizeEndpoint,
   sameEndpointInstance,
   submitPat,
@@ -261,28 +262,117 @@ export function useAccountEmails(enabled: boolean): IAccountEmailsState {
 }
 
 /**
- * 账号邮箱的**来源说明**。**没有任何已验证邮箱时返回 `null`** ——
- * 与上游表单那条 `accountEmails.length === 0 ⇒ 不渲染下拉` 是同一个判据,
- * 免得出现「一个说明框配一个并不存在的下拉」。
- * @param props - `useAccountEmails()` 的当前值。
+ * 账号页底部那块**提示**(用户给的界面契约:页面自上而下是
+ * `DeviceFlowPanel` → 上游 `Accounts` → `AccountNotice`)。
+ *
+ * 它只说**两类**必须让人知道的事,其余一律闭嘴:
+ *  1. **GitHub App 没安装**(`not-installed`)⇒ 这是我们唯一能替用户指出下一步的场合
+ *     (安装入口),见 {@link AppInstallNotice} 的内容;
+ *  2. **账号邮箱读失败** ⇒ GitHub App 少了 `Email addresses: Read`、或令牌没权限时会走到这里。
+ *
+ * ⚠️ **成功的那句不在这里**(2026-11 用户裁决):原来那行「邮箱候选来自你的 GitHub 账号(N 个已验证
+ * 地址)」是纯信息,对用户没有动作可做 —— 邮箱数据本身照旧供 Git 页的下拉与账号卡头像用
+ * (`useAccountEmails`),只是不再上屏。`AccountEmailSourceNotice` 这个组件因此被删掉。
+ * @param props - 安装状态 + 邮箱读取结果(两者都可以是 `null` = 还没读到)。
  */
-export function AccountEmailSourceNotice(props: {
-  readonly result: AccountEmailsResult | null;
+export function AccountNotice(props: {
+  readonly installation: AuthInstallationPayload | null;
+  readonly emails: AccountEmailsResult | null;
 }): ReactNode {
-  const result = props.result;
-  if (result === null) {
-    return null;
-  }
-  if (result.kind === 'error') {
-    return <p className="settings-description">读取账号邮箱失败:{result.message}</p>;
-  }
-  const verified = result.emails.filter((email) => email.verified);
-  if (verified.length === 0) {
+  const emails = props.emails;
+  return (
+    <>
+      <AppInstallNotice status={props.installation} />
+      {emails !== null && emails.kind === 'error' && (
+        <p className="settings-description">读取账号邮箱失败:{emails.message}</p>
+      )}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// GitHub App 的安装状态(「授权 ≠ 安装」那条引导)
+// ---------------------------------------------------------------------------
+
+/** {@link useAppInstallation} 的返回面。 */
+export interface IAppInstallationState {
+  /** `null` = 还没读到 / 读不到 —— 两种都**不提示**(见 `loadInstallationStatus()`)。 */
+  readonly status: AuthInstallationPayload | null;
+  /** 重新查一次(登录 / 换账号之后调)。 */
+  readonly reload: () => void;
+}
+
+/**
+ * 查一次「这个 GitHub App 装到我账号上了吗」(挂载时一次 + 显式 `reload`)。
+ *
+ * 为什么不轮询:安装状态只在**用户在 GitHub 上点 Install 的那一刻**变,而那一刻之后他会
+ * 回到这个页面;与 `useAccountEmails` 同一条理由(会话内几乎不变,变化的时刻调用方知道)。
+ *
+ * @param enabled - 未登录时不必查(host 会回 `not-signed-in`,但连请求都省掉更干净)。
+ */
+export function useAppInstallation(enabled: boolean): IAppInstallationState {
+  const [status, setStatus] = useState<AuthInstallationPayload | null>(null);
+  /** 防止卸载后 setState(查询是异步的)。 */
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => { aliveRef.current = false; };
+  }, []);
+
+  const reload = useCallback(() => {
+    void (async () => {
+      const next = await loadInstallationStatus();
+      if (!aliveRef.current) { return; }
+      setStatus(next);
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!enabled) { return; }
+    reload();
+  }, [enabled, reload]);
+
+  return { status, reload };
+}
+
+/**
+ * 「这个 App 还没安装」的引导 —— **只有 `not-installed` 会渲染出东西**。
+ *
+ * ## 它解决的问题(2026-11 现场)
+ *
+ * GitHub App 的「授权」与「安装」是两件事。用户走完设备码授权、令牌也拿到了,但
+ * `GET /user/installations` 仍是 `total_count: 0` ⇒ 之后**所有仓库级**端点 403,而 GitHub
+ * 只回一句 `Resource not accessible by integration`(不解释、不给下一步)。用户看到的是
+ * 「登录成功了,但每个页签都说不不不」。
+ *
+ * 判据在 host 半(`installationStatusOf()`):PAT / OAuth App 令牌会回 `not-app-token`,
+ * 查询失败回 `unknown` —— **两种都不提示**,所以这条引导不会对着 PAT 用户或一次网络抖动乱喊。
+ *
+ * ⚠️ `installUrl` 为空串时(用户自带的 App,我们不知道他的 slug)**不渲染链接**,
+ * 只说明该做什么 —— 编一个链接等于把人送到别人的 App 上。
+ * @param props - `useAppInstallation()` 的当前值。
+ */
+export function AppInstallNotice(props: {
+  readonly status: AuthInstallationPayload | null;
+}): ReactNode {
+  const status = props.status;
+  if (status === null || status.kind !== 'not-installed') {
     return null;
   }
   return (
-    <p className="settings-description">
-      邮箱候选来自你的 GitHub 账号({verified.length} 个已验证地址)。
+    <p className="setting-hint-warning">
+      ⚠️ 这个 GitHub App <strong>还没有安装</strong>到你的账号 —— 仓库里的功能
+      (Code / Issues / Pull Requests / Actions,以及推送)会报
+      「Resource not accessible by integration」。GitHub App 的「授权」与「安装」是两件事,两步都要做:
+      {status.installUrl === '' ? (
+        ' 到 GitHub 上这个 App 的页面点 Install 即可。'
+      ) : (
+        <>
+          {' '}去<strong>安装页</strong>把它装到对应账号 ——{' '}
+          <a href={status.installUrl} target="_blank" rel="noreferrer noopener">{status.installUrl}</a>
+          {' '}(记得把要用的仓库选进安装范围)。
+        </>
+      )}
     </p>
   );
 }
@@ -352,6 +442,18 @@ export interface IEnterpriseSignIn {
   readonly status: string | null;
   /** 结果行的语气。 */
   readonly statusKind: EnterpriseSignInStatusKind;
+  /**
+   * **PAT 表单现在是开着还是关着** —— 面板默认关闭,只留一个「PAT 令牌登录」按钮。
+   *
+   * 为什么放钩子里而不是面板的局部 state(2026-11):**同一个可见性有两处入口** ——
+   * 用户点那个按钮,以及上游 `Accounts` 的企业 CTA({@link IEnterpriseSignIn.onEnterpriseSignIn})。
+   * 若各自持有一份(局部 `override` + 一个"被要求打开"的标志),就会出现「CTA 点过之后
+   * 用户收起、再点 CTA 打不开」这种两真源打架的形态。现在只有这一个布尔量:
+   * 两条入口都写它,{@link IEnterpriseSignIn.onTogglePat} 也是。
+   */
+  readonly patOpen: boolean;
+  /** 切换 PAT 表单的展开/收起(「PAT 令牌登录」按钮的 onClick)。 */
+  readonly onTogglePat: () => void;
   /** 挂到 PAT 输入框上的 **callback ref**(`react/jsx-no-bind` 只认 useCallback 结果)。 */
   readonly patInputRef: (element: HTMLInputElement | null) => void;
   /** 端点输入。 */
@@ -416,8 +518,18 @@ export function useEnterpriseSignIn(options: IEnterpriseSignInOptions): IEnterpr
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [statusKind, setStatusKind] = useState<EnterpriseSignInStatusKind>('info');
+  /** 见 {@link IEnterpriseSignIn.patOpen}(两条入口共用的**唯一**一份可见性状态)。 */
+  const [patOpen, setPatOpen] = useState(false);
 
   const patElement = useRef<HTMLInputElement | null>(null);
+  /**
+   * 待执行的「把焦点给令牌输入框」。
+   *
+   * 为什么需要它:面板在已登录时收起 ⇒ `onEnterpriseSignIn` 那一刻输入框**还没挂载**,
+   * 直接 `focus()` 打在 `null` 上。挂载由 callback ref 触发,所以把这次意图存在 ref 里,
+   * 等 `patInputRef` 拿到元素时兑现(见 {@link patInputRef})。
+   */
+  const patFocusPending = useRef(false);
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -444,6 +556,14 @@ export function useEnterpriseSignIn(options: IEnterpriseSignInOptions): IEnterpr
 
   const patInputRef = useCallback((element: HTMLInputElement | null) => {
     patElement.current = element;
+    /*
+     * 兑现 {@link patFocusPending}:表单刚被顶开时元素这一刻才出现。
+     * 只在首次拿到元素时兑现一次(`.current` 随即清掉),不抢用户之后的焦点操作。
+     */
+    if (element !== null && patFocusPending.current) {
+      patFocusPending.current = false;
+      element.focus();
+    }
   }, []);
 
   const onEndpointInput = useCallback((event: ChangeEvent<HTMLInputElement>) => {
@@ -508,12 +628,22 @@ export function useEnterpriseSignIn(options: IEnterpriseSignInOptions): IEnterpr
       latestDeviceSignIn.current();
       return;
     }
-    // ⚠️ 这里**故意不**启动设备码:那会静默登 github.com。改为如实说明 + 把用户
-    // 送到真能用的那条路(PAT 输入框)。
+    /*
+     * ⚠️ 这里**故意不**启动设备码:那会静默登 github.com。改为如实说明 + 把用户
+     * 送到真能用的那条路(PAT 输入框)。
+     *
+     * 2026-11:PAT 表单默认是**关着**的(只留一个入口按钮)⇒ 输入框可能根本不在 DOM 里。
+     * 所以先把它打开(`patOpen`),再把焦点交给 `patInputRef` 在挂载时补上 —— 否则那句
+     * 「请把访问令牌粘到『访问令牌』里」会指着一个不存在的输入框。
+     */
+    setPatOpen(true);
+    patFocusPending.current = true;
     setStatus(ENTERPRISE_DEVICE_FLOW_UNAVAILABLE);
     setStatusKind('warn');
     patElement.current?.focus();
   }, []);
+
+  const onTogglePat = useCallback(() => { setPatOpen((open) => !open); }, []);
 
   return {
     endpoint,
@@ -523,6 +653,8 @@ export function useEnterpriseSignIn(options: IEnterpriseSignInOptions): IEnterpr
     busy,
     status,
     statusKind,
+    patOpen,
+    onTogglePat,
     patInputRef,
     onEndpointInput,
     onPatInput,
@@ -532,57 +664,106 @@ export function useEnterpriseSignIn(options: IEnterpriseSignInOptions): IEnterpr
 }
 
 /**
- * 「GitHub 端点」面板(账号页里,设备码面板之下、上游 `Accounts` 之上)。
+ * PAT 登录的**入口按钮** —— 它会被塞进上游 `Accounts` 的 GitHub.com 动作行
+ * (见那边 `patSignInAction` 插槽),所以这里必须用**上游的 `Button`**:
+ * 行里那条 `.button-component{align-self:flex-end}` 规则只认它,用我们自己的 `gw-btn`
+ * 会在行里顶到上边、字号与旁边的登录 / 退出登录按钮也不一致。
  *
- * 它**只做界面**:所有状态与行为都在 {@link useEnterpriseSignIn} 里,因为
- * 上游 `Accounts` 的 `onEnterpriseSignIn` 也要吃同一份状态。
- * @param props - 钩子的返回值。
+ * 为什么拆成「按钮」与「表单」两个组件(2026-11,用户裁决):按钮要**横向**落在动作行里,
+ * 而展开后的表单是**纵向**一整块 —— 把整块塞进 `Row` 会被 flex 挤成一条。
+ * 两块共用同一个状态({@link IEnterpriseSignIn.patOpen}),所以拆的只是渲染,不是逻辑。
+ * @param props - 钩子的返回值(见 {@link IEnterpriseSignIn})。
  */
-export function EnterpriseSignInPanel(props: { readonly signIn: IEnterpriseSignIn }): ReactNode {
+export function PatSignInAction(props: { readonly signIn: IEnterpriseSignIn }): ReactNode {
   const signIn = props.signIn;
+  /*
+   * ⚠️ 这里用**裸 `<button className="button-component">`** 而不是上游 `Button` 组件:
+   * 它的 `IButtonProps` 没有声明 `children`(`DialogContent` / `TabBar` 是同一处上游类型缺口),
+   * 用它就得再往类型基线里登记一条诊断。而这个按钮要的只是**那一套样式**
+   * (`.gw-prefs .button-component…`,以及动作行里 `.button-component{align-self:flex-end}`),
+   * 类名给到就够 —— 行为(一个 onClick)由 React 原生按钮承担。
+   */
   return (
-    <div className="gw-settings-section">
-      <h3>GitHub 端点</h3>
-      <p className="settings-description">
-        默认 GitHub.com。企业实例(GitHub Enterprise Server)填它的地址,
-        例如 <code>https://github.example.com</code> 或 <code>https://github.example.com/api/v3</code>
-        —— 宿主会把 HTML 地址归一化成 API 基址。
-      </p>
-      <div className="gw-field">
-        <label htmlFor="gw-prefs-auth-endpoint">API 端点</label>
-        <input
-          id="gw-prefs-auth-endpoint"
-          className="gw-input"
-          type="url"
-          value={signIn.endpoint}
-          onChange={signIn.onEndpointInput}
-        />
-      </div>
-      {signIn.normalizedEndpoint === null && (
-        <p className="settings-description">⚠️ 这串还不是一个合法端点。</p>
+    <button className="button-component" type="button" onClick={signIn.onTogglePat}>
+      {signIn.patOpen ? '收起令牌登录' : 'PAT 令牌登录'}
+    </button>
+  );
+}
+
+/**
+ * PAT 表单(端点 + 访问令牌 + 提交)—— 渲染在上游 `Accounts` 的 GitHub.com 那一段之后
+ * (见那边 `patSignInForm` 插槽)。
+ *
+ * ## 为什么默认**完全关着**,只留一个入口按钮
+ *
+ * 这块表单原先无条件常驻,于是账号页同时出现「下面:已登录 @x」与「上面:请输入访问令牌」——
+ * 两块说的是两件事(状态清单 vs 登录表单),但同屏并列就是自相矛盾。先前的修法是"已登录时
+ * 默认收起";用户随后把界面定死为**三段**(设备码面板 → 上游 `Accounts` → `AccountNotice`),
+ * 并要求这块只留一个入口按钮:【PAT 令牌登录】。
+ *
+ * 可见性只剩**一个布尔量**({@link IEnterpriseSignIn.patOpen}),两条入口都写它:
+ *  1. 用户点那个按钮({@link IEnterpriseSignIn.onTogglePat});
+ *  2. 上游 `Accounts` 的企业 CTA({@link IEnterpriseSignIn.onEnterpriseSignIn} ——
+ *     企业端点用不了设备码,那条路上访问令牌是唯一出路,所以它会把表单打开并把焦点送进去)。
+ *
+ * 为什么不再写一个纯函数判"该不该展开":那个判据存在的理由是**自动展开**与用户手动收起会打架;
+ * 现在没有自动展开这回事(企业 CTA 那一条也是用户的动作),一个布尔量就够。
+ *
+ * ⚠️ 结果行({@link IEnterpriseSignIn.status})**不跟着收起**:它是上一条动作的回执
+ * (「已用令牌登录 …」/「端点不一致 …」)。特别是企业 CTA 那条 —— 它把表单打开之后用户
+ * 又可能收起,「为什么让你粘令牌」这句话必须留着。
+ * @param props - 钩子的返回值(见 {@link IEnterpriseSignIn})。
+ */
+export function PatSignInForm(props: { readonly signIn: IEnterpriseSignIn }): ReactNode {
+  const signIn = props.signIn;
+
+  return (
+    <>
+      {signIn.patOpen && (
+        <>
+          <h3>GitHub 端点</h3>
+          <p className="settings-description">
+            默认 GitHub.com。企业实例(GitHub Enterprise Server)填它的地址,
+            例如 <code>https://github.example.com</code> 或 <code>https://github.example.com/api/v3</code>
+            —— 宿主会把 HTML 地址归一化成 API 基址。
+          </p>
+          <div className="gw-field">
+            <label htmlFor="gw-prefs-auth-endpoint">API 端点</label>
+            <input
+              id="gw-prefs-auth-endpoint"
+              className="gw-input"
+              type="url"
+              value={signIn.endpoint}
+              onChange={signIn.onEndpointInput}
+            />
+          </div>
+          {signIn.normalizedEndpoint === null && (
+            <p className="settings-description">⚠️ 这串还不是一个合法端点。</p>
+          )}
+          {!signIn.endpointIsDotCom && signIn.normalizedEndpoint !== null && (
+            <p className="settings-description">⚠️ {ENTERPRISE_DEVICE_FLOW_UNAVAILABLE}</p>
+          )}
+          <form onSubmit={signIn.onSubmit}>
+            <div className="gw-field">
+              <label htmlFor="gw-prefs-auth-pat">访问令牌(PAT)</label>
+              <input
+                id="gw-prefs-auth-pat"
+                ref={signIn.patInputRef}
+                className="gw-input"
+                type="password"
+                autoComplete="off"
+                value={signIn.pat}
+                onChange={signIn.onPatInput}
+              />
+            </div>
+            <div className="gw-formrow">
+              <button className="gw-btn primary" type="submit" disabled={signIn.busy}>
+                {signIn.busy ? '正在登录…' : '用令牌登录'}
+              </button>
+            </div>
+          </form>
+        </>
       )}
-      {!signIn.endpointIsDotCom && signIn.normalizedEndpoint !== null && (
-        <p className="settings-description">⚠️ {ENTERPRISE_DEVICE_FLOW_UNAVAILABLE}</p>
-      )}
-      <form onSubmit={signIn.onSubmit}>
-        <div className="gw-field">
-          <label htmlFor="gw-prefs-auth-pat">访问令牌(PAT)</label>
-          <input
-            id="gw-prefs-auth-pat"
-            ref={signIn.patInputRef}
-            className="gw-input"
-            type="password"
-            autoComplete="off"
-            value={signIn.pat}
-            onChange={signIn.onPatInput}
-          />
-        </div>
-        <div className="gw-formrow">
-          <button className="gw-btn primary" type="submit" disabled={signIn.busy}>
-            {signIn.busy ? '正在登录…' : '用令牌登录'}
-          </button>
-        </div>
-      </form>
       {signIn.status !== null && (
         <p
           className={signIn.statusKind === 'warn' ? 'setting-hint-warning' : 'settings-description'}
@@ -592,6 +773,6 @@ export function EnterpriseSignInPanel(props: { readonly signIn: IEnterpriseSignI
           {signIn.status}
         </p>
       )}
-    </div>
+    </>
   );
 }

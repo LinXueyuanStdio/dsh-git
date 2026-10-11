@@ -147,6 +147,18 @@ export type TokenHome = {
 /** {@link createCredentialBridge} 的依赖。 */
 export type CredentialBridgeOptions = {
   service: CredentialService;
+  /**
+   * 这个桥管哪条引用。默认 {@link GITHUB_TOKEN_REF}(access token)。
+   *
+   * 2026-11 参数化:GitHub App 的**续期令牌**要住在**同一套策略**下(凭据缝、不可写时
+   * 绝不退回明文、失败只报一次、环境层只读……),而这些策略全在本工厂里 —— 复制一份
+   * 就是第二份真源。于是这里只把 ref 变成入参,再建第二个桥给它
+   * (见 `src/host/token-refresh.ts` 的 `GITHUB_REFRESH_TOKEN_REF`)。
+   *
+   * ⚠️ 位置:`member-ordering` 要求非方法成员排在方法签名之前(`log(...)` 是方法签名),
+   * 所以它必须在 `log` 上面 —— 改这一段的顺序会被 lint 拦下。
+   */
+  ref?: string;
   /** value-free 的日志出口。 */
   log(message: string): void;
 };
@@ -174,7 +186,7 @@ function sourceOf(providerSource: string): TokenSource {
  * @returns 读/写/装载/刷新/来源五件事。
  */
 export function createCredentialBridge(options: CredentialBridgeOptions): TokenHome {
-  const ref = GITHUB_TOKEN_REF;
+  const ref = options.ref ?? GITHUB_TOKEN_REF;
   /** 同步缓存:唯一被 `read()` 返回的东西。 */
   let current = '';
   let layer: TokenSource = 'none';

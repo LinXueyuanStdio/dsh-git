@@ -698,7 +698,12 @@ const SHAPES: Readonly<Record<string, Shape>> = {
    */
   'auth/device-poll': {
     anyOf: [
-      { record: { status: { literal: ['pending'] }, slowDown: 'boolean?' } },
+      /*
+       * `interval` 是 `slow_down` 时 GitHub 要求的**下一个轮询间隔**(秒,见
+       * `host/auth.ts` 的 `DeviceFlowPoll` 与 `preferences-pages.tsx` 的
+       * `nextDevicePollInterval`)。可选:老 host 不带它,客户端按 +5 秒自增。
+       */
+      { record: { status: { literal: ['pending'] }, slowDown: 'boolean?', interval: 'number?' } },
       { record: { status: { literal: ['done'] }, state: AuthStateShape } },
       { record: { status: { literal: ['error'] }, message: 'string' } },
     ],
@@ -714,6 +719,19 @@ const SHAPES: Readonly<Record<string, Shape>> = {
         },
       },
     },
+  },
+  /*
+   * `auth/installation` —— 五档判别联合,与 `AuthInstallationPayload` 逐字对应。
+   * 每一支的字段都要在这里校验:消费方按 `kind` 分支后**直接解引用**(`installUrl` / `count`)。
+   */
+  'auth/installation': {
+    anyOf: [
+      { record: { kind: { literal: ['not-signed-in'] } } },
+      { record: { kind: { literal: ['not-app-token'] } } },
+      { record: { kind: { literal: ['unknown'] } } },
+      { record: { kind: { literal: ['installed'] }, count: 'number' } },
+      { record: { kind: { literal: ['not-installed'] }, installUrl: 'string' } },
+    ],
   },
 
   // ---------- 远程仓库 ----------
@@ -1070,6 +1088,14 @@ export const api = {
   commit: (input: {
     path: string; message: string; description?: string; files: string[];
     amend?: boolean; signoff?: boolean; noVerify?: boolean; allowEmpty?: boolean;
+    /**
+     * 共同作者的 trailer(功能点 7.15)—— 上游 `ICommitContext.trailers`
+     * (`models/commit.ts:31`),宿主 `commit` 路由把它们交给
+     * `git interpret-trailers --no-divider --trailer token=value`(上游
+     * `lib/format-commit-message.ts:33-35` ⇒ `lib/git/interpret-trailers.ts:152-176`)。
+     * 省略或 `[]` ⇒ 宿主**一个字节都不追加**。
+     */
+    trailers?: { token: string; value: string }[];
   }) => call<{ sha: string; subject: string }>('commit', input),
 
   /**
@@ -1221,7 +1247,7 @@ export const api = {
   authState: () => call<AuthStatePayload>('auth/state'),
   deviceStart: () => call<{ deviceCode: string; userCode: string; verificationUri: string; expiresIn: number; interval: number }>('auth/device-start'),
   devicePoll: (deviceCode: string) => call<
-    | { status: 'pending'; slowDown?: boolean }
+    | { status: 'pending'; slowDown?: boolean; interval?: number }
     | { status: 'done'; state: AuthStatePayload }
     | { status: 'error'; message: string }
   >('auth/device-poll', { deviceCode }),
@@ -1242,6 +1268,14 @@ export const api = {
   accountEmails: () => call<{
     emails: { email: string; verified: boolean; primary: boolean; visibility: string | null }[];
   }>('auth/emails'),
+  /**
+   * GitHub App 的**安装状态** —— 账号页那条「去 Install」引导的数据源。
+   *
+   * 只在宿主令牌是 **GitHub App 用户令牌**时才真的去问 GitHub(判据与五档结果在 host 半:
+   * `AuthInstallationStatus` / `installationStatusOf`);PAT / OAuth App 令牌会直接回
+   * `not-app-token`,界面因此**不会**对着它们喊"去安装"。
+   */
+  installationStatus: () => call<AuthInstallationPayload>('auth/installation'),
 
   // ---------- 远程仓库 ----------
   remoteRepos: (force: boolean) => call<{ repos: RemoteRepo[]; hidden: string[] }>('remote-repos', { force }),
@@ -1454,5 +1488,22 @@ export interface AuthStatePayload {
   deviceFlow: boolean;
   viaDeviceFlow: boolean;
 }
+
+/**
+ * `auth/installation` 的载荷 —— 「这个 GitHub App 装到我账号上了吗」。
+ *
+ * 五档与 **host 半的 `AuthInstallationStatus`(`src/host/auth.ts`)逐字对应**,判据也只在那
+ * 一处(`installationStatusOf`);这里是它在浏览器半的契约。**只有 `not-installed` 该在界面上
+ * 说话** —— 其余四档要么无关(不是 App 令牌)、要么不确定(`unknown`),都不该弹提示。
+ *
+ * ⚠️ `installUrl` 可能是**空串**(用户自带的 App:我们不知道他的 slug)—— 消费方必须判空,
+ * 不许把空串拼成一个 `https://github.com/apps//installations/new`。
+ */
+export type AuthInstallationPayload =
+  | { readonly kind: 'not-signed-in' }
+  | { readonly kind: 'not-app-token' }
+  | { readonly kind: 'unknown' }
+  | { readonly kind: 'installed'; readonly count: number }
+  | { readonly kind: 'not-installed'; readonly installUrl: string };
 
 export type { BranchEntry, CommitDetail, CommitEntry, DiffResult, RepoEntry, RepoStatus, SyncState };
