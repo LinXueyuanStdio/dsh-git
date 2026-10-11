@@ -54,6 +54,39 @@ const BUILTINS = new Set([
 	'worker_threads', 'zlib',
 ]);
 
+/**
+ * 这个说明符是不是 **Node 内置** —— **子路径形式也要认**(2026-10-11 修)。
+ *
+ * ## 为什么必须认子路径(实测的假阳性)
+ *
+ * 判据原先只比整条说明符(`BUILTINS.has(specifier)`),于是 `fs/promises` 被判成
+ * **未声明的 npm 依赖**,报「用户机器上会加载失败」。它不是:npm **禁止**发布与
+ * 核心模块同名的包(`validate-npm-package-name` 把这类名字判成 `core module names`),
+ * 所以第一段命中 {@link BUILTINS} 的说明符**只可能**是核心模块的子路径。
+ * Node 今天真实的子路径至少有:`fs/promises`、`timers/promises`、`dns/promises`、
+ * `stream/promises`、`stream/web`、`stream/consumers`、`util/types`、`assert/strict`、
+ * `path/posix`、`path/win32`、`readline/promises`。
+ *
+ * 假阳性的来源是**逐字镜像**:宿主半把上游 `lib/**` 抄进来,而那些文件写的是
+ * 上游的 `import { access } from 'fs/promises'`(镜像**一个字节都不许改**),
+ * 宿主产物里因此**真的**有一条 `from "fs/promises"` —— 它在 Node 里加载得好好的,
+ * 却让本脚本在 `npm publish` 前把发布判红(实测:`lib/index.js`,报 1 处)。
+ * 修法只能是「判定认子路径」,不能是「改镜像的 import」。
+ *
+ * ## 为什么放宽这一段不会漏掉真缺口
+ *
+ * 被跳过的说明符满足「第一段是核心模块名」,而那种名字**不可能**是 npm 包
+ * (见上)。反过来,真缺口(装不上的第三方包)的第一段永远不在 {@link BUILTINS} 里,
+ * 判定与改前逐字相同 —— 打开一个假阳性,不动任何一条真阳性。
+ *
+ * @param {string} specifier - 源码里出现的外部模块说明符(裸名或带子路径)。
+ * @returns {boolean} 是 Node 内置(含 `node:` 前缀与核心子路径)则为 `true`。
+ */
+function isBuiltinSpecifier(specifier) {
+	if (specifier.startsWith('node:')) return true;
+	return BUILTINS.has(specifier.split('/')[0]);
+}
+
 /** 从模块说明符取出包名:`react/jsx-runtime` → `react`,`@scope/pkg/x` → `@scope/pkg`。 */
 function packageOf(specifier) {
 	const parts = specifier.split('/');
@@ -82,8 +115,7 @@ async function externalsOf(file) {
 			const specifier = match[1];
 			if (!SPECIFIER_RE.test(specifier)) continue;
 			if (specifier.startsWith('.')) continue;
-			if (specifier.startsWith('node:')) continue;
-			if (BUILTINS.has(specifier)) continue;
+			if (isBuiltinSpecifier(specifier)) continue;
 			found.add(packageOf(specifier));
 		}
 	}
