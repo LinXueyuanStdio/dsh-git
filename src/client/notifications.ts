@@ -79,6 +79,7 @@
  */
 
 import {
+  ghReadConditional,
   getPull,
   listCheckRuns,
   listComments,
@@ -96,6 +97,8 @@ import { truncateWithEllipsis } from '../core/desktop/lib/truncate-with-ellipsis
 import { isValidNotificationPullRequestReview } from '../core/desktop/lib/valid-notification-pull-request-review.ts';
 import { getVerbForPullRequestReview } from '../core/desktop/ui/notifications/pull-request-review-helpers.ts';
 import { shortenSHA } from '../core/desktop/models/commit.ts';
+// 2026-10-09:闸门要的上游形状由适配层给(`GhReview` 的 `state` 是裸串)。
+import { toIAPIReview } from './notification-dialog-models.ts';
 
 /** 上游 `notifications-store.ts:87/110/219` 的三类事件的本地名字。 */
 export type HighSignalKind = 'pr-comment' | 'pr-review-submit' | 'pr-checks-failed';
@@ -127,7 +130,28 @@ export interface IHighSignalNotification {
    * 界面必须显示它 —— 「多报了」这件事不许静默。
    */
   readonly caveat: string;
+  /**
+   * **弹上游详情对话框要的原始载荷**(2026-10-09)。
+   *
+   * 为什么通知要带上它:上游那三个对话框(`ui/notifications/**`)收的是
+   * **上游自己的模型** —— `PullRequest` 类、`IAPIComment`、
+   * `ValidNotificationPullRequestReview`、`IRefCheck` —— 而它们的来源就是这个
+   * 联合里那三份 REST 对象。上游同一处也是这么做的
+   * (`notifications-store.ts:192-196` 把 `repository`/`pullRequest`/`comment`
+   * 一起塞进 `onClick` 的闭包里)。
+   *
+   * `kind` 与上面那个 `kind` **同值**(判别式),所以消费方 `switch` 能收窄。
+   * 形状转换(→ 上游模型)在 `src/client/notification-dialog-models.ts`,
+   * **不在**本文件:数据面不该知道 UI 模型的形状。
+   */
+  readonly payload: NotificationPayload;
 }
+
+/** 三类通知各自的原始载荷(判别式 = `kind`)。 */
+export type NotificationPayload =
+  | { readonly kind: 'pr-comment'; readonly pull: GhPull; readonly comment: GhComment }
+  | { readonly kind: 'pr-review-submit'; readonly pull: GhPull; readonly review: GhReview }
+  | { readonly kind: 'pr-checks-failed'; readonly pull: GhPull; readonly checks: readonly GhCheckRun[] }
 
 /** 界面读的那一份投影。 */
 export interface INotificationsSnapshot {
@@ -135,6 +159,22 @@ export interface INotificationsSnapshot {
   readonly notifications: readonly IHighSignalNotification[];
   /** 未读条数(顶栏角标用)。 */
   readonly unread: number;
+  /**
+   * **已读的那几条的 id**(2026-10-09 新增)。
+   *
+   * 为什么不能只有 `unread` 那个数字:删掉列表之后,「未读」不再只是角标上的一个
+   * 计数 —— 铃点下去要**打开最新一条未读**(`notifications-view.tsx` 的
+   * `newestUnread`),那需要知道**哪几条**是未读。只有数字的话 `unread=2` 无法回答
+   * 「打开哪一条」。
+   *
+   * 为什么存**已读**而不是**未读**:列表是「最新在前 + 只增不减」的,存未读集合
+   * 意味着每来一条新通知都要往集合里写一次;存已读则「不在集合里 = 未读」,
+   * 新通知天然是未读,不需要任何写入 ⇒ **写入路径更少,不一致状态更少**。
+   *
+   * ⚠️ 它是**内存**的:刷新页面即清空(与整个通知列表同一命运,见文件头第 4 条
+   * 的「没有跨会话记忆」)。这不是本字段引入的缺口。
+   */
+  readonly read: ReadonlySet<string>;
   /** 正在轮询吗。 */
   readonly polling: boolean;
   /** 当前轮询间隔(ms)。 */
@@ -158,6 +198,39 @@ export interface INotificationsSnapshot {
    * - `'none'` = 没有 GitHub 远端,谁都没在跑。
    */
   readonly transport: 'alive' | 'polling' | 'none';
+  /**
+   * **这一轮走的是哪条路**(2026-10 的两层运输;见 {@link NotificationsStream.pollNow})。
+   *
+   * - `'changed'` = 第一层说「账号有变化」⇒ 跑了第二层的按 PR 轮询;
+   * - `'unchanged'` = 第一层**304** ⇒ 第二层**一次都没发**(稳态);
+   * - `'sweep'` = 到点的**无条件全扫**:第一层即使说没变化也跑第二层。
+   *   为什么必须留它:第一层(`/notifications`)只覆盖「通知到你的」事件,
+   *   而 `pr-checks-failed` 挂在 `ci_activity` 上 —— **本账号实测 0 条**
+   *   (`docs/probes/notifications-reason-vocabulary-probe.mjs` 12 条样本里 0;
+   *   `docs/probes/notifications-ci-activity-reachability-probe.mjs` 判定本账号
+   *   属「Actions 在跑但没失败过」)⇒ **不许**让检查失败这件事只靠一条未证实的链。
+   * - `'none'` = 还没跑过。
+   */
+  readonly lastGate: 'changed' | 'unchanged' | 'sweep' | 'none';
+  /**
+   * 第一层最近一次读到的 `Last-Modified`(RFC 1123;`null` = 还没读到)。
+   *
+   * 它是条件请求的**唯一状态**,由调用方持有(不放进 `gh-api.ts` 的记忆体,
+   * 免得两条状态互相顶替)。
+   */
+  readonly notificationsSince: string | null;
+  /**
+   * **待弹出的详情对话框是哪一条**(2026-10-09;`null` = 没有)。
+   *
+   * 谁写它:`deliverAll` 给每条通知的**系统通知**挂的 `onClick`
+   * (`notify.ts` 的 `INotificationRequest.onClick`)—— 也就是**用户点了那条通知**。
+   * 谁读它:`src/client/notification-dialogs.tsx`(渲染上游那三个对话框)。
+   *
+   * ⚠️ 这两个字段的**形**是「一条通知」而不是一个布尔:上游的
+   * `PopupType.PullRequest{Comment,Review,ChecksFailed}` 各自带自己的载荷
+   * (`app.tsx:2587/2644/2773`),我们照同一条路把整条通知带过去。
+   */
+  readonly dialogRequest: IHighSignalNotification | null;
 }
 
 /** 轮询间隔(ms)。60s 是「13 次/分钟」这个成本数字的来源(见文件头)。 */
@@ -165,6 +238,17 @@ export const DEFAULT_INTERVAL_MS = 60_000;
 
 /** 一轮最多看几个 PR(成本是 `1 + 5 × MAX_PULLS`)。 */
 export const MAX_PULLS = 3;
+
+/**
+ * 每隔几轮做一次**无条件全扫**(见 {@link INotificationsSnapshot.lastGate} 的 `'sweep'`)。
+ *
+ * 5 轮 = 默认间隔下 **5 分钟**。取 5 的理由:
+ *  - 它是「第一层万一不报某类事件」的**唯一**兜底 ⇒ 不能太长(检查失败不该等半小时);
+ *  - 它每条都要跑第二层(稳态下全是免费 304),所以也不该太短;
+ *  - 上游没有这个旋钮(服务端直接推),所以这里**没有可抄的东西**,是替代物的代价,
+ *    必须显式登记而不是藏起来。
+ */
+export const SWEEP_EVERY = 5;
 
 /** 上游 `notifications-store.ts:335` 的 `pluralChecks` 选择。 */
 function pluralChecks(n: number): string {
@@ -219,6 +303,18 @@ export interface IRepoPoll {
   readonly reviews: ReadonlyMap<number, readonly GhReview[]>;
   /** `PR 编号 → 该 PR head 上失败的 check 名`。 */
   readonly failedChecks: ReadonlyMap<number, readonly string[]>;
+  /**
+   * `PR 编号 → 该 PR head 上的**原始** check runs`(2026-10-09 新增)。
+   *
+   * 为什么 `failedChecks` 不够:它只有**名字**,而
+   * `ui/notifications/pull-request-checks-failed.tsx` 要的是 `IRefCheck[]`
+   * (含 id / app 名 / html_url / 时长)。从名字**重建**不出那些字段。
+   *
+   * ⚠️ 两者**同源**:填 `failedChecks` 的是 `analyzeChecks(runs, statuses)`,
+   * 而这里存的是同一批 `runs`;`deriveCandidates` 挑「失败的那几条」时用的是
+   * `failedChecks` 里名字的**成员判定** ⇒ 「什么叫失败」只有一处定义。
+   */
+  readonly checkRuns: ReadonlyMap<number, readonly GhCheckRun[]>;
 }
 
 /**
@@ -254,6 +350,7 @@ export function deriveCandidates(poll: IRepoPoll): IHighSignalNotification[] {
         htmlUrl: comment.html_url,
         createdAt: comment.created_at,
         caveat: '',
+        payload: { kind: 'pr-comment', pull: pr, comment },
       });
     }
 
@@ -264,11 +361,12 @@ export function deriveCandidates(poll: IRepoPoll): IHighSignalNotification[] {
        * 上游 `notifications-store.ts:243` 写的是
        * `if (review === null || !isValidNotificationPullRequestReview(review)) return`。
        */
-      if (!isValidNotificationPullRequestReview(review)) {
+      const apiReview = toIAPIReview(review);
+      if (!isValidNotificationPullRequestReview(apiReview)) {
         continue;
       }
       const actor = review.user?.login ?? 'ghost';
-      const verb = getVerbForPullRequestReview(review) ?? 'reviewed';
+      const verb = getVerbForPullRequestReview(apiReview) ?? 'reviewed';
       out.push({
         id: `r:${ref.owner}/${ref.repo}#${pr.number}:${review.id}`,
         kind: 'pr-review-submit',
@@ -282,6 +380,7 @@ export function deriveCandidates(poll: IRepoPoll): IHighSignalNotification[] {
         htmlUrl: review.html_url,
         createdAt: review.submitted_at ?? pr.updated_at,
         caveat: '',
+        payload: { kind: 'pr-review-submit', pull: pr, review },
       });
     }
 
@@ -301,6 +400,15 @@ export function deriveCandidates(poll: IRepoPoll): IHighSignalNotification[] {
         htmlUrl: pr.html_url,
         createdAt: new Date().toISOString(),
         caveat: '未按「失败提交的作者必须是当前账号」过滤(宿主没给邮箱清单)⇒ 可能多报别人推的失败',
+        /*
+         * 用 `failed` 里的**名字**做成员判定(而不是另写一条「什么算失败」):
+         * `failed` 本身就是 `analyzeChecks` 的产物 ⇒ 判据只有一处。
+         */
+        payload: {
+          kind: 'pr-checks-failed',
+          pull: pr,
+          checks: (poll.checkRuns.get(pr.number) ?? []).filter((r) => failed.includes(r.name ?? '')),
+        },
       });
     }
   }
@@ -374,6 +482,7 @@ export async function pollRepo(ref: GhRef): Promise<IRepoPoll> {
   const comments = new Map<number, readonly GhComment[]>();
   const reviews = new Map<number, readonly GhReview[]>();
   const failedChecks = new Map<number, readonly string[]>();
+  const checkRuns = new Map<number, readonly GhCheckRun[]>();
   const pullsWithSha: GhPull[] = [];
 
   for (const pr of pulls) {
@@ -402,13 +511,14 @@ export async function pollRepo(ref: GhRef): Promise<IRepoPoll> {
       reviews.set(pr.number, prReviews);
     }
     failedChecks.set(pr.number, analyzeChecks(runs ?? [], statuses ?? []));
+    checkRuns.set(pr.number, runs ?? []);
   }
 
   /*
    * `pulls` 回的是**带 sha 的**那一版(`withSha` 已经逐条并进去),这样
    * `deriveCandidates` 里的 `pr.head.sha` 才不是空串。
    */
-  return { ref, pulls: pullsWithSha, comments, reviews, failedChecks };
+  return { ref, pulls: pullsWithSha, comments, reviews, failedChecks, checkRuns };
 }
 
 /* ------------------------------------------------------------------------- *
@@ -418,6 +528,7 @@ export async function pollRepo(ref: GhRef): Promise<IRepoPoll> {
 const EMPTY: INotificationsSnapshot = {
   notifications: [],
   unread: 0,
+  read: new Set<string>(),
   polling: false,
   intervalMs: DEFAULT_INTERVAL_MS,
   lastPollAt: null,
@@ -426,6 +537,9 @@ const EMPTY: INotificationsSnapshot = {
   baselined: false,
   target: null,
   transport: 'none',
+  lastGate: 'none',
+  notificationsSince: null,
+  dialogRequest: null,
 };
 
 /**
@@ -450,7 +564,27 @@ function deliverAll(notifications: readonly IHighSignalNotification[]): void {
     return;
   }
   for (const n of notifications) {
-    deliverNotification({ title: n.title, body: n.body, tag: n.id }, true);
+    deliverNotification(
+      {
+        title: n.title,
+        body: n.body,
+        tag: n.id,
+        /*
+         * **点那条系统通知 ⇒ 打开上游的详情对话框**(2026-10-09)。
+         *
+         * 上游的形状逐字如此(`notifications-store.ts:192-208`):先算 `onClick`,
+         * 再 `showNotification({title, body, userInfo, onClick})`;
+         * `show-notification.ts` 把它挂到 `notification.onclick` 上。
+         * 我们这半的差别只有一条:**没有** `desktop-notifications` 那条原生链,
+         * 走的是 `show-notification.ts:18-27` 那个 HTML5 分支 —— 也就是
+         * **同一个文件里上游自己就写了的那条退化路径**。
+         */
+        onClick: () => {
+          notificationsStream.requestDialog(n);
+        },
+      },
+      true,
+    );
   }
 }
 
@@ -478,6 +612,24 @@ export class NotificationsStream {
    * `applyAliveMode()`,依据是宿主 `alive/status` 的读数。
    */
   private alive = false;
+  /**
+   * 第一层条件请求的唯一状态(`/notifications` 的 `Last-Modified`)。
+   *
+   * **不放 `gh-api.ts` 的记忆体**:那一份是「按路径自动记」的通用层,
+   * 而这一条由本流显式持有 —— 两条状态同时存在会互相顶替,得到
+   * 「有时 304 有时 200」这种最难查的行为。
+   */
+  private notificationsSince: string | null = null;
+  /** 距离上一次**无条件全扫**过了几轮(见 {@link SWEEP_EVERY})。 */
+  private roundsSinceSweep = 0;
+  /**
+   * 已读 id 的**可变**副本(快照里那一份是新建的 `ReadonlySet`)。
+   *
+   * 为什么不直接把 `this.readIds` 放进快照:快照的契约是「引用稳定、只在 `emit`
+   * 时替换」,而 `ReadonlySet` 是**类型层**的约束 —— 把可变引用交出去,任何一处
+   * `as` 就能在订阅者不知情的时候改掉它。
+   */
+  private readonly readIds = new Set<string>();
 
   /** 订阅变更。@param listener - 变更回调。@returns 退订函数。 */
   public subscribe(listener: () => void): () => void {
@@ -512,7 +664,13 @@ export class NotificationsStream {
     this.target = ref;
     this.seen.clear();
     this.baselined = false;
-    this.patch({ target: next, baselined: false });
+    /*
+     * 换仓库也要**重置第一层的状态**:`Last-Modified` 是**整个账号**通知的,
+     * 换仓库后它仍然有效(不会因此误判「没变化」),但基线已重建 ⇒ 下一轮
+     * 无论如何都要跑第二层去建新基线,所以顺手把全扫计时也清零。
+     */
+    this.roundsSinceSweep = 0;
+    this.patch({ target: next, baselined: false, lastGate: 'none' });
   }
 
   /**
@@ -587,22 +745,90 @@ export class NotificationsStream {
   }
 
   /** 全部标为已读(用户打开页签时调)。 */
+  /**
+   * 把**一条**标为已读(2026-10-09;铃点下去时调它)。
+   *
+   * 幂等:已读的再标一次**不改快照** —— 否则每点一次都会让订阅者空转一次。
+   *
+   * @param id - 通知 id。
+   */
+  public markRead(id: string): void {
+    if (this.readIds.has(id)) {
+      return;
+    }
+    this.readIds.add(id);
+    this.patch({
+      read: new Set(this.readIds),
+      unread: this.state.notifications.filter((n) => !this.readIds.has(n.id)).length,
+    });
+  }
+
   public markAllRead(): void {
     if (this.state.unread === 0) {
       return;
     }
-    this.patch({ unread: 0 });
+    /*
+     * ⚠️ **两个字段一起维护**:`unread` 给角标读,`readIds` 给「打开最新一条未读」
+     * 读。只改其中一个会让它们互相说谎(角标 0,而铃还能打开一条「未读」)。
+     */
+    for (const n of this.state.notifications) {
+      this.readIds.add(n.id);
+    }
+    this.patch({ unread: 0, read: new Set(this.readIds) });
   }
 
   /** 清空列表并重建基线。 */
   public clear(): void {
     this.seen.clear();
     this.baselined = false;
-    this.patch({ notifications: [], unread: 0, baselined: false });
+    /*
+     * 「清空并重建基线」的语义就是**下一次真的全量重来** ⇒ 第一层的
+     * `Last-Modified` 必须丢掉。留着它的话,若这几秒内账号通知没有变化,
+     * 第一层会回 304、第二层不跑,于是**基线根本不会被重建** —— 一个
+     * 「点了没反应」的按钮(本仓明令禁止的缺陷类)。
+     */
+    this.notificationsSince = null;
+    this.roundsSinceSweep = 0;
+    this.patch({
+      notifications: [],
+      unread: 0,
+      baselined: false,
+      lastGate: 'none',
+      notificationsSince: null,
+      dialogRequest: null,
+    });
   }
 
   /**
    * **立刻**拉一轮(生产:定时器;探针:直接调)。
+   *
+   * ## 两层运输(2026-10 落地;读数见 `docs/probes/notifications-etag-free-probe.mjs`)
+   *
+   * ```
+   * 第一层  GET /notifications + If-Modified-Since      ← 1 次请求,稳态 304 ⇒ 免费
+   *          ├─ 304 且没到全扫点 ⇒ **第二层一次都不发**,返回 []
+   *          └─ 200            ⇒ 落 Last-Modified 并掉进第二层
+   * 第二层  pollRepo():现有那 1 + 5×PR 次按类型轮询
+   * ```
+   *
+   * **为什么加第一层**:原来每一轮都是 `1 + 5×PR` 次**真消耗**。实测条件请求命中 304
+   * 时 GitHub **不消耗主限额**(同装置:10 次条件请求 `used` 差 0,10 次无条件差 10),
+   * 所以把「有没有变化」这件事压到**一次**请求上,没有变化就整轮不发。
+   *
+   * **为什么还留第二层**:`/notifications` 是**账号通知**口径,它证明得了
+   * `pr-comment`(样本里 3 条 `issues/comments/N` 形状),但**证明不了**另外两类 ——
+   * 评审形状的 URL 在 12 条样本里是 **0**,`ci_activity` 也是 **0**。
+   * 那两类现在由第二层那 5 个带类型的端点负责,它们的语义早已被探针覆盖
+   * (44/44 等),不该为了省请求把它们换掉。
+   *
+   * **为什么还要 {@link SWEEP_EVERY}**:第一层万一不报某一类,第二层就永远不会跑。
+   * 「检查失败」正是这一类(本账号 0 条 `ci_activity`)。所以每 5 轮强制全扫一次,
+   * 把「第一层不报」的最坏后果从「永远不报」压到「最多晚 5 分钟」。
+   *
+   * ⚠️ **语义变化(必须知道)**:有第一层之后,没到全扫点的轮次是**通知驱动**的。
+   * 上游 Desktop 同样是这个口径(`NotificationsStore` 只处理服务端推来的事件,
+   * 再按 `isValidRepositoryForEvent` 收窄到当前仓库),所以这一条是**向**上游靠,
+   * 不是偏离 —— 但它确实比本文件上一版的「当前仓库所有开放 PR 全量轮询」**窄**。
    *
    * @returns 本轮新产生的通知(空数组 = 没有新的;**首轮必然是空**,见文件头第 3 条)。
    */
@@ -613,12 +839,43 @@ export class NotificationsStream {
     }
     this.inFlight = true;
     try {
+      /*
+       * 第一层:账号通知的变更探测。**只用 `Last-Modified`**(不用 ETag)——
+       * 与 `docs/probes/notifications-conditional-probe.mjs` 实测的那一条一致。
+       */
+      const gate = await ghReadConditional<unknown>(
+        '/notifications?all=false&per_page=100',
+        this.notificationsSince,
+      );
+      if (gate.lastModified !== null) {
+        this.notificationsSince = gate.lastModified;
+      }
+
+      this.roundsSinceSweep += 1;
+      const sweepDue = this.roundsSinceSweep >= SWEEP_EVERY;
+
+      if (gate.notModified && !sweepDue) {
+        // 稳态:第二层一次都不发。1 次**免费**请求换掉整轮。
+        this.patch({
+          lastError: null,
+          lastPollAt: Date.now(),
+          lastRequestCount: 1,
+          lastGate: 'unchanged',
+          notificationsSince: this.notificationsSince,
+        });
+        return [];
+      }
+
+      if (sweepDue) {
+        this.roundsSinceSweep = 0;
+      }
       const poll = await pollRepo(ref);
-      return this.ingest(poll, 1 + 5 * poll.pulls.length);
+      return this.ingest(poll, 1 + 1 + 5 * poll.pulls.length, sweepDue ? 'sweep' : 'changed');
     } catch (error) {
       this.patch({
         lastError: error instanceof Error ? error.message : String(error),
         lastPollAt: Date.now(),
+        lastGate: 'changed',
       });
       return [];
     } finally {
@@ -631,9 +888,14 @@ export class NotificationsStream {
    *
    * @param poll - 原始状态。
    * @param requestCount - 这一轮花了几次请求(读数;探针会与桩的请求日志对数)。
+   * @param gate - 这一轮走的是哪条路(默认 `'changed'`;探针只喂第二层,所以不传)。
    * @returns 新产生的通知。
    */
-  public ingest(poll: IRepoPoll, requestCount: number): readonly IHighSignalNotification[] {
+  public ingest(
+    poll: IRepoPoll,
+    requestCount: number,
+    gate: INotificationsSnapshot['lastGate'] = 'changed',
+  ): readonly IHighSignalNotification[] {
     const candidates = deriveCandidates(poll);
     const fresh = candidates.filter((c) => !this.seen.has(c.id));
     for (const c of candidates) {
@@ -648,7 +910,14 @@ export class NotificationsStream {
      * 所以界面能说出「基线已建立 / 这是第一批」,而不是让用户猜。
      */
     if (isBaseline || fresh.length === 0) {
-      this.patch({ lastError: null, lastPollAt: Date.now(), lastRequestCount: requestCount, baselined: true });
+      this.patch({
+        lastError: null,
+        lastPollAt: Date.now(),
+        lastRequestCount: requestCount,
+        baselined: true,
+        lastGate: gate,
+        notificationsSince: this.notificationsSince,
+      });
       return [];
     }
 
@@ -660,10 +929,28 @@ export class NotificationsStream {
       lastPollAt: Date.now(),
       lastRequestCount: requestCount,
       baselined: true,
+      lastGate: gate,
+      notificationsSince: this.notificationsSince,
     });
 
     deliverAll(ordered);
     return ordered;
+  }
+
+  /**
+   * **用户点了那条系统通知** ⇒ 记下要弹哪一条(2026-10-09)。
+   *
+   * @param notification - 被点的那一条。
+   */
+  public requestDialog(notification: IHighSignalNotification): void {
+    this.patch({ dialogRequest: notification });
+  }
+
+  /** 关掉详情对话框(`onSubmit` / `onDismissed` 共用,与上游同一对回调)。 */
+  public dismissDialog(): void {
+    if (this.state.dialogRequest !== null) {
+      this.patch({ dialogRequest: null });
+    }
   }
 
   /**

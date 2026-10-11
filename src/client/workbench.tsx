@@ -5,7 +5,7 @@
  * @module dsh-git/client/workbench
  */
 
-import { createElement, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { createElement, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { ReactNode } from 'react';
 /*
  * `import * as ReactDOM` 而不是 `import { createPortal }` —— 与镜像
@@ -39,7 +39,8 @@ import { ActionsView } from './actions-view.tsx';
  *  3. 打开时把 `.gw-inbox` 那一层画在 `.gw-body` 里(`styles.ts:124-132` 的
  *     那一族规则**此前零写入方**,见 `notifications-view.tsx` 的文件头)。
  */
-import { NotificationsPanel, NotificationsInboxButton } from './notifications-view.tsx';
+import { NotificationsInboxButton, openNewestUnread } from './notifications-view.tsx';
+import { NotificationDialog } from './notification-dialogs.tsx';
 import { notificationsStore, notificationsStream } from './notifications.ts';
 import { applyAliveMode, callAliveStatus, ALIVE_WATCHDOG_MS, type AlivePuller } from './alive.ts';
 import { PreferencesDialog } from './preferences-dialog.tsx';
@@ -101,6 +102,12 @@ import { ErrorBoundary } from './error-boundary.tsx';
 import { UICtx, type ConfirmOptions } from './gh.ts';
 import * as ghApi from './gh-api.ts';
 import { parseRepoInput } from '../core/lib.ts';
+/*
+ * `cardAuthOf` —— 「宿主 `auth/state` → 两个外壳共用的登录态形状」的**唯一**收窄点。
+ * 卡片那一半一直用它(`host-settings-card.ts:433`),弹窗这一半在 2026-11 之前是
+ * 手写等价物、且漏了 `signedIn` 判定(见下面 `auth={…}` 上方那段注释)。
+ */
+import { cardAuthOf } from './host-settings-card.ts';
 import type { RepoEntry } from '../core/types.ts';
 
 export interface WorkbenchAppProps {
@@ -237,38 +244,67 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
   const preferencesOpen = popup === PopupType.Preferences;
   const [cloneOpen, setCloneOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  /**
-   * **通知面板开着吗**(`.gw-inbox` 覆盖层;与当前页签**正交** —— 它在
-   * `.gw-body` 里盖住页签正文,不改变 `snap.tab`)。
-   *
-   * 为什么不做成第七个页签:`.gw-inbox` 那一族规则(`styles.ts:124-132`)本来就是
-   * 「页签正文之上的一层」写的(`position:absolute;inset:0;z-index:28`),而它
-   * **此前零写入方**。做成页签要动 `store.ts` 的 `TabId` + `TAB_ORDER` + 计数
-   * (三处共享文件),收益一样。
-   */
-  const [inboxOpen, setInboxOpen] = useState(false);
-  /** 通知层的数据面快照(与面板读的是**同一份**;角标就是它的 `unread`)。 */
+  /** 通知层的数据面快照(唯一读者:那颗铃的角标 + 「有没有未读」)。 */
   const notifSnap = useSyncExternalStore(
     notificationsStore.subscribe,
     notificationsStore.getSnapshot,
     notificationsStore.getSnapshot,
   );
+  /**
+   * **轮询失败要说出来** —— 2026-10-09 补,因为那条诊断状态条被删掉了。
+   *
+   * 删之前,`lastError` 显示在 `.gw-inbox` 的状态行里(`上一轮失败:…`);删之后
+   * 若不补这一条,一次 403 / 网络错就会**彻底静默** —— 通知不再来,而界面上
+   * 一个字的解释都没有。那是本仓明令禁止的形状(「静默失败比明确失败难查得多」)。
+   *
+   * 换成 **toast**(与 `branches-view.tsx:313` 等处同一条通道):
+   *  - 它是**用户可见**的,不需要用户先去点开某个面板;
+   *  - `lastSeen` 用来**同一条错误只报一次** —— `lastError` 是快照字段,
+   *    每轮失败都会 `patch` 一个新对象,不去重就会每 60s 弹一次同样的 toast。
+   *  - 成功一轮之后 `lastError` 变回 `null`,这里把记忆清掉 ⇒ 下次**再**失败
+   *    会**再**报一次(而不是「报过一次就永远闭嘴」)。
+   */
+  const lastNotifError = useRef<string | null>(null);
+  useEffect(() => {
+    const error = notifSnap.lastError;
+    if (error === null) {
+      lastNotifError.current = null;
+      return;
+    }
+    if (lastNotifError.current === error) {
+      return;
+    }
+    lastNotifError.current = error;
+    store.toast(`通知轮询失败:${error}`, 'err');
+  }, [notifSnap.lastError, store]);
   /*
-   * 三个进 JSX 的回调都过 `useCallback` —— `.eslintrc.yml:125` 的
+   * 进 JSX 的回调都过 `useCallback` —— `.eslintrc.yml:125` 的
    * `react/jsx-no-bind: error` 会把「传进 JSX 的标识符解析到组件内的箭头函数」
    * 判成违规,而 `check-lint` 只拦**新增**违规(见 `workbench.tsx:196` 那段同款注释)。
    */
-  const toggleInbox = useCallback((): void => {
-    setInboxOpen((open) => !open);
+  /**
+   * 点铃:**打开最新一条未读的对话框**并把它标为已读(2026-10-09)。
+   *
+   * `.gw-inbox` 那一层列表已按用户裁决删掉(「上游没有那一层」),所以这颗铃
+   * 不再「开合一个覆盖层」,而是把用户送到**上游那三个对话框**——那是本插件
+   * 唯一的详情面,与上游同形。逻辑在 `notifications-view.tsx` 的
+   * `openNewestUnread`(它有分支,单独抽出来能被探针直接调)。
+   */
+  const openNewestNotification = useCallback((): void => {
+    openNewestUnread();
   }, []);
-  const closeInbox = useCallback((): void => {
-    setInboxOpen(false);
+  /**
+   * 关掉**通知详情对话框**(2026-10-09)。
+   *
+   * 上游 `app.tsx:2596-2597` 等处把**同一个** `onPopupDismissedFn` 同时传给
+   * `onSubmit` 与 `onDismissed` —— 本插件同形,所以一个回调管两条出口。
+   *
+   * ⚠️ 必须 `useCallback`:写成内联箭头 `onClose={() => …}` 会让这个文件的
+   * `react/jsx-no-bind` 从 21 涨到 **22**(实测:那是本轮唯一一条自己造的 lint 违规)。
+   */
+  const closeNotificationDialog = useCallback((): void => {
+    notificationsStream.dismissDialog();
   }, []);
-  /** 「去 Pull requests」:关掉通知层 + 切到 PR 页签(详情对话框缺席时的替代路径)。 */
-  const openPullsFromInbox = useCallback((): void => {
-    store.setTab('pulls');
-    setInboxOpen(false);
-  }, [store]);
   const [dialog, setDialog] = useState<null | { opts: ConfirmOptions; resolve: (value: boolean) => void }>(null);
   /*
    * 界面缩放(px;`0` = 跟随宿主)—— **订阅** `prefs-bus` 的那一份,不再自己 `useState`。
@@ -638,10 +674,32 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
                 * 它自己带 `ErrorBoundary` —— 通知数据面坏了不该带走整个页签正文
                 * (与其它浮层同一条纪律,见下方 clone / preferences 的边界)。
                 */}
-              {inboxOpen && (
-                <ErrorBoundary label="通知面板" resetKey={ghRef === null ? 'no-remote' : `${ghRef.owner}/${ghRef.repo}`}
+              {/*
+                * **通知详情对话框**(2026-10-09)—— 上游 `ui/app.tsx:2587/2644/2773`
+                * 那三个 `PopupType` 在我们这半的落点。
+                *
+                * ⚠️ **它不是自动弹出的**:写入方只有一个 —— 用户在**系统通知**上
+                * 点了一下(`notify.ts` 的 `INotificationRequest.onClick` ⇒
+                * `notificationsStream.requestDialog`)。这一条**逐字**照上游
+                * (`notifications-store.ts:192-208` 先算 `onClick` 再
+                * `showNotification({…, onClick})`;`show-notification.ts:24-27` 把它
+                * 挂到 `notification.onclick`)。「一有通知就糊一个模态」是**错的**,
+                * 上游不这么干。
+                *
+                * 它自己带 `ErrorBoundary`:详情面坏了不该带走页签正文。
+                * `resetKey` 用那条通知的 id —— 换一条就重置边界。
+                */}
+              {notifSnap.dialogRequest !== null && (
+                <ErrorBoundary label="通知详情" resetKey={notifSnap.dialogRequest.id}
                   onError={reportPanelError}>
-                  <NotificationsPanel onOpenPulls={openPullsFromInbox} onClose={closeInbox} />
+                  <NotificationDialog
+                    notification={notifSnap.dialogRequest}
+                    env={{
+                      repositoryPath: snap.current,
+                      login: authLogin ?? '',
+                    }}
+                    onClose={closeNotificationDialog}
+                  />
                 </ErrorBoundary>
               )}
             </div>
@@ -664,7 +722,9 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
               * (见上面 `snap.current === '' ? <Empty …/> : …`)⇒ 那时画出这颗按钮
               * 就会是「点了没有任何东西」的假控件,正是本仓禁止的形状。
               */}
-            {snap.current !== '' && <NotificationsInboxButton active={inboxOpen} unread={notifSnap.unread} onToggle={toggleInbox} />}
+            {snap.current !== '' && (
+              <NotificationsInboxButton unread={notifSnap.unread} onOpenNewest={openNewestNotification} disabled={notifSnap.unread === 0} />
+            )}
           </span>
         </div>
 
@@ -712,12 +772,15 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
              * 账号页只能退回「上次用过的端点」,于是**卡片显示的端点与宿主实际用的端点
              * 可能不一致**(`account-emails.tsx` 的 `IAuthIdentity.endpoint` 文件头
              * 把这条点名记了很久)。
+             *
+             * ⚠️ **2026-11 起改用 `cardAuthOf()`**:`auth/state` 在**未登录时也回一个对象**
+             * (`{signedIn:false, login:'', …}`,`src/host/auth.ts`),所以这里原来的
+             * 「`snap.auth === null` 才算未登录」是**错的** —— 登出(或令牌失效)之后,
+             * 弹窗里照样会构造出一份 `login: ''` 的"登录态",账号页随之渲染一张
+             * **登录名为空串的假账号卡**。判据与消费侧写在同一处:`cardAuthOf()` 的 JSDoc
+             * (卡片那一半早就走它,只有弹窗这条路径漏了)。
              */
-            auth={snap.auth === null ? null : {
-              login: snap.auth.login,
-              tokenTail: snap.auth.tokenTail,
-              endpoint: snap.auth.endpoint,
-            }}
+            auth={cardAuthOf(snap.auth)}
             store={store}
             fontScale={fontScale}
             /* 直接给总线那个写入口(`prefs-bus.ts:99` 的 `setFontScale`):弹窗与卡片

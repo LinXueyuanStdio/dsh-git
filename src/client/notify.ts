@@ -210,6 +210,23 @@ export interface INotificationRequest {
   readonly body: string;
   /** 去重标记:同一个 tag 的新通知会替换旧的,避免刷屏。 */
   readonly tag?: string;
+  /**
+   * **用户点那条系统通知时**要跑的回调(2026-10-09 新增)。
+   *
+   * 上游的形状逐字如此 —— `lib/notifications/show-notification.ts:28-31`:
+   *
+   * ```ts
+   * const notification = new Notification(options.title, { body: options.body })
+   * notification.onclick = () => { focusWindow(); options.onClick() }
+   * ```
+   *
+   * 也就是说**详情对话框不是自动弹的,是点了系统通知才弹**
+   * (`notifications-store.ts:198-201` 另有一条 `skipNotification` 档:
+   * 那一档**不**显示通知、直接 `onClick()`)。本插件此前把
+   * `new Notification(...)` 的返回值丢了(`deliverNotification` 的注释写着
+   * 「不需要也不该保留返回值」)—— 那句话在**没有回调**时成立,有了这条就不再成立。
+   */
+  readonly onClick?: () => void;
 }
 
 /**
@@ -280,8 +297,21 @@ export function deliverNotification(
     if (request.tag !== undefined) {
       options.tag = request.tag;
     }
-    // 构造即显示 —— 这就是 Web Notifications 的语义(不需要也不该保留返回值)。
-    new Notification(request.title, options);
+    /*
+     * 构造即显示 —— 这就是 Web Notifications 的语义。
+     *
+     * ⚠️ 2026-10-09 起**保留这个实例**:有 `onClick` 时要挂上去(上游同一处)。
+     * 原来这里是「不需要也不该保留返回值」,那在**没有回调**时是对的,现在不对了。
+     * `onclick` 必须在构造之后立刻挂 —— 通知可能已经被用户看到并点掉。
+     */
+    const notification = new Notification(request.title, options);
+    if (request.onClick !== undefined) {
+      const onClick = request.onClick;
+      notification.onclick = () => {
+        // 上游同一处先 `focusWindow()`;浏览器半没有那个 API(窗口本来就聚焦着)。
+        onClick();
+      };
+    }
     sentCount += 1;
     return { kind: 'sent' };
   } catch (error) {

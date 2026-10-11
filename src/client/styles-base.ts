@@ -81,15 +81,23 @@ const CSS = `
 
 /* ---------- 主体 / 页脚 ---------- */
 .gw-body{flex:1;min-height:0;position:relative;display:flex}
-.gw-inbox{position:absolute;inset:0;z-index:28;background:var(--dsw-alias-bg-layer-1);display:flex;flex-direction:column;min-height:0}
-.gw-inbox .gw-list{flex:1}
-.gw-inbox-bar{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 12px;
-  border-bottom:1px solid var(--dsw-alias-border-l2);flex:none;flex-wrap:wrap}
-.gw-inbox-return{display:flex;align-items:center;gap:8px;padding:5px 12px;
-  border-bottom:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);flex:none}
-.gw-inbox-dot{width:8px;height:8px;border-radius:50%;flex:none;margin-top:5px;background:transparent;border:1px solid var(--dsw-alias-border-l1)}
-.gw-inbox-dot.on{background:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary)}
-.gw-row.gw-inbox-unread .gw-rowtitle{font-weight:600}
+/*
+ * 2026-10-09 删掉的那一族:.gw-inbox / .gw-inbox-bar / .gw-inbox-return /
+ * .gw-inbox-dot / .gw-row.gw-inbox-unread。
+ *
+ * 它原来是「页签正文之上的一层列表」(那份**可回看的通知列表**)。用户裁决逐字:
+ * 「这个通知界面在 references/desktop 明明是没有的…删 .gw-inbox 列表与那条
+ * 诊断状态条,文字搬进 docs/,右下角只留「通知 N」入口」⇒ 那一层连同它的
+ * 渲染方(notifications-view.tsx 的 NotificationsPanel)一起删了。
+ *
+ * ⚠️ **本注释里一个反引号都不能有**:本文件是**一个模板字面量**,
+ * check-template-literals 要它的反引号总数**恰好 2**(开与闭各一)。
+ * 第一版这段注释把类名写成 .gw-inbox 那样带反引号的形式,于是闸门当场退 1 —— 实测踩过。
+ *
+ * **规则也跟着删,不是只删 JSX**:留着它们就是「样式在、零写入方」。
+ * .gw-hbtn .gw-inbox-badge 是**另一族**(健康按钮的角标),在本轮之前就已经
+ * 没有写入方,属于既有存量,不归这一刀。
+ */
 .gw-footer{display:flex;justify-content:space-between;gap:12px;padding:5px 12px;
   border-top:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-tertiary);font-size:10px}
 

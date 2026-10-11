@@ -61,6 +61,8 @@ import {
 import type { GhRef } from '../core/lib.ts';
 import { api, type IAliveStatusPayload, type ApiResult } from './api.ts';
 import { shortenSHA } from '../core/desktop/models/commit.ts';
+// 2026-10-09:闸门要的上游形状由适配层给(`GhReview` 的 `state` 是裸串)。
+import { toIAPIReview } from './notification-dialog-models.ts';
 import { isValidNotificationPullRequestReview } from '../core/desktop/lib/valid-notification-pull-request-review.ts';
 import { getVerbForPullRequestReview } from '../core/desktop/ui/notifications/pull-request-review-helpers.ts';
 
@@ -320,6 +322,8 @@ export class AlivePuller {
         htmlUrl: comment.html_url,
         createdAt: comment.created_at,
         caveat: '',
+        // 与轮询那条路同一个字段(见 `notifications.ts` 的 `NotificationPayload`)。
+        payload: { kind: 'pr-comment', pull, comment },
       };
     }
 
@@ -327,11 +331,18 @@ export class AlivePuller {
       const reviews = await listReviews(this.target, event.pull_request_number);
       const review = reviews.find((r) => String(r.id) === event.review_id);
       // 闸门是**逐字镜像**的那一个(上游 `notifications-store.ts:243` 同一处)。
-      if (review === undefined || !isValidNotificationPullRequestReview(review)) {
+      // 两段分开写:第一段把 `undefined` 收掉,第二段才是上游那道闸门 ——
+      // 合成一个条件会让 TS 无法把 `review` 收窄(而那不是「类型系统太严」,
+      // 是两件事本来就是两件事)。
+      if (review === undefined) {
+        return null;
+      }
+      const apiReview = toIAPIReview(review);
+      if (!isValidNotificationPullRequestReview(apiReview)) {
         return null;
       }
       const actor = review.user?.login ?? 'ghost';
-      const verb = getVerbForPullRequestReview(review) ?? 'reviewed';
+      const verb = getVerbForPullRequestReview(apiReview) ?? 'reviewed';
       return {
         ...base,
         id: `a:r:${event.owner}/${event.repo}#${event.pull_request_number}:${event.review_id}`,
@@ -342,6 +353,7 @@ export class AlivePuller {
         htmlUrl: review.html_url,
         createdAt: review.submitted_at ?? pull.updated_at,
         caveat: '',
+        payload: { kind: 'pr-review-submit', pull, review },
       };
     }
 
@@ -361,6 +373,12 @@ export class AlivePuller {
       htmlUrl: pull.html_url,
       createdAt: new Date(event.timestamp).toISOString(),
       caveat: '未按「失败提交的作者必须是当前账号」过滤(宿主拿不到账号邮箱清单)⇒ 可能多报。',
+      // 同样用 `failed` 的名字做成员判定 ⇒ 「什么叫失败」与轮询那条路同一处。
+      payload: {
+        kind: 'pr-checks-failed',
+        pull,
+        checks: runs.filter((r) => failed.includes(r.name ?? '')),
+      },
     };
   }
 

@@ -164,6 +164,46 @@ export interface IAPIIdentity {
 }
 
 /**
+ * 一条 PR review。**上游 `lib/api.ts:650-662`,逐字**。
+ *
+ * 2026-10-09 补。它是 `ui/notifications/pull-request-review.tsx` 的 `review` prop
+ * 的类型,而那条链上还有**逐字镜像**的
+ * `lib/valid-notification-pull-request-review.ts`(它的 `isValidNotificationPullRequestReview`
+ * 收窄到的就是这个接口)。本替身原来没有声明它 ⇒ 那两处各报一条 TS2724/TS2305,
+ * 而它们**不是**产品缺陷(上游的形状就在这里,写不下才是缺陷)。
+ *
+ * 字段与顺序逐字取自上游;`state` 的五个取值一个不少 —— 少一个
+ * `DISMISSED` 就会让镜像那份「只有三种状态值得通知」的闸门**永远收窄失败**。
+ */
+export interface IAPIPullRequestReview {
+  readonly id: number
+  readonly user: IAPIIdentity
+  readonly body: string
+  readonly html_url: string
+  readonly submitted_at: string
+  readonly state:
+    | 'APPROVED'
+    | 'DISMISSED'
+    | 'PENDING'
+    | 'COMMENTED'
+    | 'CHANGES_REQUESTED'
+}
+
+/**
+ * Represents both issue comments and PR review comments
+ *
+ * **上游 `lib/api.ts:664-671`,逐字。** 2026-10-09 与上面那条同批补:它是
+ * `ui/notifications/pull-request-comment.tsx` 的 `comment` prop 的类型。
+ */
+export interface IAPIComment {
+  readonly id: number
+  readonly body: string
+  readonly html_url: string
+  readonly user: IAPIIdentity
+  readonly created_at: string
+}
+
+/**
  * A ruleset returned from the GitHub API's "get all rulesets for a repo" endpoint.
  * This endpoint returns a slimmed-down version of the full ruleset object, though
  * only the ID is used.
@@ -285,12 +325,67 @@ export class API {
 
   /**
    * 上游 `lib/api.ts:1237` 返回 `IAPIUser`(上游 `:839` 那个 20 多字段的接口)。
-   * 本 shim 不搬那个接口,**只保留 `avatar.tsx:83` 真正读的一个字段**(`avatar_url`)——
+   * 本 shim 不搬那个接口,**只保留调用点真正读的那几个字段** ——
    * 结构类型足以让调用点类型正确,也不会凭空造一个与上游必填/可选性不同的接口。
+   *
+   * ⚠️ **2026-10 类型面加宽(值面一个字节没动)** —— 第二个调用方来了:
+   * `src/core/desktop/lib/stores/github-user-store.ts`(镜像,上游
+   * `lib/stores/github-user-store.ts:50-72` 的 `getByLogin`)读 `type` / `id` /
+   * `name` / `login` / `email` / `avatar_url` 六格。声明面只留 `avatar_url` 时那 10 条
+   * 诊断全部落在新文件上(`TS2339` ×10)⇒ 这里把返回形状补成调用点真正读的并集。
+   * **方法体仍然是「抛」**:把它改成走 `setGitHubTransport` 注入的传输,会让
+   * `ui/lib/avatar.tsx:83` 的现有路径从「必抛」变成「真的打 api.github.com」——
+   * 那是**另一个面的行为改动**,不在本泳道所有权内(它的探针在 `avatar` 那一族)。
+   * `getByLogin` 的调用点本身带 `.catch(e => null)`(上游同一句),所以抛在这里
+   * 与上游「API 失败」的语义一致。
    */
-  public async fetchUser(_login: string): Promise<{ readonly avatar_url: string } | null> {
+  public async fetchUser(
+    _login: string,
+  ): Promise<{
+    readonly avatar_url: string
+    readonly id: number
+    readonly login: string
+    readonly name: string | null
+    readonly email: string | null
+    readonly type: string
+  } | null> {
     throw new Error(
       `GitHub API 在浏览器半不可用(lib/api.ts 的最小替身,只覆盖 avatar 的 import):${this.endpoint}`,
+    )
+  }
+
+  /**
+   * 上游 `lib/api.ts:1245-1278`(`fetchMentionables`)—— **共同作者输入框的数据源**。
+   *
+   * ## 为什么这里是抛错替身(而不是「顺手实现」)
+   *
+   * 签名逐字保留(三个形参 + `IAPIMentionablesResponse | null`);**值面做不到**,
+   * 原因是**传输契约的缺口**,不是懒:
+   *  · 上游那 30 行要两样 `IGitHubTransport.request(path, init)` **表达不了**的东西 ——
+   *    ① 自定义 `Accept: application/vnd.github.jerry-maguire-preview`;
+   *    ② `If-None-Match: <etag>`(304 分支就是靠它);
+   *  · 现有接口只有 `{method, body, accept}`,没有 headers/etag 面
+   *    (`src/core/desktop/lib/api.ts` 的 `IGitHubTransport`)。
+   * ⇒ 要真实现就得先加宽**注入契约**(`gh-api.ts` 的 `ghRest` 一并改),那是宿主/传输层
+   * 的改动,而本仓今天**没有任何调用点**(唯一调用者是镜像 `GitHubUserStore.updateMentionables`,
+   * 而它在本仓没有产品调用者 —— 上游那一跳来自 `app-store` 的仓库加载,属 §1.3 排除面)。
+   * 按本 shim 的既有约定(`getAvatarToken` / `fetchUser` 同一条):
+   * **没接通就抛,不静默回假数据**。
+   *
+   * **退役条件**:`IGitHubTransport.request` 支持自定义请求头(至少 `If-None-Match`
+   * 与自定义 `Accept`)⇒ 按上游 `:1245-1278` 逐字实现本方法,并把这条注释删掉。
+   *
+   * @param _owner - 仓库 owner(上游 `repository.owner.login`)。
+   * @param _name - 仓库名。
+   * @param _etag - 上一轮的 ETag;`undefined` = 首次拉取。
+   */
+  public async fetchMentionables(
+    _owner: string,
+    _name: string,
+    _etag: string | undefined,
+  ): Promise<IAPIMentionablesResponse | null> {
+    throw new Error(
+      `GitHub API 在浏览器半不可用(mentionables 端点的自定义 Accept / If-None-Match 不在 IGitHubTransport 的契约里):${this.endpoint}`,
     )
   }
 
@@ -469,6 +564,43 @@ export function setGitHubTransport(next: IGitHubTransport | null): void {
 // ---------------------------------------------------------------------------
 // CI 面的类型(逐字取自上游 `lib/api.ts`,每条标了上游行号)
 // ---------------------------------------------------------------------------
+
+/**
+ * 上游 `lib/api.ts:283-309` 的 `IAPIMentionableUser`,**逐字**(含注释)。
+ *
+ * 为什么搬进来:`github-user-store.ts` 的 `updateMentionables` 读它
+ * (`:108-112`),而 `fetchMentionables` 的返回类型要指到它。本 shim 之前不需要它
+ * (没有 mentionables 面的调用点),现在有声明面的需要。
+ */
+export interface IAPIMentionableUser {
+  /** A url to an avatar image chosen by the user */
+  readonly avatar_url: string
+  /**
+   * The user's attributable email address or null if the
+   * user doesn't have an email address that they can be
+   * attributed by
+   */
+  readonly email: string | null
+  /** The username or "handle" of the user */
+  readonly login: string
+  /**
+   * The user's real name (or at least the name that the user
+   * has configured to be shown) or null if the user hasn't provided
+   * a real name for their public profile.
+   */
+  readonly name: string | null
+}
+
+/**
+ * 上游 `lib/api.ts:682-685` 的 `IAPIMentionablesResponse`,逐字。
+ * 上游那份是 **module-private**(`interface`,没有 `export`)—— 这里必须导出,
+ * 因为 `fetchMentionables` 是 `public` 且用了它(TS4053:`public` 方法的返回类型
+ * 引用了私有名字)。
+ */
+export interface IAPIMentionablesResponse {
+  readonly etag: string | undefined
+  readonly users: ReadonlyArray<IAPIMentionableUser>
+}
 
 /** 上游 `lib/api.ts:346`,逐字。 */
 export type APIRefState = 'failure' | 'pending' | 'success' | 'error'

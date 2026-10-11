@@ -86,6 +86,16 @@ import type { FetchType } from '../../models/fetch'
 import type { GitHubRepository } from '../../models/github-repository'
 import type { ICombinedRefCheck, IRefCheck } from '../../lib/ci-checks/ci-checks'
 import type { IAPICheckSuite } from '../../lib/api'
+/*
+ * 通知详情面(2026-10-08)的三个类型 —— 与上面四条同一处理:**都是 `import type`**,
+ * 只出现在签名位置,于是**不产生运行期 import 边**。
+ * 为什么这一条特别要紧:本文件是四个通知详情对话框 `import { Dispatcher } from '../dispatcher'`
+ * 的落点,而那四个文件是**逐字镜像**;若这里写成值 import,`models/pull-request` /
+ * `models/repository` 就会因为「替身」而进包 —— 方向是反的。
+ */
+import type { PullRequest } from '../../models/pull-request'
+import type { RepositoryWithGitHubRepository } from '../../models/repository'
+import type { ValidNotificationPullRequestReviewState } from '../../lib/valid-notification-pull-request-review'
 
 /**
  * 上游 `ui/dispatcher/dispatcher.ts:405` —— 把一个弹窗压入栈。
@@ -124,6 +134,49 @@ export class Dispatcher {
   /** 上游 `:2709`。 */
   public recordRepoClicked(repoHasIndicator: boolean) {
     void repoHasIndicator
+  }
+
+  // -------------------------------------------------------------------------
+  // 通知详情面(2026-10-08 补,用户裁决「走窄门面」):
+  //   `ui/notifications/**` 那四个对话框真的调到的 Dispatcher 方法,一共 6 个 ——
+  //   另外 4 个(`openInBrowser` / `incrementMetric` / `showPopup` / `selectRepository`)
+  //   本类早已声明,只差下面这 2 个。**不要**为此去引 `ui/dispatcher/dispatcher.ts`
+  //   (4,356 行)—— 它已从 client TS 程序排除,理由见 `tsconfig.json` 的 `exclude`
+  //   与本文件上方的类型 import 注释;闭包读数见
+  //   `docs/probes/dispatcher-closure-probe.mjs` 的 C 组。
+  // -------------------------------------------------------------------------
+
+  /**
+   * 上游 `ui/dispatcher/dispatcher.ts:2525`(**签名逐字**)。
+   *
+   * 调用点三个:`pull-request-checks-failed.tsx:402`、`pull-request-review.tsx:158`、
+   * `pull-request-comment.tsx:149`(「切换到这个 PR」)。
+   * 上游方法体是 `this.appStore._checkoutPullRequest(repository, number, owner, cloneURL, ref)`;
+   * 浏览器半没有那个 store ⇒ 类型面在这里,行为由门面
+   * (与 `src/client/changes-view.tsx` 的 `OversizedFilesDispatcher` 同形)兑现。
+   */
+  public checkoutPullRequest(
+    repository: RepositoryWithGitHubRepository,
+    pullRequest: PullRequest
+  ): Promise<void> {
+    void repository
+    void pullRequest
+    return Promise.resolve()
+  }
+
+  /**
+   * 上游 `:4111`(**没有声明返回类型**,即 `void` —— 这里逐字保持)。
+   *
+   * 上游方法体只有一句统计打点:`this.statsStore.recordPullRequestReviewDialogSwitchToPullRequest(reviewType)`。
+   * 唯一调用点:`pull-request-review.tsx:161`。
+   * 参数类型就是**逐字镜像的** `lib/valid-notification-pull-request-review.ts` 里那个
+   * 三值联合(`'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED'`)—— 用 `import type`
+   * 引进来,所以这一条**不产生运行期 import 边**。
+   */
+  public recordPullRequestReviewDialogSwitchToPullRequest(
+    reviewType: ValidNotificationPullRequestReviewState
+  ) {
+    void reviewType
   }
 
   // -------------------------------------------------------------------------
@@ -377,5 +430,47 @@ export class Dispatcher {
     void repository
     void checkSuiteId
     return Promise.resolve(null)
+  }
+
+  /**
+   * 上游 `ui/dispatcher/dispatcher.ts:1152-1154`,签名逐字:
+   *
+   * ```ts
+   * public refreshIssues(repository: GitHubRepository): Promise<void> {
+   *   return this.appStore._refreshIssues(repository)
+   * }
+   * ```
+   *
+   * ## 为什么本替身现在需要它(以及为什么方法体是 no-op)
+   *
+   * 唯一调用点是**逐字镜像**的 `ui/autocompletion/issues-autocompletion-provider.tsx`
+   * (2026-10 补进树里):`this.updateIssuesScheduler.queue(() => this.dispatcher.refreshIssues(this.repository))`。
+   * 不声明它,`issues-autocompletion-provider.tsx` 与 `build-autocompletion-providers.ts`
+   * 两处都在**编译期**过不去(TS2339)—— 而那两份是镜像件,不许为了我们的类型面改字节。
+   *
+   * ## no-op 是**如实的**,不是「假装接通」
+   *
+   * 上游那一跳的终点是 `app-store._refreshIssues` → `issuesStore.refreshIssues(repository, account)`
+   * → GitHub REST(`lib/api.ts` 的 `fetchIssues`)+ dexie 写库。本仓浏览器半:
+   *  · **没有** issues 数据库(dexie 不在依赖里)、**没有** issues 的账户/令牌模型;
+   *  · `lib/api.ts` 的替身也**没有** `fetchIssues`(它只有 avatar 面 + CI 面)——
+   *    所以就算这里接了门面也没有可调的端点。
+   * ⇒ 「刷新 issue 缓存」这件事今天**无事可做**。这与本文件其余方法的形态一致:
+   * 替身给**类型面**,行为由门面覆盖;没有门面的,方法体就是 no-op。
+   *
+   * ⚠️ **代价已登记**(别读成「已经能用」):提交信息输入框里的 `#issue` 补全
+   * **今天补不出任何东西** —— 它的数据源(`IssuesStore`)在
+   * `src/client/commit-autocompletion.ts` 里是一个**明确登记为「空数据源」**的替身。
+   * 判据:`docs/probes/changes-commit-autocompletion-probe.mjs` 的 `A5`
+   * (`kind === 'issue'` 的 provider 对 `#1` / `#issue` 必须回 0 条,且不得出现
+   * 「看得见却点不动」的补全弹层)。
+   *
+   * **退役条件**:本仓接上 issues 数据面(库 + 账户 + `lib/api.ts` 的 `fetchIssues`)
+   * ⇒ 把方法体换成真正的门面调用(与 `SyncDropdownDispatcher` / `DesktopDispatcher`
+   * 同一形状),并把这条注释删掉。
+   */
+  public refreshIssues(repository: GitHubRepository): Promise<void> {
+    void repository
+    return Promise.resolve()
   }
 }

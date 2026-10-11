@@ -41,20 +41,44 @@ interface GhOpts {
   body?: unknown;
   /** 覆盖 Accept(如 check-runs 的预览头)。 */
   accept?: string;
+  /**
+   * `If-None-Match`:上一轮这一条路径的 ETag。
+   *
+   * GitHub 命中 304 时**不消耗主限额**(实测:`docs/probes/notifications-etag-free-probe.mjs`
+   * —— 同一个头连打 10 次 `x-ratelimit-used` 差 **0**,而无条件对照连打 10 次差 **10**)。
+   * 稳态下这一层把「每轮 16 次真消耗」变成「16 次 round-trip、0 额度」。
+   */
+  etag?: string;
+  /** `If-Modified-Since`:上一轮的 `Last-Modified`(RFC 1123),给 `/notifications` 用。 */
+  ifModifiedSince?: string;
+  /**
+   * **绕过条件请求记忆体**,强制一次真的 200。
+   *
+   * 只有「我知道内容刚变过、必须拿到新的一份」时才该用(例如刚 POST 完一条评论
+   * 又立刻要重画列表)。默认 `false` —— 平时让它命中 304 才是对的。
+   */
+  noCache?: boolean;
 }
 
 interface GhResponse {
   status: number;
   json: unknown;
   link: string | null;
+  /** 这一轮的 ETag(`null` = 响应没带);304 也会带。 */
+  etag: string | null;
+  /** 这一轮的 `Last-Modified`(`null` = 响应没带)。 */
+  lastModified: string | null;
 }
 
-/** `gh` 路由信封里 `value` 的形状(host 回 `{status, json, link, remaining}`)。 */
+/** `gh` 路由信封里 `value` 的形状(host 回 `{status, json, link, remaining, etag, lastModified}`)。 */
 interface IGhProxyPayload {
   readonly status: number;
   readonly json: unknown;
   readonly link: string | null;
   readonly remaining: number | null;
+  /** 老 host 不返回 ⇒ 可缺省(那时就没有条件请求,退化成不省额度)。 */
+  readonly etag?: string | null;
+  readonly lastModified?: string | null;
 }
 
 /**
@@ -63,24 +87,102 @@ interface IGhProxyPayload {
  * `json` **不列**:它是 GitHub REST 的**上游契约**(议题/PR/树的形状由 GitHub 定,
  * 逐条写 schema 会变成第二份真源),这里只保证「代理信封本身」的形状
  * (`status` 是数字、`json` 存在与否由调用方各自按上游语义处理)。
- * `link` / `remaining` 老 host 可能不返回 ⇒ 可缺省。
+ * `link` / `remaining` / `etag` / `lastModified` 老 host 可能不返回 ⇒ 可缺省。
  */
 const GH_PROXY_SHAPE: Shape = {
-  record: { status: 'number', link: 'string|null?', remaining: 'number|null?' },
+  record: {
+    status: 'number',
+    link: 'string|null?',
+    remaining: 'number|null?',
+    etag: 'string|null?',
+    lastModified: 'string|null?',
+  },
 };
 
 /**
- * 经 host 代理发一次 GitHub REST 调用。
+ * 条件请求的记忆体(2026-10)。
+ *
+ * ## 为什么要有它
+ *
+ * GitHub 的**条件请求命中 304 时不消耗主限额**。实测
+ * (`docs/probes/notifications-etag-free-probe.mjs`,8/8):
+ *
+ * | 装置 | 读数 |
+ * |---|---|
+ * | 同一个 ETag 连打 **10** 次 `/notifications` | 全部 304,`x-ratelimit-used` 差 **0** |
+ * | 同一个 ETag 连打 **10** 次 `/repos/…/pulls/N/reviews` | 全部 304,差 **0** |
+ * | **阳性对照**:同样 10 次、**真的不带**条件头 | 全部 200,差 **10** ⇒ 仪器能看见计费 |
+ * | **阴性对照**:一个假 ETag | 回 **200** ⇒ 304 来自服务端真的比对 |
+ *
+ * 所以把验证器与上一次的 JSON 记在这里,稳态下整个读取面从「真消耗」变成
+ * 「有 round-trip、0 额度」。**正确性依据**:ETag 是表示的哈希,内容一变 GitHub
+ * 就回 200 而不是 304 ⇒ 缓存只会在内容未变时命中,不会返回过期数据。
+ *
+ * ⚠️ **只对 GET 生效**。POST/PATCH/PUT/DELETE 是变更,记进来就是把副作用缓存了。
+ *
+ * ⚠️ **有界**:键是路径(含 PR 号),不设上限会随浏览历史无限增长。
+ * 满了就淘汰**最久未用**的一条;这不是正确性机制,是内存纪律。
+ */
+const CONDITIONAL_CACHE_LIMIT = 256;
+/** @type {Map<string, {etag: string|null; lastModified: string|null; json: unknown}>} */
+const conditionalCache = new Map();
+
+/** 缓存键:`路径 + Accept`(同一路径换 Accept 是两个表示,不能互相顶替)。 */
+function conditionalKey(path: string, accept: string | undefined): string {
+  return `${accept ?? ''}\u0000${path}`;
+}
+
+/** 读一条(命中就把它移到 Map 末尾 = 最近使用)。 */
+function conditionalGet(key: string): { etag: string|null; lastModified: string|null; json: unknown } | undefined {
+  const hit = conditionalCache.get(key);
+  if (hit !== undefined) {
+    conditionalCache.delete(key);
+    conditionalCache.set(key, hit);
+  }
+  return hit;
+}
+
+/** 写一条,超出上限就淘汰最久未用的。 */
+function conditionalSet(key: string, value: { etag: string|null; lastModified: string|null; json: unknown }): void {
+  conditionalCache.delete(key);
+  conditionalCache.set(key, value);
+  while (conditionalCache.size > CONDITIONAL_CACHE_LIMIT) {
+    const oldest = conditionalCache.keys().next();
+    if (oldest.done === true) {
+      break;
+    }
+    conditionalCache.delete(oldest.value);
+  }
+}
+
+/** 探针用:清掉记忆体,让下一轮回到「全部 200」。 */
+export function resetConditionalCache(): void {
+  conditionalCache.clear();
+}
+
+/** 探针用:当前记住了多少条。 */
+export function conditionalCacheSize(): number {
+  return conditionalCache.size;
+}
+
+/**
+ * 经 host 代理发一次 GitHub REST 调用(**不**带条件请求语义的裸传输)。
  * 令牌只存在 host(浏览器不接触),顺带绕开 CORS 与匿名限额;
  * host 侧已把 401/403/404/422 归一成中文 message。
  */
-async function ghRequest(path: string, opts: GhOpts = {}): Promise<GhResponse> {
+async function ghTransport(path: string, opts: GhOpts = {}): Promise<GhResponse> {
   const payload: Record<string, unknown> = {
     path,
     method: opts.method ?? 'GET',
   };
   if (opts.accept !== undefined) payload.accept = opts.accept;
   if (opts.body !== undefined) payload.body = opts.body;
+  if (opts.etag !== undefined) {
+    payload.etag = opts.etag;
+  }
+  if (opts.ifModifiedSince !== undefined) {
+    payload.ifModifiedSince = opts.ifModifiedSince;
+  }
 
   let res: Response;
   try {
@@ -119,7 +221,104 @@ async function ghRequest(path: string, opts: GhOpts = {}): Promise<GhResponse> {
   }
   const value = checked.value;
   lastRemaining = value.remaining ?? lastRemaining;
-  return { status: value.status, json: value.json, link: value.link ?? null };
+  return {
+    status: value.status,
+    json: value.json,
+    link: value.link ?? null,
+    etag: value.etag ?? null,
+    lastModified: value.lastModified ?? null,
+  };
+}
+
+/**
+ * 带条件请求记忆的 GET。**304 ⇒ 回上一次的 JSON**,调用方完全不必知道 304 存在。
+ *
+ * 这在**一个**地方给全仓所有读取面(Changes / History / Code / Issues /
+ * Pull requests / Actions / 通知轮询)加上「稳态 0 额度」,而不是每一处各写一遍。
+ * 三个例外:
+ *  - `opts.method` 不是 GET(或给了 `body`)⇒ 直通,不读也不写记忆体;
+ *  - `opts.noCache` ⇒ 直通(硬刷新);
+ *  - 没拿到 ETag 的资源(如 Search 端点)⇒ 记忆体写不进去,自然退化成每轮 200。
+ *
+ * @param path - `/repos/...` 或完整 URL。
+ * @param opts - 见 {@link GhOpts}。
+ */
+async function ghRequest(path: string, opts: GhOpts = {}): Promise<GhResponse> {
+  const isGet = (opts.method ?? 'GET') === 'GET' && opts.body === undefined;
+  if (!isGet || opts.noCache === true) {
+    return ghTransport(path, opts);
+  }
+
+  const key = conditionalKey(path, opts.accept);
+  const remembered = conditionalGet(key);
+  const sent = remembered === undefined
+    ? opts
+    : {
+      ...opts,
+      ...(remembered.etag !== null ? { etag: remembered.etag } : {}),
+      ...(remembered.lastModified !== null ? { ifModifiedSince: remembered.lastModified } : {}),
+    };
+
+  const response = await ghTransport(path, sent);
+
+  if (response.status === 304) {
+    if (remembered === undefined) {
+      /*
+       * 我们**没有**发过验证器却收到 304 —— 只能是代理层或中间缓存的问题。
+       * 抛出来而不是编一个空值:静默把空数据当「没有评论」正是本仓反复修的缺陷类。
+       */
+      throw new GhError('代理回了 304,但我们没有发过条件请求头', 304);
+    }
+    conditionalSet(key, {
+      etag: response.etag ?? remembered.etag,
+      lastModified: response.lastModified ?? remembered.lastModified,
+      json: remembered.json,
+    });
+    /*
+     * 对调用方报 **200 + 上一次的 JSON**:304 是传输层的细节,不是业务结果。
+     * 把 304 漏出去会让每个调用方各自处理一次,迟早有一处忘掉。
+     */
+    return { ...response, status: 200, json: remembered.json };
+  }
+
+  if (response.status === 200 && (response.etag !== null || response.lastModified !== null)) {
+    conditionalSet(key, {
+      etag: response.etag,
+      lastModified: response.lastModified,
+      json: response.json,
+    });
+  }
+
+  return response;
+}
+
+/**
+ * **明确要条件语义**的一次读取 —— 给「我要自己拿 `Last-Modified`」的调用方用
+ * (通知轮询的第一层;它走的**不是**上面的记忆体,状态由调用方持有)。
+ *
+ * ⚠️ 它**不碰** {@link conditionalCache}:`/notifications` 的验证器由
+ * `notifications.ts` 显式管,免得两条状态互相顶替。
+ *
+ * @param path - 完整绝对路径。
+ * @param since - 上一轮的 `Last-Modified`。
+ * @param etag - 上一轮的 `ETag`。
+ * @returns 304 ⇒ `notModified:true`(`json` 为 `null`,调用方保留自己的上一次读数)。
+ */
+export async function ghReadConditional<T>(
+  path: string,
+  since: string | null,
+  etag: string | null = null,
+): Promise<{ notModified: boolean; json: T | null; etag: string | null; lastModified: string | null }> {
+  const response = await ghTransport(path, {
+    ...(since === null ? {} : { ifModifiedSince: since }),
+    ...(etag === null ? {} : { etag }),
+  });
+  return {
+    notModified: response.status === 304,
+    json: (response.json as T | null) ?? null,
+    etag: response.etag,
+    lastModified: response.lastModified,
+  };
 }
 
 /**
@@ -193,7 +392,29 @@ export async function ghRest(path: string, opts: GhOpts = {}): Promise<unknown> 
   return r.json;
 }
 
-export interface GhUser { login: string }
+/**
+ * GitHub 的用户对象。
+ *
+ * ⚠️ **2026-10-09 起多了四个可选字段**,理由是「类型比载荷窄」这件事在本仓
+ * 已经咬过一次:上游 `IAPIIdentity`(`lib/api.ts:158`)需要
+ * `id` / `avatar_url` / `html_url` / `type`,而 GitHub 的**真实载荷里一直都有**
+ * 这四个 —— 原来只声明 `login` 只是「我们没用到」,不是「服务端没给」。
+ * 通告详情对话框要渲染头像与作者链接(`ui/notifications/pull-request-comment-like.tsx`
+ * 用 `<Avatar user={…}/>`),所以这条类型必须补上,否则转换层只能靠一个
+ * 无检查的 `as` 去偷运行时字段。
+ *
+ * 四个都标**可选**:它们不是我们主动取的字段,缺席时必须能表达「这次没有」,
+ * 而不是编一个 `''` 出来冒充。
+ */
+export interface GhUser {
+  login: string;
+  /** 账号 id(上游 `IAPIIdentity.id`)。 */
+  id?: number;
+  /** 头像地址(上游 `IAPIIdentity.avatar_url`)。 */
+  avatar_url?: string;
+  /** 主页地址(上游 `IAPIIdentity.html_url`)。 */
+  html_url?: string;
+}
 export interface GhLabel { name: string; color: string }
 export interface GhIssue {
   number: number; title: string; state: 'open' | 'closed'; html_url: string;
