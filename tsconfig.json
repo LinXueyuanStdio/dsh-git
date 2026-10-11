@@ -49,6 +49,19 @@
       // `docs/probes/shim-node-util-probe.mjs` 对着真 `node:util` 钉住。
       "util": ["./src/client/shim-node-util.ts"],
       /*
+       * `crypto`(2026-10-09,与 `scripts/build.mjs` 的 `clientAlias.crypto` **同源**)。
+       *
+       * 唯一使用方是镜像 `src/core/desktop/ui/lib/object-id.ts:1` 的
+       * `randomBytes(8).toString('base64url')`。不补这条,那一个文件就是 3 条
+       * TS2307/TS2305,而它们**不是**产品缺陷(替身就在旁边)。
+       *
+       * ⚠️ 与上面 `util` 那条记的是同一件事:esbuild **也会读**这份 `paths`。
+       * 两处都写,是为了不让解析依赖「esbuild 恰好读 paths」这个隐式事实。
+       * 替身的正确性由 `docs/probes/shim-node-crypto-probe.mjs` 对着真
+       * `node:crypto` 逐字节钉住。
+       */
+      "crypto": ["./src/client/shim-node-crypto.ts"],
+      /*
        * `byline-real`(2026-10-08,byline 改成真依赖时新增)。
        *
        * 它**不是 npm 上的包**,是宿主替身 `src/host/shims/byline.ts` 用来拿
@@ -120,6 +133,43 @@
    * (那时删掉本排除);② 或者本仓给 client 半补一个**不含 node 类型**的 dugite
    * 类型替身(那要同时解释为什么值得养第二份声明,见
    * `docs/probes/README-probe-index.md` §二.1 的「一个模块名一个替身」纪律)。
+   *
+   * ---
+   *
+   * `src/core/desktop/ui/dispatcher/dispatcher.ts`(4,356 行,2026-10-08 逐字抄进来)
+   * 是**第四个**被本程序排除的镜像件,**理由与上面三条同源但更强** ——
+   * 上面三条是「装 dugite 之后**副作用**污染了检查」,这一条是「它本身就是**纯代价**」:
+   *
+   * **为什么排除**:
+   *   1. **它在浏览器半零 importer**(实测:四个通知详情对话框写的是
+   *      `import { Dispatcher } from '../dispatcher'`,**只出现在类型位置**;而
+   *      `ui/dispatcher/index.ts` 是本仓手写的替身、**不** re-export `./dispatcher`。
+   *      把四个对话框按浏览器半打一次,产物里**没有**本文件的任何文本;
+   *      `lib/client.js.map` 的 `sources`(825 条)**0** 命中)⇒ 排除**不减少任何真实覆盖**;
+   *   2. 留着它要给棘轮**加 49 条诊断**(全部是环境/依赖面:缺模块 TS2307 ×8、
+   *      客户端替身缺上游导出名 TS2305/TS2724 ×14、`models/popup.ts` 替身的
+   *      `PopupType` 收窄 TS2322 ×12、隐式 any TS7006 ×10、TS2339 ×2、TS2345 ×2),
+   *      而这 49 条**换不来任何东西** —— 它不是运行期路径。
+   *
+   * **为什么是排除而不是删除**:它与上游**字节一致**(`verify-mirror` 记 `SAME`),
+   * 而上游一直可重抄 ⇒ 按「先做,不删」保留在树里;排除只影响**类型程序**,
+   * 一个字节都不动。
+   *
+   * **副作用(要盯住)**:本程序是「浏览器半禁止 node 内置」的机器检查。
+   * `dispatcher.ts` 里那 8 条 TS2307 有一半是 node/dugite 面(`lib/git/cherry-pick`、
+   * `lib/cli-action`、`ui/lib/install-cli` 一族),排除之后**这些模块名在 client 程序里
+   * 再没有别的引用点**吗?—— 有:同一批闭包件(**已经在 host 根里**)由
+   * `tsconfig.host-mirror.json` 检查;`ui/lib/install-cli` 与 `ui/secret-scanning/**`
+   * 今日在两个 client/host 根里都**不存在**,所以那条「客户端没有落点」的事实
+   * 不是靠本文件才成立的。**判据由 `docs/probes/dispatcher-closure-probe.mjs` 常驻钉住**
+   * (C 组登记 274 模块 / 82 个不在 client 根 / 53 host 根 / 29 两处都没有)。见
+   * `scripts/type-baseline.json` 的 `$dispatcherNote`。
+   *
+   * **恢复条件(两条任一)**:① **先解闭包** —— 把 `dispatcher.ts` 的 82 个 client 根外
+   * 依赖补齐(其中 53 个是 dugite/dexie/keytar/trampoline 面,**搬不进浏览器半** ⇒
+   * 这条实际上要先做宿主分段);② **先做宿主分段** —— 让上游那 4,356 行只在宿主半执行
+   * (那时它属于 `tsconfig.host.json` 或 `tsconfig.host-mirror.json`,不该回到本程序)。
+   * 恢复时把这一行从 `exclude` 删掉,并重跑 `check-types` 按 `--write-baseline` 收紧。
    */
   "exclude": [
     "node_modules",
@@ -129,6 +179,7 @@
     "screenshots",
     "src/core/desktop/lib/git/rebase.ts",
     "src/core/desktop/lib/git/reorder.ts",
-    "src/core/desktop/lib/git/squash.ts"
+    "src/core/desktop/lib/git/squash.ts",
+    "src/core/desktop/ui/dispatcher/dispatcher.ts"
   ]
 }

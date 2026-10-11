@@ -82,6 +82,15 @@ const clientAlias = {
    * 替身与真 `node:util` 的等价性由 `docs/probes/shim-node-util-probe.mjs` 钉住。
    */
   util: './src/client/shim-node-util.ts',
+  /*
+   * `crypto`(2026-10-09 新增)的唯一使用方是镜像
+   * `src/core/desktop/ui/lib/object-id.ts:1` 的 `randomBytes(8).toString('base64url')`。
+   *
+   * 为什么不给它一个自增计数器:那个 id 会进 DOM(`aria-labelledby` / iframe 标题),
+   * 而**可预测且跨组件实例递增**的值迟早被谁当成「渲染次数」依赖上。理由与
+   * 「编码没实现就抛」的约定都写在 `src/client/shim-node-crypto.ts` 的文件头。
+   */
+  crypto: './src/client/shim-node-crypto.ts',
 };
 
 /**
@@ -104,7 +113,23 @@ const clientAlias = {
  * 它们仍然是「指向不存在的 URL」,但那是 goal 文档 §5 已登记的
  * 「**不是**缺陷」现象(只有 `NoDiffImage` 那一张被点名),本项刻意不扩范围。
  */
-const clientLoader = { '.svg': 'dataurl' };
+const clientLoader = {
+  '.svg': 'dataurl',
+  /*
+   * `.css` 当**文本**读(2026-10-09 新增)。
+   *
+   * 唯一使用方是 `src/client/sandboxed-markdown-host.ts` —— 镜像
+   * `ui/lib/sandboxed-markdown.tsx:232-235` 在运行期
+   * `readFile(Path.join(__dirname, 'static', 'markdown.css'), 'utf8')` 把一份静态样式
+   * 塞进 iframe。浏览器半没有 `__dirname` 也没有文件系统,所以那份样式的**唯一**
+   * 正确来源是**构建期**把它变成字符串。这条 loader 让
+   * `src/client/static/markdown.css` 可以被 `import` 成一个字符串常量。
+   *
+   * ⚠️ 它**不**参与页面样式:`.gw-*` 那些规则在 `src/client/styles.ts` 的那个巨型
+   * 模板字面量里,与这条 loader 无关(`check-template-literals` 仍然只管那一份)。
+   */
+  '.css': 'text',
+};
 const clientInject = ['./src/client/desktop-globals.ts'];
 
 // react 系与 @deepseek-ai/* 由宿主 loader 提供,必须保持 external。

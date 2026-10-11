@@ -108,7 +108,7 @@ import { DiffHeader } from '../core/desktop/ui/diff/diff-header.tsx';
 import { Resizable } from '../core/desktop/ui/resizable/index.ts';
 import { setGitShowHost } from '../core/desktop/lib/git/show.ts';
 import { setFileSystemHost } from '../core/desktop/lib/file-system.ts';
-import { setFsPromisesHost } from './shim-node-fs-promises.ts';
+import { installSandboxedMarkdownStyles } from './sandboxed-markdown-host.ts';
 
 /* ============================================================================
  * 宿主取数钩子(模块作用域安装,幂等)
@@ -253,8 +253,16 @@ function installHostFileHooks(): void {
     },
   });
 
-  /** 上游 `lib/path-exists.ts` 的 `access`:存在 → resolve,不存在 → reject(ENOENT)。 */
-  setFsPromisesHost({
+  /**
+   * 上游 `lib/path-exists.ts` 的 `access`:存在 → resolve,不存在 → reject(ENOENT)。
+   *
+   * ⚠️ **2026-10-09 起这一份要经过 {@link withSandboxedMarkdownStyles} 合并**:
+   * 「沙箱 markdown 的静态样式」那条供给(`readFileText`)也必须挂在同一个宿主对象上。
+   * 直接再调一次 `setFsPromisesHost({ readFileText })` 会把上面的 `access` 抹掉 ⇒
+   * 右键菜单退化成永远只有「File Does Not Exist on Disk」。合并的理由与
+   * `markdown.css` 的来路都写在 `src/client/sandboxed-markdown-host.ts` 的文件头。
+   */
+  installSandboxedMarkdownStyles({
     access: async (absolutePath) => {
       const split = await splitRepoPath(absolutePath);
       if (split === null) throw enoent(absolutePath);
@@ -317,9 +325,8 @@ function installHostFileHooks(): void {
       if (size === null) { throw enoent(absolutePath, 'stat'); }
       return { size };
     },
-  });
+});
 }
-
 installHostFileHooks();
 
 /* ============================================================================

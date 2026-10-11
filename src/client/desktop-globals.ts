@@ -70,3 +70,104 @@ export const setImmediate = (handler: (...args: Array<unknown>) => void, ...args
 export const clearImmediate = (handle: number): void => {
   (globalThis as { clearTimeout: (id: number) => void }).clearTimeout(handle)
 }
+
+/*
+ * **Node 的 `Buffer`(最小子集)** —— 2026-10-09 补,理由是实测出来的**两个缺陷**。
+ *
+ * ## 为什么需要它(这两条都是「接上 ③ 之后才可达」的)
+ *
+ * 1. **`ui/lib/sandboxed-markdown.tsx:173`**:
+ *
+ *    ```ts
+ *    const b64src = Buffer.from(src, 'utf8').toString('base64')
+ *    this.frameRef.src = `data:text/html;charset=utf-8;base64,${b64src}`
+ *    ```
+ *
+ *    浏览器里没有 `Buffer` ⇒ 这一行**抛** `ReferenceError`,`renderMarkdown` 的
+ *    promise 被拒 ⇒ **沙箱 markdown 的正文永远不渲染**。这条在 ③ 之前不可能发生:
+ *    那个组件当时**零渲染方**(`grep -rn "SandboxedMarkdown" src/client` 只命中
+ *    本文件的 import)。实测现场:本仓
+ *    `docs/probes/notification-dialog-wiring-probe.mjs` 第一次跑到 W1 时,
+ *    弹出的 `#pull-request-comment` 里**只有作者行、没有 iframe**。
+ * 2. **`lib/git/git-delimiter-parser.ts:23`**:`Buffer.isBuffer(value) ? … : value.split('\0')`。
+ *    同上,缺 `Buffer` 就是 `ReferenceError`(那条链今天只由宿主半走,但镜像文件
+ *    是同一份)。
+ *
+ * ## 它**不是** Node 的 `Buffer`
+ *
+ * 只实现**被真正调用过**的那两个成员,而且:
+ *  - `from` 只接受**字符串**输入(两个调用点都是),编码只认 `'utf8'`;
+ *    其余**抛** —— 与 `shim-node-crypto.ts` / `shim-node-fs-promises.ts` 同一约定:
+ *    **不许静默回一个看起来对的值**。
+ *  - `isBuffer` 恒 `false`:浏览器半**没有**任何一个真 `Buffer` 实例
+ *    (`git-delimiter-parser` 的另一个分支要的是「值已经是 Buffer 就按字节切」,
+ *    而在浏览器里那个分支本来就到不了;恒 `false` 让它走 `value.split('\0')`,
+ *    也就是**正确**的那一支)。
+ *
+ * 进 `clientInject`(与上面 `setImmediate` 同一机制),所以镜像文件保持一字不改。
+ * ⚠️ **tsc 看不见 `inject`** —— 那两条 TS2591 要靠
+ * `src/client/node-globals.d.ts` 里的 `declare const Buffer` 才消;两份必须同源,
+ * 动一份就要动另一份。
+ */
+export const Buffer = {
+  /**
+   * 字符串 → 一个能 `toString('base64')` 的最小对象。
+   * @param input - 输入字符串。
+   * @param encoding - 只支持 `'utf8'`(省略即 utf8)。
+   * @throws {TypeError} 传了别的编码时**抛**,不静默按 utf8 处理。
+   */
+  from(input: string, encoding: string = 'utf8'): { toString(enc: string): string } {
+    if (encoding !== 'utf8') {
+      throw new TypeError(`Buffer.from 的浏览器最小替身只实现了 'utf8',收到 ${JSON.stringify(encoding)}`)
+    }
+    return {
+      toString(enc: string): string {
+        if (enc !== 'base64') {
+          throw new TypeError(`Buffer#toString 的浏览器最小替身只实现了 'base64',收到 ${JSON.stringify(enc)}`)
+        }
+        return utf8ToBase64(input)
+      },
+    }
+  },
+  /**
+   * 恒 `false`(见上面那段「不是 Node 的 Buffer」的理由)。
+   * @param _value - 被检查的值。
+   */
+  isBuffer(_value: unknown): boolean {
+    return false
+  },
+}
+
+/** RFC 4648 的标准字母表。 */
+const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+/**
+ * `utf8 → base64`。
+ *
+ * 用 `TextEncoder` 取字节(它按 UTF-8 编码,与 Node 的 `Buffer.from(s,'utf8')` 一致),
+ * 再手工做 base64。**不**用 `btoa`:它只吃 latin1,把多字节字符直接塞进去是错的
+ * (`sandboxed-markdown.tsx:171-172` 的注释写的正是上游为什么绕开 `btoa`)。
+ * @param text - 输入文本。
+ */
+function utf8ToBase64(text: string): string {
+  const bytes = new TextEncoder().encode(text)
+  let out = ''
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0 = bytes[i] ?? 0
+    const b1 = bytes[i + 1]
+    const b2 = bytes[i + 2]
+    out += B64[b0 >> 2]
+    out += B64[((b0 & 0x03) << 4) | ((b1 ?? 0) >> 4)]
+    if (b1 === undefined) {
+      out += '=='
+      break
+    }
+    out += B64[((b1 & 0x0f) << 2) | ((b2 ?? 0) >> 6)]
+    if (b2 === undefined) {
+      out += '='
+      break
+    }
+    out += B64[b2 & 0x3f]
+  }
+  return out
+}

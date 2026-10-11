@@ -78,6 +78,25 @@ export interface IFsPromisesHost {
    * @param path - 绝对路径(见 `fileURLToPath` 的边界:调用方传进来的可能是 `file://` 地址)。
    */
   readonly readFile?: (path: string) => Promise<IReadFileBuffer>
+  /**
+   * 对应 `fs.promises.readFile(path, 'utf8')` —— **文本**重载(2026-10-09 新增)。
+   *
+   * ## 为什么它是**另一个**字段名,而不是给 `readFile` 加一个 encoding 参数
+   *
+   * 上游有**两**个语义完全不同的 `readFile` 调用点:
+   *
+   * | 调用点 | 形状 | 期望 |
+   * |---|---|---|
+   * | `lib/markdown-filters/emoji-filter.ts:134` | `readFile(url)` | **字节**(调用方 `.toString('base64')`) |
+   * | `ui/lib/sandboxed-markdown.tsx:232` | `readFile(path, 'utf8')` | **字符串**(拼进 iframe 的 `<style>`) |
+   *
+   * 并成一个「按 encoding 分派」的函数,就是让**返回类型随参数变**的函数去接两个
+   * 调用点 —— 那正是本仓反复出现的「替身悄悄偏离真契约」缺陷类:回字节给要字符串的
+   * 那处,`<style>` 里会出现 `[object Object]` 而**不报错**。所以类型层直接分开。
+   *
+   * @param path - 绝对路径。
+   */
+  readonly readFileText?: (path: string) => Promise<string>
 }
 
 /**
@@ -195,9 +214,13 @@ export async function realpath(p: string): Promise<string> {
  * ## 契约由调用点钉死(不是由我选)
  *
  * 调用点是 `imageBuffer.toString('base64')` ⇒ 返回**必须是字节**,不能是字符串
- * (见 `IFsPromisesHost.readFile` 的 ⚠️)。因此签名刻意**不带 `encoding` 参数**:
- * 上游调用点不传 encoding,而我若接受一个 `encoding` 却不按它分派,那才是真正的
- * 静默偏离 —— 需要 utf8 文本读取时应当另加一个**显式的**重载,而不是在这里假装。
+ * (见 `IFsPromisesHost.readFile` 的 ⚠️)。
+ *
+ * ⚠️ **2026-10-09 起签名带了 `'utf8'` 重载** —— 但那是**另一个**重载,不是「按参数
+ * 分派同一个返回值」:传 `'utf8'` 时返回 `string`,不传时返回字节。原来这里写的是
+ * 「需要 utf8 文本读取时应当另加一个**显式的**重载,而不是在这里假装」——
+ * 现在就是照那句话做的(`ui/lib/sandboxed-markdown.tsx:232` 的
+ * `readFile(path, 'utf8')` 是那个重载的唯一调用点,而它也是**逐字镜像**的)。
  *
  * ## 为什么可以是「抛错的」
  *
@@ -209,11 +232,33 @@ export async function realpath(p: string): Promise<string> {
  * @param path - 绝对路径(注意:上游传的是 `fileURLToPath(emoji.url)` 的结果,见那个函数的边界)。
  * @returns 一份能 `toString('base64')` 的字节。
  */
-export async function readFile(path: string): Promise<IReadFileBuffer> {
+export async function readFile(path: string): Promise<IReadFileBuffer>
+export async function readFile(path: string, encoding: 'utf8'): Promise<string>
+export async function readFile(path: string, encoding?: 'utf8'): Promise<IReadFileBuffer | string> {
+  if (encoding === 'utf8') {
+    if (host === null || host.readFileText === undefined) {
+      throw enoent(path, 'readFile')
+    }
+    return host.readFileText(path)
+  }
   if (host === null || host.readFile === undefined) {
     throw enoent(path, 'readFile')
   }
   return host.readFile(path)
 }
 
-export default { realpath, access, stat, readFile }
+/**
+ * `readFile(path, 'utf8')` 的**具名**形式(与上面那个重载同一实现)。
+ *
+ * 为什么两者都在:重载让**逐字镜像**的调用点
+ * (`ui/lib/sandboxed-markdown.tsx:232` 的 `readFile(p, 'utf8')`)不需要改一个字;
+ * 而这个具名导出给**我们自己的**代码与探针一个不会被重载解析规则绕到的入口。
+ *
+ * @param path - 绝对路径。
+ * @returns 文件文本。
+ */
+export async function readFileText(path: string): Promise<string> {
+  return readFile(path, 'utf8')
+}
+
+export default { realpath, access, stat, readFile, readFileText }
