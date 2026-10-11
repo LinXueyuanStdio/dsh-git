@@ -58,6 +58,7 @@
 
 import * as Path from 'path';
 import { installContextMenuHost } from './context-menu-host.tsx';
+import { getConfirmDiscardChanges } from './prefs.ts';
 import { EOL } from './shim-node-os.ts';
 import { showContextualMenu } from '../core/desktop/lib/menu-item.ts';
 import type { IMenuItem } from '../core/desktop/lib/menu-item.ts';
@@ -164,7 +165,12 @@ export interface IChangesFileMenuTarget {
 export interface IChangesFileMenuActions {
   /**
    * 丢弃这些文件的改动。**调用方负责弹确认框**(上游是
-   * `PopupType.ConfirmDiscardChanges`,`:262-267`),与行尾垃圾桶走**同一条**路。
+   * `PopupType.ConfirmDiscardChanges`,`:262-267`)。
+   *
+   * ⚠️ 2026-10 起这是**单文件丢弃唯一的入口**:行尾那颗自造垃圾桶已按用户裁决删除
+   * (功能点 3.1/3.2)。单个文件走 `ChangesView` 的 `menuActions.discard` 时
+   * 读 `confirmDiscardChanges`(上游 `sidebar.tsx:244-254`),多选**恒弹**
+   * (上游 `sidebar.tsx:256-267`),两条语义逐字未变。
    */
   readonly discard: (files: readonly ChangedFile[]) => void;
   /** 批量改「纳入提交」状态(上游 `onIncludeChanged(file, true/false)`,`:767/:775`)。 */
@@ -293,12 +299,27 @@ function resolveTargets(
  * 三个必须保留的细节:
  *  1. 单文件是 `Discard Changes`(不带数量),多文件是 `Discard N Selected Changes`;
  *  2. `askForConfirmationOnDiscardChanges` 为真时**加省略号**表示「还会再问一次」
- *     —— 上游默认值就是真(`app-store.ts:490` 的 `confirmDiscardChangesDefault`),
- *     我们的产品路径也**总是**弹确认框(行尾垃圾桶同一条路)⇒ 恒带省略号;
+ *     —— 上游默认值就是真(`app-store.ts:490` 的 `confirmDiscardChangesDefault`);
  *  3. 那一位设置**只为这一项**服务。
+ *
+ * ## ⚠️ 2026-10(功能点 12.16):省略号现在是**真的**跟着偏好走的
+ *
+ * 改前这里是一句写死的 `'丢弃改动…'`,理由当时也写在上面:「我们的产品路径也总是弹
+ * 确认框 ⇒ 恒带省略号」。12.16 把 `confirmDiscardChanges` 接成了真偏好之后,那句
+ * 理由**不再成立** —— 偏好关掉时再画一个省略号就是在**骗**用户「还会再问」。
+ *
+ * ⇒ 逐字照上游:省略号由 `getConfirmDiscardChanges()` 决定。
+ * · **默认(偏好开着)下产出与改前逐字相同**(`丢弃改动…` / `丢弃选中的 N 个文件的改动…`),
+ *   所以 `changes-file-menu-probe` 那 49 条标签判据不受影响;
+ * · 偏好关掉时变成 `丢弃改动` —— 这正是上游 `:532` 那一行三元表达式的语义。
+ *
+ * ⚠️ 这是 `confirmDiscardChanges` 在**本文件**里的唯一读取点,而且它只影响**文案**,
+ * 不影响**闸门**(闸门全在 `changes-view.tsx` 的 `gateOf`)。上游同样把这一位偏好读在
+ * 两处独立的代码里(`sidebar.tsx:245` 的闸门 + 本条 `:532` 的文案),不是我们多读了一遍。
  */
 function discardLabelOf(paths: readonly string[]): string {
-  return paths.length === 1 ? '丢弃改动…' : `丢弃选中的 ${paths.length} 个文件的改动…`;
+  const label = paths.length === 1 ? '丢弃改动' : `丢弃选中的 ${paths.length} 个文件的改动`;
+  return getConfirmDiscardChanges() ? `${label}…` : label;
 }
 
 /**

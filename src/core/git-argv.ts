@@ -321,6 +321,47 @@ export function commitArgv(opts: {
   return argv;
 }
 
+/**
+ * `git interpret-trailers` 的 argv —— **共同作者(`Co-Authored-By`)那一跳**(功能点 7.15)。
+ *
+ * 逐字照上游 `lib/git/interpret-trailers.ts:152-176` 的 `mergeTrailers()`:
+ *
+ * ```ts
+ * const args = ['interpret-trailers']
+ * args.push('--no-divider')                 // :161
+ * if (unfold) { args.push('--unfold') }     // :163-165(我们不用 unfold)
+ * for (const trailer of trailers) {
+ *   args.push('--trailer', `${trailer.token}=${trailer.value}`)   // :167-169
+ * }
+ * ```
+ *
+ * 三件必须逐字保留的事(每一条都有「看起来一样」的错写法):
+ *  1. **`--no-divider`**:没有它,`interpret-trailers` 会把 `---` 当成「消息到此为止」
+ *     的分隔符(那是 `git am`/`format-patch` 的约定),于是正文里出现一行 `---`
+ *     的提交消息**后半截会被吞进 trailer 区**;
+ *  2. **分隔符是 `=`**(不是 `:`)—— 上游硬编码 `=`(git 按 `trailer.separators`
+ *     配置解析,两处必须同一份口径,否则用户改过配置时行为分叉);
+ *  3. **消息走 stdin**(调用方传 `input`),不进 argv —— 提交消息是用户内容,
+ *     它不是命令行参数。
+ *
+ * ⚠️ 与 `commitArgv` 的分工:本函数只**格式化消息文本**,不提交。
+ * 调用顺序必须是「先 `interpret-trailers` 得到最终消息,再写消息文件、再 `commit`」
+ * (上游 `format-commit-message.ts:33-35` 也是这个顺序)。
+ *
+ * @param trailers - 要合并的 trailer(`Co-Authored-By` 等);**空数组**时调用方不该
+ *   调用本函数(git 对空 trailer 列表仍然会规范化消息里的既有 trailer,那是另一件事)。
+ * @returns 去掉 `git` 前缀的 argv(`withGitBinary` 负责补)。
+ */
+export function interpretTrailersArgv(
+  trailers: readonly { readonly token: string; readonly value: string }[],
+): readonly string[] {
+  const argv = ['interpret-trailers', '--no-divider'];
+  for (const trailer of trailers) {
+    argv.push('--trailer', `${trailer.token}=${trailer.value}`);
+  }
+  return argv;
+}
+
 /** 日志格式:字段用 %x1f 分隔,记录用 %x1e 分隔;消息里的换行不会破坏解析。 */
 const LOG_SEP = '%x1f';
 const LOG_EOR = '%x1e';

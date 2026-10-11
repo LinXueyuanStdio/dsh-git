@@ -53,7 +53,7 @@
  */
 
 import * as React from 'react';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type {
   IFilterListItem,
   SelectionSource,
@@ -64,6 +64,7 @@ import {
 } from '../core/desktop/ui/lib/list/selection.ts';
 import type { SelectionDirection } from '../core/desktop/ui/lib/list/selection.ts';
 import { Grid } from 'react-virtualized';
+import * as ReactDOM from 'react-dom';
 import { __DARWIN__ } from './desktop-globals.ts';
 import { AriaLiveContainer } from '../core/desktop/ui/accessibility/aria-live-container.tsx';
 import { match } from '../core/desktop/lib/fuzzy-find.ts';
@@ -299,8 +300,20 @@ export interface IChangesFileListProps {
   readonly rows: ReadonlyArray<IChangesRowItem>;
   /** 每行的匹配下标(给 `<mark>`;上游 `renderItem(item, matches)` 的第二个实参)。 */
   readonly matchesOf: ReadonlyMap<string, IMatches>;
-  /** 我们的 porcelain 行 → 行组件(由 `changes-view.tsx` 提供;两条路径共用)。 */
-  readonly renderRow: (item: IChangesRowItem, matches: IMatches | undefined, virtual: boolean) => React.ReactNode;
+  /**
+   * 我们的 porcelain 行 → 行组件(由 `changes-view.tsx` 提供;两条路径共用)。
+   *
+   * 第 4 个实参 = **这一行被点击时要调的回调**:
+   *  · 虚拟路径**不传**(行的点击由 `Grid` 的 `onRowClick` 走 `VirtualCell`,见 `cellRenderer`);
+   *  · 平铺路径传的是**本文件的 `onRowClick`**(⇒ 两条路径的鼠标选择语义落在同一个函数上,
+   *    见 `onFlatRowSelect`)。
+   */
+  readonly renderRow: (
+    item: IChangesRowItem,
+    matches: IMatches | undefined,
+    virtual: boolean,
+    onSelect?: (event: React.MouseEvent) => void,
+  ) => React.ReactNode;
   /** 当前「在看哪个 diff」的那些文件(上游 `selectedFileIDs`)。 */
   readonly selectedPaths: ReadonlyArray<string>;
   /** 多选/范围选择的结果(上游 `onFileSelectionChanged(rows)`)。 */
@@ -345,6 +358,47 @@ export interface IChangesFileListProps {
    * 而且这一层**只看相等性、不看字段**;具体形状由调用点负责。
    */
   readonly invalidationProps: unknown;
+  /**
+   * **列表键盘入口的对外句柄**(见下方 {@link IChangesFileListHandle} 与上游
+   * `filter-changes-list.tsx:308-309` / `:1229-1233` 的 `filterListRef`)。
+   *
+   * 用「ref prop + `useImperativeHandle`」而不是 `React.forwardRef`:本组件是
+   * **函数声明**导出(`export function ChangesFileList`),而 `forwardRef` 的包裹写法会
+   * 让整段函数体在缩进上多一层(本仓 `.eslintrc.yml` 不查 `indent`,但那是 1,000 行
+   * 的无谓 diff)。语义与上游同一件事:父级拿到一个**只含 `onKeyDown`** 的句柄。
+   */
+  readonly listKeyDownRef?: React.Ref<IChangesFileListHandle>;
+}
+
+/**
+ * **列表键盘入口的对外句柄** —— 让**兄弟节点**(表头的筛选框)能把按键转进来,
+ * 与上游 `FilterChangesList` 的 `filterListRef` 同形
+ * (`ui/changes/filter-changes-list.tsx:308-309` 的
+ * `React.createRef<AugmentedSectionFilterList<…>>()`,以及 `:1229-1233`):
+ *
+ * ```ts
+ * private onFilterKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+ *   if (this.filterListRef.current) {
+ *     this.filterListRef.current.onKeyDown(event)
+ *   }
+ * }
+ * ```
+ *
+ * 上游那个 ref 的**静态类型**就是 `AugmentedSectionFilterList`(整个组件),所以它
+ * 转发的**也**是那个类的 `public onKeyDown`(`ui/lib/augmented-filter-list.tsx:725-)
+ * —— 也就是列表自己的按键入口。我们这里是同义的一格:**只暴露那一个方法**,
+ * 不把整个组件交出去。
+ *
+ * 事件参数写成 `React.KeyboardEvent<HTMLInputElement>`(而不是内部的
+ * `<HTMLDivElement>`)也是照上游:`onKeyDown` 收的就是**筛选框那个 `<input>`** 上的按键。
+ */
+export interface IChangesFileListHandle {
+  /**
+   * 列表键盘入口(上游 `AugmentedSectionFilterList.onKeyDown`)。
+   *
+   * 返回值只给探针/调试用:`true` = 这个按键被列表接管(内部已 `preventDefault`)。
+   */
+  readonly onKeyDown: (event: React.KeyboardEvent<HTMLInputElement>) => boolean;
 }
 
 /**
@@ -468,11 +522,39 @@ function findNextPageRow(rowCount: number, fromRow: number, listHeight: number, 
  *
  * @param event - 容器上的 `keydown`。
  * @param nav - 导航上下文。
+ * @param fromFilterBox - 这个按键是不是**从表头的筛选框转进来**的
+ *   (上游 `filter-changes-list.tsx:1229-1233` 的 `onFilterKeyDown` 委托)。
+ *   `false`(缺省)= 列表元素自己那条老路径 —— **它一个字都没变**。
+ *   `'down'` / `'up'` = 筛选框转进来的 ↑/↓ —— 这两支走的**不是** `SectionList` 的判据,
+ *   而是上游 `AugmentedSectionFilterList.onKeyDown` 自己的那两支(`:743-778`),
+ *   起点与 `wrap` 都不同(逐条写在下面 ↑/↓ 分支里)。详见
+ *   `docs/probes/changes-filter-focus-down-probe.mjs` 的 `F2`/`F3`。
  * @returns 是否处理了这个按键(`true` ⇒ 调用方直接 `return`)。
  */
-function handleListKeyDown(event: React.KeyboardEvent<HTMLDivElement>, nav: IListKeyNav): boolean {
+function handleListKeyDown(
+  event: React.KeyboardEvent<HTMLElement>,
+  nav: IListKeyNav,
+  fromFilterBox: false | SelectionDirection = false,
+): boolean {
   const { rows, selectedPaths } = nav;
-  if (rows.length === 0) { return false; }
+  /*
+   * ⚠️ 这里**故意没有** `if (rows.length === 0) { return false }` 那条短路(改前有)。
+   *
+   * 上游 `AugmentedSectionFilterList.onKeyDown` 的 **ArrowDown / ArrowUp 两支**是
+   * 「先按行数判要不要选,再**无条件** `event.preventDefault()`」(`:741-791`):
+   *
+   * ```ts
+   * if (key === 'ArrowDown') {
+   *   if (rowCount.length > 0) { …选中第一行 / 把焦点给列表… }
+   *   event.preventDefault()
+   * } else if (key === 'ArrowUp') { …同上…  event.preventDefault() }
+   * ```
+   *
+   * ⇒ 0 行时上游**照样** `preventDefault`。那条短路在「列表自己收键」时看不出区别
+   * (0 行时它什么都不做),但筛选框把按键转进来之后就有区别了:筛选词无匹配时,
+   * 上游仍会吃掉 ↑/↓ —— 光标不会在筛选框里跳。
+   * 读数:`docs/probes/changes-filter-focus-down-probe.mjs` 的 `F4`。
+   */
   const source: SelectionSource = { kind: 'keyboard', event };
   /** 上游 `this.props.selectedRows`(顺序 = 列表顺序)。 */
   const selected = rows
@@ -522,6 +604,62 @@ function handleListKeyDown(event: React.KeyboardEvent<HTMLDivElement>, nav: ILis
 
   if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
     const direction: SelectionDirection = event.key === 'ArrowUp' ? 'up' : 'down';
+    /*
+     * ---------------------------------------------------------------------------
+     * **筛选框转进来的 ↑/↓**:起点是**行 0 或 -1**,不是「当前选中行」
+     * ---------------------------------------------------------------------------
+     *
+     * 上游这两支**不在** `SectionList` 里,而在 `AugmentedSectionFilterList.onKeyDown`
+     * 自己的 `if (key === 'ArrowDown')` / `else if (key === 'ArrowUp')`
+     * (`ui/lib/augmented-filter-list.tsx:743-778`),判据逐字是:
+     *
+     * ```ts
+     * if (key === 'ArrowDown') {
+     *   if (rowCount.length > 0) {
+     *     const selectedRow = findNextSelectableRow(
+     *       rowCount,
+     *       { direction: 'down', row: InvalidRowIndexPath },   // = {section:-1,row:-1}
+     *       this.canSelectRow
+     *     )                                                    // ⇒ 第 0 行
+     *     if (selectedRow != null) { this.setState({ selectedRows: [selectedRow] }, () => list.focus()) }
+     *   }
+     *   event.preventDefault()
+     * } else if (key === 'ArrowUp') {
+     *   if (rowCount.length > 0) {
+     *     const selectedRow = findNextSelectableRow(
+     *       rowCount,
+     *       { direction: 'up', row: { section: 0, row: 0 } },  // 恒从**第一段第一行**出发
+     *       this.canSelectRow
+     *     )                                                    // ⇒ wrap 默认开 ⇒ **最后一行**
+     *     …
+     *   }
+     *   event.preventDefault()
+     * }
+     * ```
+     *
+     * ⚠️ **与 `SectionList` 那条判据的差别是承重的,不能省**:`SectionList.moveSelection`
+     * (`section-list.tsx:925-940`)是**从当前选中行**出发的。于是「筛选到 21 行、
+     * 当前选中 `src/f0002.ts`(在这 21 行里排第 11)」时:
+     *  · `SectionList` 的判据 ⇒ `f0010.ts`(`f0002` 的上一条);
+     *  · 上游筛选框的判据 ⇒ **`f0201.ts`**。
+     * 实测(勘察):**改前**这条差别就在 —— `ArrowUp` 落 `f0101.ts`
+     * (子序列分序后的上一条),而转发要的是**最后一行**。
+     * ⇒ 转发这一格**必须**按来源分流;这也是「照抄上游」而不是「转给一个差不多的处理函数」。
+     *
+     * 上游**没有** shift 分支(`:743-778` 里没有 `event.shiftKey` 的影子)⇒ 筛选框转进来的
+     * ↑/↓ **不带**范围选择语义,与 `moveSelection` 同形。
+     */
+    if (fromFilterBox !== false) {
+      // `row: -1`(=`InvalidRowIndexPath`)让 `selection.ts:106-118` 那个特例生效 ⇒ 往下取第 0 行。
+      const index = findNextSelectableRow(
+        rows.length,
+        { direction, row: direction === 'down' ? -1 : 0 },
+        canSelectRow,
+      );
+      if (index !== null) { moveTo(index); }
+      event.preventDefault();
+      return true;
+    }
     if (event.shiftKey) {
       // 上游 `addSelection`(`:855-905`):方向决定「起点」与「被延长的那一端」。
       if (selected.length === 0) {
@@ -608,11 +746,29 @@ function handleListKeyDown(event: React.KeyboardEvent<HTMLDivElement>, nav: ILis
    *
    * ⚠️ **刻意不挂 `select-all` DOM 事件监听器**:本插件里**没有任何生产者**会派发它
    * (那是 Electron 应用菜单的事),挂一个永远不触发的监听器就是死代码。
+   *
+   * ---------------------------------------------------------------------------
+   * `fromFilterBox`:筛选框转进来的按键**不吃**这一支(一行适配,理由如下)
+   * ---------------------------------------------------------------------------
+   *
+   * 上游筛选框那条链**只认三个键**:`AugmentedSectionFilterList.onKeyDown`
+   * (`ui/lib/augmented-filter-list.tsx:725-801`)只有 `ArrowDown` / `ArrowUp` / `Enter`
+   * 三支 —— 它**没有**任何全选分支。而 `Meta/Ctrl+A` 在上游那个 `<input>` 里落到的是
+   * `TextBox` 自己的默认动作:`<input>` 的 **Select All**(选中的是**筛选词**)。
+   *
+   * 我们这里如果照转不误,筛选框里按 Cmd/Ctrl+A 就会把**整份列表 300 行**全选上 ——
+   * 那是从**列表元素**那条入口(`section-list.tsx:606` 的 `isCmdOrCtrlA`)借来的语义,
+   * 在筛选框里没有上游依据,而且用户想要的显然是「选中筛选词」。
+   * ⇒ 只有这一支按来源分流:筛选框来的按键跳过它(其余 ↑/↓/Home/End/PageUp/PageDown
+   * 全部照转,与上游那三支的判据逐条一致)。
+   * 它**不是**本探针的判据(两档都绿 ⇒ 不承重);只是与上游同口径的一处适配,
+   * 为此在 `--pre-fix` 档里**必须**一起被摘掉才能保证红集合干净。
    */
   const isSelectAllKey = __DARWIN__
     ? event.metaKey && event.key === 'a'
     : event.ctrlKey && event.key === 'a';
   if (isSelectAllKey) {
+    if (fromFilterBox) { return false; }
     event.preventDefault();
     if (rows.length <= 0) { return true; }
     const selectionSource: SelectionSource = { kind: 'select-all' };
@@ -645,7 +801,7 @@ function handleListKeyDown(event: React.KeyboardEvent<HTMLDivElement>, nav: ILis
  * (`match` + `applyFilters`)算好了,所以这里不缺能力,只缺那两层壳。
  */
 export function ChangesFileList(props: IChangesFileListProps): React.ReactNode {
-  const { rows, matchesOf, renderRow, selectedPaths, onSelectionChanged, onItemClick, onItemDoubleClick, onItemContextMenu, onScroll, scrollTop, renderNoItems, postNoResultsMessage, ariaLabel, isCommitting, onPlainKeyDown, invalidationProps } = props;
+  const { rows, matchesOf, renderRow, selectedPaths, onSelectionChanged, onItemClick, onItemDoubleClick, onItemContextMenu, onScroll, scrollTop, renderNoItems, postNoResultsMessage, ariaLabel, isCommitting, onPlainKeyDown, invalidationProps, listKeyDownRef } = props;
 
   const containerRef = useRef<HTMLDivElement>(null);
   const box = useMeasuredBox(containerRef);
@@ -687,6 +843,40 @@ export function ChangesFileList(props: IChangesFileListProps): React.ReactNode {
     // 键盘来源(空格/回车)由镜像的语义接管:上游 `sidebar.tsx:336-349` 只处理 keyboard。
     onItemClick(item.id, { kind: 'mouseclick', event });
   }, [rows, selectedPaths, onSelectionChanged, onItemClick]);
+
+  /**
+   * **平铺路径的行点击 —— 就是虚拟路径那一个 `onRowClick`**。
+   *
+   * ## 为什么要有这一格(功能点 1.3)
+   *
+   * `virtual = box.height > 0 && box.width > 0`(见上面):容器量不到尺寸时走**平铺回退**
+   * (整份列表一次铺开)。**上游没有这条回退** —— 上游 `SectionList` 无论量得到量不到
+   * 都渲染 `Grid`/`AutoSizer`(`references/desktop/app/src/ui/lib/list/section-list.tsx:1278-1292`),
+   * 所以这件事**没有上游对应物可以照抄**;唯一正确的镜像是**我们自己的虚拟路径**。
+   *
+   * 改前平铺路径走的是 `changes-view.tsx` 的 `onRowSelect` ⇒ `store.toggleFile(path, additive)`,
+   * 而那里的 `additive` 把 `event.shiftKey` 也算进去了 ⇒ `shift` 变成「把这一行加进/移出选区」
+   * 的 **additive 切换**,不是「锚点到这一行」的**范围**:
+   *  · 虚拟路径:单击第 0 行 + shift 点第 4 行 ⇒ **5 行** `f0000..f0004`(`H13`);
+   *  · 平铺路径(改前):同一套操作 ⇒ **2 行** `{f0000,f0004}`(`H14` 的旧读数;
+   *    `changes-linkage-probe` 的 `A5` 同形,旧读数 `{f0000,f0006}`)。
+   * 两条路径的**同一个用户动作**给出不同结果,这是语义不一致,不是平铺路径的「另一种设计」。
+   *
+   * ## 怎么改的:复用,不是重写
+   *
+   * 把**同一个** `onRowClick` 通过 `renderRow` 的第 4 个实参交给行组件 —— `shift` 的范围、
+   * `meta`/`ctrl` 的逐个追加、普通单击的「只留这一行」三条分支、以及 `clickAnchor` 这个锚点
+   * 与虚拟路径**逐字同一份代码**(不是一个「差不多的」第二份)。平铺分支只需要按**下标**
+   * 把行包一层(它没有 `Grid` 的 `onRowClick`,只有我们自己 `map` 出来的行)。
+   *
+   * ⚠️ **可达性(不要读成「用户会撞上」)**:真 Chrome 里 `box.height/width` 基本恒 `> 0`,
+   * 平铺路径要靠内存里强制 `virtual=false`(探针)或容器 `display:none`
+   * (`changes-linkage-probe` 的 `A4/A5`)才走到,而 `display:none` 下行的 rect 是 `0×0`
+   * —— 用户**点不到**。所以这是一条**正确性/一致性**修复,不是一条「用户今天正踩着的缺陷」。
+   */
+  const onFlatRowSelect = useCallback((index: number) => (event: React.MouseEvent): void => {
+    onRowClick(index, event);
+  }, [onRowClick]);
 
   const onRowDoubleClick = useCallback((index: number) => {
     const item = rows[index];
@@ -837,12 +1027,31 @@ export function ChangesFileList(props: IChangesFileListProps): React.ReactNode {
     onScroll(newScrollTop);
   }, [box.height, onScroll]);
 
+  /**
+   * **「这次选择变化要不要把焦点搬进列表」** —— 筛选框那条链的焦点搬运待办。
+   *
+   * 为什么要有它、而不是在 `handleListKeyDown` 之后直接判「选中变没变」:
+   * `handleListKeyDown` 是**列表自己**那条老路径的共享入口,鼠标/列表按键那条链
+   * **不能**因为「选中变了」就抢焦点(那会把「点一行」变成「点一行顺带抢焦点」)。
+   * ⇒ 只有筛选框这一条链会**置位**,由它把目标行下标写进来,搬完就清空。
+   *
+   * 写在 `nav.onSelectionChanged` 这一层而不是等响应式回到 `props.selectedPaths`:
+   * `moveTo` / `extendTo` 当场就知道目标行下标,而 store 的更新是**批处理**的
+   * (见 `focusRow` 的注释)。
+   */
+  const focusRequest = useRef<number | null>(null);
+  const notifySelection = useCallback((paths: ReadonlyArray<string>, source: SelectionSource): void => {
+    const index = rows.findIndex((row) => paths.includes(row.id));
+    if (index >= 0) { focusRequest.current = index; }
+    onSelectionChanged(paths, source);
+  }, [rows, onSelectionChanged]);
+
   /** 键盘导航上下文(给模块作用域的 `handleListKeyDown`;`useMemo` 只是不让它每帧新建)。 */
   const nav = useMemo(() => ({
-    rows, selectedPaths, listHeight: box.height, onSelectionChanged, scrollRowToVisible,
-  }), [rows, selectedPaths, box.height, onSelectionChanged, scrollRowToVisible]);
+    rows, selectedPaths, listHeight: box.height, onSelectionChanged: notifySelection, scrollRowToVisible,
+  }), [rows, selectedPaths, box.height, notifySelection, scrollRowToVisible]);
 
-  const onGridKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+  const onGridKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>, fromFilterBox: false | SelectionDirection = false) => {
     /*
      * **多选 + 空格/回车 = 每一行都切一遍**(上游 `section-list.tsx:792-806` 的
      * `toggleSelection`,逐字):
@@ -892,10 +1101,160 @@ export function ChangesFileList(props: IChangesFileListProps): React.ReactNode {
       }
       return;
     }
-    if (handleListKeyDown(event, nav)) {
+    if (handleListKeyDown(event, nav, fromFilterBox)) {
       return;
     }
   }, [rows, selectedPaths, isCommitting, onItemClick, nav]);
+
+  /**
+   * **把列表的键盘入口交给父级** —— 上游 `FilterChangesList.onFilterKeyDown`
+   * (`ui/changes/filter-changes-list.tsx:1229-1233`)转发的就是列表实例的
+   * `public onKeyDown`(`ui/lib/augmented-filter-list.tsx:725-801`):
+   *
+   * ```ts
+   * if (this.filterListRef.current) { this.filterListRef.current.onKeyDown(event) }
+   * ```
+   *
+   * 我们那边结构上有一处**必然的差别**(如实写在 `changes-view.tsx` 的调用点):
+   * 上游筛选框与列表都在 `FilterChangesList` 里(同一个类,`ref` 够得着),而我们的
+   * 筛选框在表头、列表在 `ChangesFileList` 里 —— 所以用**父级的 ref** 把这一格连起来。
+   *
+   * 事件**照转**(不按「白名单键」过滤),与上游一致:上游转的是整个 `KeyboardEvent`。
+   * 两处按来源分流的例外(都是**上游那条链没有的语义**,理由写在各处):
+   *  · **空格**在筛选框里不被吃掉(`:725-801` 没有空格支)⇒ 直接 `return false`;
+   *  · **`Meta/Ctrl+A`** 不在筛选框里全选列表(`section-list.tsx:629-635` 那一支
+   *    **不在**筛选框的链上)⇒ 交给 `handleListKeyDown` 时带上来源、由它跳过。
+   *
+   * ⚠️ **焦点必须由我们搬**(2026-10 实测:不搬它就不动)。
+   *
+   * 上游那两处 `list.focus()`(`augmented-filter-list.tsx:751` / `:776`)在
+   * `setState({ selectedRows }, () => list.focus())` 的回调里;而
+   * `SectionList.scrollRowToVisible`(`section-list.tsx:996-1030`)在滚完之后还会
+   * `this.rowRefs.get(indexPath)?.focus({preventScroll:true})` —— 所以**上游那一侧
+   * 焦点是被搬的**。
+   *
+   * 我们这条虚拟路径上**没有对应的搬运动作**:`Grid` 自己不带 `focus()`(本仓装的
+   * `react-virtualized` 9.x 的 `Grid` 类上没有这个方法),`scrollRowToVisible`
+   * (`:880-917`)只写滚动位置。**实测**(勘察读数):筛选框里按 `ArrowDown`,
+   * `sel` 从 `["src/aaa-normal.ts"]` 变成 `["src/f0002.ts"]`、右栏表头跟着换,
+   * 但 `document.activeElement` **仍然是 `.gw-filter-input`** —— 也就是
+   * 「选中移进去了、焦点没进去」,与上游的半件。⇒ 这里补上 `list.focus()`。
+   *
+   * 判据:`docs/probes/changes-filter-focus-down-probe.mjs` 的 `F2`/`F3`。
+   *
+   * ⚠️ **行下标是调用方给的,不是这里现算的**:下面 `handleListKeyDown` 里
+   * `moveTo(index)` / `extendTo(_, index)` 的 `index` **就是**目标行;
+   * 而这一处读的 `selectedPaths` 是**本次渲染那一份**(store 的更新在 React 17 的
+   * 合成事件里是批处理的,回不到这个闭包里)—— 勘察实测:同一帧里 `sel` 已经变成
+   * `["src/f0002.ts"]`,而这个闭包里的 `selectedPaths` 还是 `["src/aaa-normal.ts"]`。
+   */
+  const focusRow = useCallback((index: number): void => {
+    if (virtual) {
+      /*
+       * `Grid` 的滚动容器(`ReactVirtualized__Grid`)就是那个带 `tabIndex` 的元素
+       * (`Grid.js:709-716` 把它渲成 `document.activeElement` 的落点)。
+       * 用 `gridRef.current` 而不是 `containerRef.current.querySelector(...)`:
+       * 后者要**抄一遍 react-virtualized 的类名**,而类名是它自己的内部约定。
+       */
+      const node = gridRef.current === null ? null : ReactDOM.findDOMNode(gridRef.current);
+      if (node instanceof HTMLElement) { node.focus(); }
+      return;
+    }
+    /*
+     * **平铺路径**:焦点给**行元素**本身。上游也是给行(`rowRefs.get(indexPath)?.focus`),
+     * 而我们那份平铺键盘导航 `changes-view.tsx` 的 `onListKeyDown` 一直是这么做的
+     * (`rows[clamped]?.focus()`)⇒ 两条路径的口径一致。
+     */
+    containerRef.current?.querySelectorAll<HTMLElement>('[role="option"]')[index]?.focus();
+  }, [virtual]);
+
+  useImperativeHandle(listKeyDownRef, () => ({
+    onKeyDown: (event: React.KeyboardEvent<HTMLInputElement>): boolean => {
+      /*
+       * 上游筛选框那条链**只走列表**那一层,`FilterChangesList.onItemKeyDown`
+       * (`filter-changes-list.tsx:1136-1151`,提交中挡空格/回车)**不在**那条链上 ——
+       * 那是 `<AugmentedSectionFilterList onItemKeyDown={…}>` 的属性,由**列表行自己**
+       * 收到的按键触发。所以这里也不重复它。
+       *
+       * ⚠️ **`Enter` 只做了半件**(如实说明,不要读成「与上游同义」):
+       * 上游 `AugmentedSectionFilterList.onKeyDown` 的 `Enter` 支
+       * (`:779-800`)是「**把选中集合设为第一行** + `onRowClick(那一行, keyboard)`」;
+       * 我们这一层把 `Enter` 交给 `onGridKeyDown` 的 `' ' || 'Enter'` 分支
+       * (`:954-973`),它切的是**当前选中行**、**不移动选中集合**。
+       * 「**切换纳入**这件事本身」两条同义,所以「筛选框里 `ArrowDown` 再 `Enter` ⇒
+       * 那一行的纳入翻转」**有**判据(探针 `F6`);而「上游会先跳到第一行」这半件
+       * **没有**判据。
+       */
+      let handled = false;
+      const forwarded = {
+        key: event.key,
+        shiftKey: event.shiftKey,
+        metaKey: event.metaKey,
+        ctrlKey: event.ctrlKey,
+        altKey: event.altKey,
+        preventDefault: (): void => { handled = true; event.preventDefault(); },
+      } as unknown as React.KeyboardEvent<HTMLDivElement>;
+      /*
+       * ⚠️ **空格必须在这里就挡掉**(这一条是探针抓出来的,不是设计时想到的)。
+       *
+       * 上游筛选框那条链**没有任何空格支**:`TextBox.onKeyDown`
+       * (`ui/lib/text-box.tsx:255-293`)只处理 search 型的 `Escape` 与
+       * `onEnterPressed`,然后转给 `onKeyDown`;后者到达的
+       * `AugmentedSectionFilterList.onKeyDown`(`:725-801`)只有
+       * `ArrowDown`/`ArrowUp`/`Enter` 三支。⇒ 上游在筛选框里按空格**就是打一个空格**
+       * (浏览器对 `<input>` 的默认动作),`AugmentedSectionFilterList` 那条链上挂的
+       * 「空格/回车 = 切换纳入」(`filter-changes-list.tsx:1136-1151` 的 `onItemKeyDown`)
+       * 是**列表行**收到的按键才走的那条路,与筛选框无关。
+       *
+       * 我们这层如果照转不查,`.gw-filter-input` 里的空格会被 `onGridKeyDown` 的
+       * `' ' || 'Enter'` 分支吃掉 —— 用户**在筛选框里打不出空格**,而筛选词
+       * 「foo bar」这类带空格的名字从此输不进去。实测(探针 `F6` 的 `--pre-fix` 对照
+       * 与勘察两轮都复现过:一次空格把当前选中行切成了「排除」、筛选词一个字符没变)。
+       * ⇒ 只在这一处按来源分流,**其余键照转**。
+       *
+       * `Enter` **继续转发**(与上游同义:上游那条链的 `Enter` 支
+       * `:779-800` 就是「选中第一行 + `onRowClick(…, {kind:'keyboard'})`」,
+       * 落到我们这一层就是 `onGridKeyDown` 里那个 `' ' || 'Enter'` 分支)。
+       */
+      if (event.key === ' ') { return false; }
+      /*
+       * ⚠️ **两处必须在源头分流**(`onGridKeyDown` 是列表那条老路径的共享入口,
+       * 它自己不知道按键从哪来):
+       *
+       * 1. **全选**:`Meta/Ctrl+A` 在筛选框里**不是**列表的全选(上游那条链
+       *    `augmented-filter-list.tsx:725-801` 只有 ↑/↓/Enter 三支,没有全选;
+       *    浏览器原生的 `<input>` 全选才是用户要的)⇒ 交给 `handleListKeyDown` 时
+       *    带 `fromFilterBox`,让它在全选那一支上**直接返回 false**。
+       * 2. **↑/↓ 的起点**:上游筛选框那两支(`:743-778`)从**行 0 / -1** 出发,不是
+       *    `SectionList.moveSelection` 那样从「当前选中行」出发(实测差别:
+       *    `f0010.ts` vs `f0201.ts`)⇒ 传方向进去。
+       */
+      const isSelectAll = (event.metaKey || event.ctrlKey) && event.key === 'a';
+      if (isSelectAll) {
+        return handleListKeyDown(forwarded, nav, 'down');
+      }
+      const direction: false | SelectionDirection =
+        event.key === 'ArrowDown' ? 'down' : event.key === 'ArrowUp' ? 'up' : false;
+      /*
+       * **把焦点搬进列表** = 上游 `list.focus()`(`augmented-filter-list.tsx:751` / `:776`)
+       * 那一句。待办由 `notifySelection` 在**选中真的换了行**时置位(它当场就知道目标行
+       * 下标),这里按键处理完就兑现 —— 与上游「`setState` 的回调里 `list.focus()`」
+       * 是同一件事(上游读的是 `this.state.selectedRows`,与我们读那个 ref 同理:
+       * 都不能等 props 绕一圈回来,见 `focusRow` 的注释)。
+       *
+       * 选中**没换**时(`notifySelection` 没被调用 ⇒ 待办是 `null`)**不动焦点** ——
+       * 否则「按了一下没反应」(例如 ↑ 已经停在最后一行、或 0 行)会变成
+       * 「焦点莫名其妙被抢走」。
+       */
+      onGridKeyDown(forwarded, direction);
+      const target = focusRequest.current;
+      focusRequest.current = null;
+      if (target !== null) { focusRow(target); }
+      return handled;
+    },
+    // `listKeyDownRef` **不**列进依赖:ref 对象的身份由 React 保证稳定
+    // (`react-hooks/exhaustive-deps` 也判它「unnecessary dependency」)。
+  }), [onGridKeyDown, nav, focusRow]);
 
   const empty = rows.length === 0 ? renderNoItems() : null;
 
@@ -946,9 +1305,13 @@ export function ChangesFileList(props: IChangesFileListProps): React.ReactNode {
       ) : (
         <>
           {empty}
-          {rows.map((row) => (
+          {/*
+            平铺回退:每行按**下标**把 `onRowClick`(与虚拟路径同一个函数)交下去 ——
+            见 `onFlatRowSelect` 的注释(功能点 1.3:改前这里 `shift` 是 additive)。
+          */}
+          {rows.map((row, index) => (
             <React.Fragment key={row.id}>
-              {renderRow(row, matchesOf.get(row.id), false)}
+              {renderRow(row, matchesOf.get(row.id), false, onFlatRowSelect(index))}
             </React.Fragment>
           ))}
         </>

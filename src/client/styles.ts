@@ -58,6 +58,27 @@ const CSS = `
 .gw-dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--dsw-alias-label-tertiary)}
 .gw-dot.ok{background:var(--dsw-alias-state-success-primary)}
 .gw-dot.bad{background:var(--dsw-alias-state-error-primary)}
+
+/* 顶栏右上角那一组(.gw-toolbar-actions)里两个 Octicon 按钮的**图标盒子**:
+   对齐 dsh-better-sidebar 的图标标准 14px(它的工具栏/页签一族一律 size={14}:
+   UploadOverlay.tsx:42 / DiffTab.tsx:40 / SideChatView.tsx:247-259)。
+   为什么必须由 CSS 给:齿轮与 kebab 是**镜像的**上游 ToolbarButton
+   (core/desktop/ui/toolbar/button.tsx:176-179),它渲染 Octicon 时**不传尺寸**,
+   而 Octicon(ui/octicons/octicon.tsx)**没有 size prop** —— 它只把上游默认的
+   height=16 写进 svg 的 height/width **属性**,所以渲染尺寸此前恒为 16(真 Chrome 实测:
+   rect 16x16 / computed 16px / svg 属性 16/16)。镜像树必须字节一致
+   (scripts/verify-mirror.mjs 盯着),所以尺寸只在我们这一层覆盖;svg 的**属性**仍然是 16,
+   被替换的只是「哪条声明生效」—— 是**缩放**,既没改镜像也没有裁切。
+   为什么写在 styles.ts 而不是 scss/desktop-toolbar.scss:那个面管的是这一组的
+   **布局与紧凑度**(margin / gap / border),而图标尺寸是本插件与兄弟插件之间的
+   **视觉标准**;而且同一组的第三个成员(绿点 .gw-dot,8px)本来就在上面那三行里,
+   把这一组的「谁多大」放在一起才不会两处漂移。
+   范围刻意只到 .gw-toolbar-actions:仓库段 / 分支段 / 同步段的图标是**上游尺寸**
+   (真 Chrome 实测都是 16),不在用户这条要求里,一律不动(探针
+   docs/probes/toolbar-icon-size-probe.mjs 的 U1 逐帧盯着它们)。
+   绿点同理不参与:它是**状态点**(纯 CSS 圆点,零字形),与兄弟插件的 StateDot(6~8px)
+   同族,不属于 14px 的图标族 —— 不要顺手把它改成 14。 */
+.gw-toolbar-actions .icon{width:14px;height:14px}
 .gw-hbtn .gw-inbox-badge{position:absolute;top:-2px;right:-2px;min-width:14px;height:14px;padding:0 3px;
   border-radius:999px;font-size:9px;line-height:14px;text-align:center;
   background:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-bg-layer-1);font-weight:600}
@@ -121,15 +142,23 @@ const CSS = `
 
 /* ---------- 主体 / 页脚 ---------- */
 .gw-body{flex:1;min-height:0;position:relative;display:flex}
-.gw-inbox{position:absolute;inset:0;z-index:28;background:var(--dsw-alias-bg-layer-1);display:flex;flex-direction:column;min-height:0}
-.gw-inbox .gw-list{flex:1}
-.gw-inbox-bar{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 12px;
-  border-bottom:1px solid var(--dsw-alias-border-l2);flex:none;flex-wrap:wrap}
-.gw-inbox-return{display:flex;align-items:center;gap:8px;padding:5px 12px;
-  border-bottom:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);flex:none}
-.gw-inbox-dot{width:8px;height:8px;border-radius:50%;flex:none;margin-top:5px;background:transparent;border:1px solid var(--dsw-alias-border-l1)}
-.gw-inbox-dot.on{background:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary)}
-.gw-row.gw-inbox-unread .gw-rowtitle{font-weight:600}
+/*
+ * 2026-10-09 删掉的那一族:.gw-inbox / .gw-inbox-bar / .gw-inbox-return /
+ * .gw-inbox-dot / .gw-row.gw-inbox-unread。
+ *
+ * 它原来是「页签正文之上的一层列表」(那份**可回看的通知列表**)。用户裁决逐字:
+ * 「这个通知界面在 references/desktop 明明是没有的…删 .gw-inbox 列表与那条
+ * 诊断状态条,文字搬进 docs/,右下角只留「通知 N」入口」⇒ 那一层连同它的
+ * 渲染方(notifications-view.tsx 的 NotificationsPanel)一起删了。
+ *
+ * ⚠️ **本注释里一个反引号都不能有**:本文件是**一个模板字面量**,
+ * check-template-literals 要它的反引号总数**恰好 2**(开与闭各一)。
+ * 第一版这段注释把类名写成 .gw-inbox 那样带反引号的形式,于是闸门当场退 1 —— 实测踩过。
+ *
+ * **规则也跟着删,不是只删 JSX**:留着它们就是「样式在、零写入方」。
+ * .gw-hbtn .gw-inbox-badge 是**另一族**(健康按钮的角标),在本轮之前就已经
+ * 没有写入方,属于既有存量,不归这一刀。
+ */
 .gw-footer{display:flex;justify-content:space-between;gap:12px;padding:5px 12px;
   border-top:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-tertiary);font-size:10px}
 
@@ -605,7 +634,131 @@ html[data-gw-toast-clamp] body > div[role="alert"]:has(> span > .gw-toast-mark){
 .gw-input,.gw-area{width:100%;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary);
   background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);border-radius:7px;
   padding:5px 7px}
-.gw-area{resize:vertical;min-height:44px;font-family:inherit}
+.gw-area{min-height:44px;font-family:inherit}
+/* 功能点 7.16 修订(2026-10):提交信息那两个输入框的外框只落**一层**。
+   镜像件把 className 挂在**它自己的容器**上(上游设计:
+   autocompleting-text-input.tsx 的 render() 把 props.className 放进最外层那个 div;
+   而 renderTextInput() 给真 input / textarea 的那张 props 表里根本没有 className),
+   所以上面那两条配方落在的是**容器**;里面那个真元素必须被**剥掉**浏览器自带的
+   框/白底/内边距,否则用户看到的就是「框里套框 + 高度嵌套」—— 2026-10 用户截图报的
+   就是这一条(原话:「怎么包了两层?输入框高度还嵌套了?」)。
+   上游同一套分工见 references/desktop/app/styles/ui/changes/_commit-message.scss:
+   容器画 border / border-radius / background(209-212 行),textarea 那条把 border
+   与 resize 清掉(236-250 行)。我们的框比上游低一层(画在镜像容器上而不是
+   FocusContainer 上),两条理由写在 changes-view.tsx 的 onDescriptionElementRef 注释里。
+   ⚠️ 选择器用**子代**(>):镜像件里那个真元素就是容器的直接子级
+   (render() 的 div 里依次是补全弹层 / label / renderTextInput() / 不可见光标 /
+   aria-live),而且 (0,2,1) 一定赢过 styles-base.ts 与本文件里的 .gw-input(0,1,0)。
+   ⚠️ 摘要那一层**刻意不照抄上游**:上游的框画在**里面那个 input** 上
+   (ui/_text-box.scss:20-25 的 .text-box-component input 加上
+   mixins/_textboxish.scss:7 的 textboxish),我们把它留在同一个位置(容器),
+   换来的是两个框同一套结构、以及下面那条「视觉清零」补丁的**退役**。
+   观感与改前同级:容器的 padding 5px 7px 加上里面那个 input 自己的行盒。
+   实测(探针页,changes-commit-input-box-probe 的 B4/B8):描述框 46px、
+   摘要框 28px,**与同一帧现场造的「7.16 之前那个裸元素」逐像素相等**。
+   ⚠️ min-height 只留一层(容器那一份 44px)。改前两层**各声明一条** 44px —— 那一份
+   在「视觉清零」补丁还在时被掩住(补丁把容器的 padding/border 都清成 0,恰好抵消),
+   所以渲染高看起来是对的;**只要补丁退役或真元素再被补一次类就立刻现形**
+   (实测:补上类之后 46px ⇒ 54px)。这就是用户说的「高度嵌套」的真实形态:
+   高度约束声明了两处,而不是渲染出来高了一截。
+   ⚠️ resize 从「真 textarea」搬到「容器」上(2026-10 第二次修订;用户原话:
+   「右下角的拖拽角要紧贴右下角」)。搬之前:容器承担 padding:5px 7px 而 resize 在
+   里面那个 textarea 上 ⇒ 拖拽角画在**文本域**的右下角,用户看到的框却是**容器**的
+   右下角 ⇒ 角被内缩 7px(右)/5px(下),不贴角。搬过来之后:css 的 resize 只在
+   overflow 不为 visible 的元素上生效,而容器带 overflow:hidden(上游
+   ui/_autocompletion.scss:12 那条 .autocompletion-container)⇒ 角正好画在**容器
+   自己**的右下角,也就是可见框的角上;与上游 _commit-message.scss:242 给 textarea
+   写的 resize:none 也不再打架。
+   ⚠️ **上一版这里写过一个错误的前提,已用真 Chrome 实测推翻**:「把 resize 留在
+   容器上,拖它撑高的是一层看不见的框,里面那个文本域一动不动」。容器是
+   display:flex/flex-direction:column(上游那条),文本域是它的 flex 子项(下面那条
+   规则给了 flex:1 1 auto)⇒ 给容器写一个行内高 +30px,实测容器 48px 变成 78px、
+   **文本域同时 36px 变成 66px**(读数见 changes-commit-input-box-probe 的 B5/B7)。
+   容器上的拖拽角拖的就是用户看得见的那个框,框里的文本域跟着长。
+   退役条件:若哪天文本域不再随容器高度伸缩(例如 flex 那一半被去掉),这条立刻失效
+   —— 探针 B7 量的是**布局后果**,不是 computed 值。
+   ✅ 退役:改前这里还有一条 .gw-input.autocompletion-container 的「视觉清零」补丁
+   (把容器那一份的框清掉,因为当时真元素也带同名类)。两层只剩一层之后它没有存在
+   理由了:容器就是那个唯一的框。由 changes-commit-input-box-probe 的 B2/B3/B4/B5 钉住。 */
+.gw-input.autocompletion-container>input,.gw-area.autocompletion-container>textarea{
+  flex:1 1 auto;border:0;border-radius:0;background:transparent;padding:0;
+  font:inherit;color:inherit;outline:0}
+/* 占位色:改前它来自 .gw-input::placeholder,而那条挂在**真元素**上;框搬到容器之后
+   真元素没有类了,::placeholder 伪元素选不中容器(div 没有占位符)⇒ 不补这一条,
+   占位文字会掉回浏览器默认色。同一个令牌、同一个真源。
+   上游同一件事写在 _commit-message.scss 与 mixins/_textboxish.scss:21-23。 */
+.gw-input.autocompletion-container>input::placeholder,.gw-area.autocompletion-container>textarea::placeholder{
+  color:var(--dsw-alias-label-tertiary)}
+/* 焦点可见性:框在**容器**上,而 div 拿不到 :focus ⇒ 用 :focus-within 复现改前
+   .gw-input:focus 那一句(同一个令牌、同一句 border-color)。
+   ⚠️ 2026-10 第二次修订:这里**曾经**还有第二条通道 —— 描述框外面那层
+   .gw-cm-desc(镜像 FocusContainer)的 box-shadow 描边。用户截图报的「蓝框 + 黑框
+   重复」正是那两条同时在场:蓝框 = FocusContainer 的 :focus-within 描边,
+   黑框 = 镜像容器自己的 border。按用户裁决(「蓝框是不必要的」)描边那条**已删除**,
+   焦点可见性只剩**框自己**这一条 —— 描述框与摘要框共用**同一条规则、同一个令牌**
+   (下面选择器里两个类名并列,不是各写一份)。
+   这条现在是描述框**唯一**的焦点指示:删它 = 无障碍回归。探针 B11 量的就是它
+   (真 Chrome 里读聚焦前/后的 computed border-color,不是「规则在不在」)。
+   ⚠️ 代价(如实登记):焦点落在**操作行的按钮**上时,框不会亮 —— 改前那圈蓝框在
+   那种情况下会亮。框在操作行**外面**;按钮自己的焦点环与本仓其它按钮一致。 */
+.gw-input.autocompletion-container:focus-within,.gw-area.autocompletion-container:focus-within{
+  border-color:var(--dsw-alias-brand-primary)}
+/* 竖向拖拽搬到**容器**上(理由与实测见上面 resize 那一段;上一版它在真 textarea 上)。
+   与上游的一处**有意**差别:上游 _commit-message.scss:242 给这个 textarea 写的是
+   resize:none(因为上游的框是 FocusContainer、动作行在框**里面**,让里面那个元素
+   可拖会和外框打架)。我们的框在镜像容器上、动作行在框**外面**,所以本仓保留改前
+   就有的「描述框可竖向拖」这一能力 —— 只是把角搬到框自己的角上。
+   ⚠️ 下面第二条**必须有**:textarea 的 UA 默认值是 resize:both,本仓原来那条
+   .gw-area...>textarea{resize:vertical} 恰好把它压住了;只把那条改成容器上的
+   resize:vertical 而不显式写 none,里面那个文本域会**按 UA 默认继续画第二个角**
+   (真 Chrome 实测:只搬第一条时内层 computed resize = both,框角上一个角、
+   文本域右上内缩 7px/5px 处还有第二个角 —— 正是用户报的那个样子换了个位置)。
+   探针 B5/B12 都把内层 resize === none 当判据,少了这一条当场变红。 */
+.gw-area.autocompletion-container{resize:vertical}
+.gw-area.autocompletion-container>textarea{resize:none}
+/* 描述框的「假文本框」容器(功能点 7.2;镜像 FocusContainer 渲染出来的那个 div)。
+   只加一条:padding —— 容器边框与文本域之间留出 2px。没有它,容器里唯一可点的
+   「空白」就只有操作行本身,上游 _commit-message.scss:209-220 那个 cursor:text 的
+   假文本框也就名不副实(2px 是刻意的**垂直向**留白:水平向要留就得让文本域变窄,
+   那会真的挪动文字排版)。
+   ⚠️ 刻意**不**给这个 FocusContainer 加边框/底色:框已经由它里面那个镜像容器
+   (.gw-area)承担了,再加一层就是用户报的「包了两层、高度嵌套」。理由见
+   changes-view.tsx 里 FocusContainer 那段注释的「有意偏离」。
+   ⚠️ 2026-10 第二次修订:**焦点描边也从这里删掉了**。它原来是下一条(现已删除的)
+   .gw-cm-desc:focus-within{box-shadow:0 0 0 1px var(--focus-color)} —— 画的是**这个
+   div 的整个盒子**,同时罩住描述框与操作行,而里面的 .gw-area 自己还有一圈 border
+   ⇒ 用户看到的就是「蓝框套黑框」。用户原话:「focus-container 是不是有一个蓝框?
+   desc 自己也有一个黑框,重复了啊。蓝框是不必要的。」按这句话只留框自己那条
+   :focus-within border-color(见上面「焦点可见性」),这个 div 现在**一个可见像素
+   都不画**。探针 B10 数的就是「它在聚焦前后都不画任何框」。 */
+.gw-cm-desc{padding:2px 0}
+/* ⚠️ 这里**曾**有一条 .gw-cm-desc:focus-within{border-radius:7px;
+   box-shadow:0 0 0 1px var(--focus-color)}(2026-10 第二次修订按用户要求删除,原话见
+   上一条注释)。删它的连带影响记在这里,免得下一个人以为是漏了:
+     · changes-description-blank-click-probe 的 D4 原先断言「注入的样式表里有这条
+       规则、且带 box-shadow」;同一次改动把那条判据改成断言**它不在场**,并把
+       「焦点可见性」的承重点移到框自己那条 :focus-within border-color 上;
+     · 它绑的是本面变量桥上的 --focus-color(_dsh-bridge.scss 声明在
+       .gw-desktop-changes 上,指向宿主令牌 --dsw-alias-state-business-primary)。
+       删规则之后 --focus-color 在本面**再无消费方**;桥本身不动(同一个 mixin 还
+       服务别的面),只是这里不再引用它。
+     · 改前那条注释解释过「绑 --dsw-alias-brand-primary 会让 box-shadow 在无宿主
+       主题的环境里按 invalid-at-computed-value-time 静默丢掉」。那条结论仍然成立,
+       只是现在**没有** box-shadow 需要它了:剩下那条 border-color 用的是
+       --dsw-alias-brand-primary,与 .gw-input:focus 同一个令牌 —— 焦点可见性因此
+       仍然依赖宿主主题,探针 B11 为此先给页面注入一份**探针本地的**令牌替身
+       (只说名字、值由探针给),并在同一条判据里做「令牌改值 ⇒ 读数跟着改」的
+       阳性对照,证明读的不是常量。 */
+/* ⚠️ **本注释里一个反引号都不能有**(本文件是一个模板字面量,见文件头与
+   check-template-literals):第一版这里把类名与伪类写成带反引号的形式,构建当场退 1
+   —— 实测踩过,与 .gw-inbox 那一族同一个坑。
+   ⚠️ 这两条里的 .gw-area 那半边**今天按构造就打不中任何元素**:7.16 修订之后
+   .gw-area 只出现在提交框那个**镜像容器**上(一个 div),而 div:focus 与
+   div::placeholder 都永远不匹配。行为已经搬到上面两条
+   (.autocompletion-container:focus-within 与 >textarea::placeholder)。
+   刻意**先做、不删**:.gw-input 那半边仍然服务着设置页 / 对话框 / 克隆弹窗等一批**真**元素,
+   而 .gw-area 若哪天真元素回来,这两条立刻又成立。
+   退役条件:确认全仓再无 .gw-area 的写入方(那时连配方一起删)。 */
 .gw-input:focus,.gw-area:focus{outline:none;border-color:var(--dsw-alias-brand-primary)}
 .gw-input::placeholder,.gw-area::placeholder{color:var(--dsw-alias-label-tertiary)}
 .gw-sel{display:inline-flex;align-items:center;gap:4px;padding:3px 7px;font:inherit;font-size:11px;

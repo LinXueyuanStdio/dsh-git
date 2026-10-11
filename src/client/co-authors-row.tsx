@@ -42,9 +42,11 @@
  *    本仓磁盘上是 React **17.0.2**(`node_modules/react/package.json`),
  *    `useSyncExternalStore` / `useId` 那类 18-only 导出在这里会让整棵树卸掉。
  * 2. **提供者清单由调用方传**(`autocompletionProviders`),而不是像上游那样从
- *    `sidebar.tsx:143-152` 的 `buildAutocompletionProviders(...)` 现建 —— 那一份构造器
- *    在本仓**不在树里**(缺 3 个类型模块 + `dispatcher.refreshIssues`,逐条证据写在
- *    `src/client/store.ts` 的 `coAuthorAutocompletionProviders()` 的 JSDoc 里)。
+ *    `sidebar.tsx:143-152` 的 `buildAutocompletionProviders(...)` 现建 ——
+ *    那一份构造器**2026-10 已经补进树里**(逐字镜像;接缝与空数据源登记在
+ *    `src/client/commit-autocompletion.ts` 的文件头),调用方就是
+ *    `src/client/changes-view.tsx` 的 `CommitBox`(`store.coAuthorAutocompletionProviders(repository)`)。
+ *    ⚠️ 前一版这里写的是「那一份构造器不在树里」——**已经过时**。
  *
  * ## 四、⚠️ 今天它**渲染出 `null`**,而且这是**已知的正确行为**(不是失败)
  *
@@ -54,7 +56,7 @@
  * | 闸门 | 上游 | 我们的现状(证据) |
  * |---|---|---|
  * | `repository.gitHubRepository !== null` | `:815-817` | **恒 false** —— `src/client/changes-view.tsx:3380-3384` 的 `CommitBox` 与 `src/client/repo-state-cache.ts:210` 的 `repoFor()` 都按 `new Repository(path, 0, null, false[, alias])` 构造,而本插件客户端**没有** GitHub API / 认证集成 |
- * | 清单里能找到 `CoAuthorAutocompletionProvider` | `:832-838` | **恒 null** —— `store.coAuthorAutocompletionProviders()` 今天返回 `[]`(缺 `GitHubUserStore` + `GitHubRepository` + `Account`) |
+ * | 清单里能找到 `CoAuthorAutocompletionProvider` | `:832-838` | **恒 null**,但**原因变了**(2026-10):清单现在由**逐字镜像**的 `build-autocompletion-providers.ts` 产出,而它 `:31` 那道 `isRepositoryWithGitHubRepository(repository)` 闸门与上一行**是同一条** —— 四类补全的数据源(emoji 数据集 / issues 库 / accounts)也各缺一件,逐条登记在 `src/client/commit-autocompletion.ts` |
  *
  * ⇒ **「挂上去看不见」不是本文件没接好,是上面两样前置不存在。**
  * 判据 `docs/probes/co-authors-row-probe.mjs` 把这两条**当成读数量**(而不是绕过它们):
@@ -62,10 +64,10 @@
  * `CoAuthorAutocompletionProvider` over 桩 `GitHubUserStore`)⇒ 行**在**,
  * 且加/减人真的走完 `AuthorInput → onAuthorsUpdated → store` 那条链。
  *
- * **退役条件**(两条闸门各自):① 客户端接上 GitHub 仓库身份 ⇒
- * `currentRepository()` 返回带 `gitHubRepository` 的实例;② client 根补上
- * `GitHubUserStore` 与三个类型模块 ⇒ `coAuthorAutocompletionProviders()` 改成
- * `build-autocompletion-providers.ts` 的逐字调用。两条都满足时,本文件**不需要改**。
+ * **退役条件**:客户端接上 GitHub 仓库身份(远端 → `GitHubRepository` 的解析链)⇒
+ * `repository.gitHubRepository` 有真值,上面两条闸门**同时**打开。第②条(补
+ * `GitHubUserStore` + 三个缺件 + 把清单改成 `build-autocompletion-providers.ts` 的逐字调用)
+ * **已于 2026-10 完成** ⇒ 本文件**不需要改**。
  *
  * @module dsh-git/client/co-authors-row
  */

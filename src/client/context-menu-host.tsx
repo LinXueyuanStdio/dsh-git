@@ -26,11 +26,18 @@
  *
  * ## 三个必须在此层处理的细节(否则「点了没反应」)
  *
- *  1. **`role: 'copy'` 那一项没有 `action`**。`side-by-side-diff.tsx:1424-1430` 的 Copy 项
- *     用 `role: selectionLength > 0 ? 'copy' : undefined` 表达「执行原生复制」,因为
- *     Electron 认这个 role。序列化后 `action` 是 `undefined`,所以 `showContextualMenu`
- *     **永远不会**替它做任何事 ⇒ 宿主必须自己执行这个角色(`document.execCommand('copy')`;
- *     它是唯一还能触发原生复制的同步 API,已标记废弃但主流浏览器仍支持)。
+ *  1. **role 类的项没有 `action`**(`role: 'copy'`,以及提交信息输入框那份菜单的
+ *     `{role:'editMenu'}` 展开件:undo/redo/cut/copy/delete/selectAll)。
+ *     `side-by-side-diff.tsx:1424-1430` 的 Copy 项用 `role: selectionLength > 0 ? 'copy' : undefined`
+ *     表达「执行原生复制」,因为 Electron 认这个 role。序列化后 `action` 是 `undefined`,
+ *     所以 `showContextualMenu` **永远不会**替它做任何事 ⇒ 宿主必须自己执行这个角色
+ *     (`EDIT_ROLE_COMMANDS` 那张表 → `document.execCommand`;
+ *     它是唯一还能触发原生编辑/复制的同步 API,已标记废弃但主流浏览器仍支持)。
+ *     ⚠️ **必须先把焦点还给菜单打开前的那个元素**(`runRole` 的第二参):
+ *     Electron 的原生菜单**不抢焦点**,而我们这层把焦点送进了第一个菜单项,
+ *     而 `execCommand('cut'/'copy'/'delete'/'selectAll')` 作用在**当前聚焦的可编辑
+ *     元素**的选区上 ⇒ 不还焦点就是在菜单按钮上执行(实测:有可信手势时
+ *     `execCommand('copy')` 也返回 false)。
  *     执行完 resolve `null`(没有下标可回传)。
  *  2. **抑制浏览器的原生菜单**。上游 diff 的 `onContextMenuText` **从不调用
  *     `preventDefault`**(`side-by-side-diff.tsx:1407-1440`),而 Electron 渲染进程默认
@@ -127,17 +134,49 @@ function style(el: HTMLElement, values: Partial<CSSStyleDeclaration>): void {
   }
 }
 
-/** 执行 Electron role 里浏览器半能做到的那一部分;返回 true 表示已处理。 */
-function runRole(item: ISerializableMenuItem): boolean {
-  if (item.role === 'copy') {
-    try {
-      document.execCommand('copy');
-    } catch {
-      // 忽略:没有可复制内容或浏览器拒绝执行
-    }
-    return true;
+/**
+ * Electron 的**编辑类 role** → 浏览器半真能执行的那几条 `document.execCommand` 命令。
+ *
+ * 表就是**全部**实现面:表外的 role(`editMenu`、`paste`、`pasteandmatchstyle`、
+ * macOS 的听写/表情与符号…)**一律不处理**,返回 false 让调用方照常回传下标
+ * (那类项如果没有 `action`,行为与以前一致:点了什么都不发生 —— 所以产品侧
+ * **不许**摆这种项,登记见 `commit-input-menu.ts` 的模块头)。
+ *
+ * 键统一小写(上游 role 大小写混用,如 `selectAll`),`runRole` 会先 lowercase。
+ */
+const EDIT_ROLE_COMMANDS: Record<string, string> = {
+  undo: 'undo',
+  redo: 'redo',
+  cut: 'cut',
+  copy: 'copy',
+  delete: 'delete',
+  selectall: 'selectAll',
+};
+
+/**
+ * 执行 Electron role 里浏览器半能做到的那一部分;返回 true 表示已处理。
+ *
+ * @param item - 被点中的项(序列化后只剩形状,`action` 已被剥掉)。
+ * @param restoreFocus - 菜单打开前聚焦的那个元素(见文件头第 1 条:编辑命令要打在它上面)。
+ */
+function runRole(item: ISerializableMenuItem, restoreFocus: Element | null): boolean {
+  const command = EDIT_ROLE_COMMANDS[(item.role ?? '').toLowerCase()];
+  if (command === undefined) {
+    return false;
   }
-  return false;
+  if (
+    restoreFocus instanceof HTMLElement &&
+    restoreFocus.isConnected &&
+    document.activeElement !== restoreFocus
+  ) {
+    restoreFocus.focus();
+  }
+  try {
+    document.execCommand(command);
+  } catch {
+    // 忽略:浏览器拒绝执行(与「没有可复制内容」同一档,不抛给调用方)
+  }
+  return true;
 }
 
 /**
@@ -313,7 +352,7 @@ export const openContextMenu: ContextualMenuHost = (items) =>
           event.stopPropagation();
           if (!enabled) return;
           // role 类的项没有 action,由宿主代执行;不返回下标(上游也没得可调)。
-          if (runRole(item)) {
+          if (runRole(item, previouslyFocused)) {
             finish(null);
             return;
           }

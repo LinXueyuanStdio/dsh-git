@@ -4,7 +4,7 @@
  * @module dsh-git/client/changes-view
  */
 
-import { createElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { cloneElement, createElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { api } from './api.ts';
 import { Icon } from './icons.ts';
@@ -36,6 +36,20 @@ import {
   showChangesFileMenu,
   showChangesListMenu,
 } from './changes-file-menu.ts';
+/*
+ * **提交信息输入框的右键菜单** —— 上游 `ui/changes/commit-message.tsx:929-950` 的
+ * `onAutocompletingInputContextMenu`(功能点 7.24)。上游那一份出自 Electron 主进程的
+ * **原生菜单**:协同作者 / 生成 / **`{role:'editMenu'}`** / 拼写开关 + 主进程追加的
+ * 拼写建议块。浏览器半能落地的是**编辑命令**那一组
+ * (undo / redo / cut / copy / paste / delete / selectAll):逐条判定、以及
+ * 「哪几项**登记为未实现**、为什么」写在那个模块的文件头里。
+ * 机制**复用**本文件下面已经在用的 `context-menu-host.tsx`,不新建第二套。
+ */
+import {
+  commitInputStateOf,
+  pasteFromClipboard,
+  showCommitInputMenu,
+} from './commit-input-menu.ts';
 /*
  * **提交选项(齿轮)的菜单** —— 上游 `ui/changes/commit-message.tsx:1053-1130`:
  * 齿轮按钮 `onClick` 里现拼 `IMenuItem[]`(三项 `type:'checkbox'`)再交给
@@ -70,6 +84,7 @@ import type { LineSelectionSpec } from '../core/partial-stage.ts';
 import { conflictSummaryText } from '../core/status-porcelain.ts';
 import { isEmptyOrWhitespace } from '../core/desktop/lib/is-empty-or-whitespace.ts';
 import { Checkbox, CheckboxValue } from '../core/desktop/ui/lib/checkbox.tsx';
+import { FocusContainer } from '../core/desktop/ui/lib/focus-container.tsx';
 import { ForcePushBranchState } from '../core/desktop/lib/rebase.ts';
 import { TipState } from '../core/desktop/models/tip.ts';
 import { formatNumber } from '../core/desktop/lib/format-number.ts';
@@ -83,7 +98,7 @@ import type { IFileListFilterState } from '../core/desktop/lib/app-state.ts';
  * 而我们这里是 `{shown.map(...)}` 的 O(N) 全渲染。本文件现在把列表体交给它。
  */
 import { ChangesFileList, appFileStatusOfChange, changesRowItemsOf, filterChangesRows } from './changes-file-list.tsx';
-import type { IChangesRowItem } from './changes-file-list.tsx';
+import type { IChangesFileListHandle, IChangesRowItem } from './changes-file-list.tsx';
 import { getRememberedScrollTop, setRememberedScrollTop } from './changes-file-list.tsx';
 // `SelectionSource` 必须从 `filter-list` 取:`filter-list.tsx:199` 把它**加宽**成
 // `ListSelectionSource | IFilterSelectionSource`,而镜像列表收的是那个加宽版。
@@ -189,14 +204,37 @@ import { ConfirmCommitFilteredChanges } from '../core/desktop/ui/changes/confirm
  * 本文件挂上去 —— 组件本体(`./co-authors-row.tsx`)一个字不改。
  *
  * ⚠️ **它今天在产品里渲染 `null`,而且这是已知的正确行为**(两条上游闸门都关着:
- * `repository.gitHubRepository === null`、`store.coAuthorAutocompletionProviders()`
- * 返回 `[]`)。本文件**不**伪造 `gitHubRepository`、**不**把开关硬写成 `true` ——
- * 探针 `docs/probes/changes-co-authors-mount-probe.mjs` 把这两条做成同帧读数。
+ * `repository.gitHubRepository === null`,以及**产品那条真构造链**回不出
+ * `CoAuthorAutocompletionProvider` —— 上游 `build-autocompletion-providers.ts:31` 那道
+ * `isRepositoryWithGitHubRepository` 闸门与上面是同一条)。本文件**不**伪造
+ * `gitHubRepository`、**不**把开关硬写成 `true` —— 探针
+ * `docs/probes/changes-co-authors-mount-probe.mjs` 把这两条做成同帧读数
+ * (`G1`;`G3` 只放开仓库那一条 ⇒ 行**真的在**,那是 7.14 的修法本身)。
  *
- * **退役条件**:① 客户端接上 GitHub 仓库身份;② client 根补上 `GitHubUserStore`
- * 与三个类型模块(见 `co-authors-row.tsx` 的文件头)。两条都满足时这四行编辑继续有效。
+ * **退役条件**:客户端接上 GitHub 仓库身份(远端 → `GitHubRepository` 的解析链)——
+ * 那时本文件这四行编辑**不需要改**,闸门自己会开。7.14 的「四个缺件 + 清单接线」那半边
+ * 已于 2026-10 完成(见 `store.ts` 的两个清单方法与 `src/client/commit-autocompletion.ts`)。
  */
 import { CoAuthorsRow } from './co-authors-row.tsx';
+/*
+ * ---------------------------------------------------------------------------
+ * 提交信息两个输入框换**镜像 `AutocompletingInput` / `AutocompletingTextArea`**
+ * (功能点 7.16,2026-10)
+ * ---------------------------------------------------------------------------
+ *
+ * 上游 `ui/changes/commit-message.tsx:1783-1839` 那两个输入框就是这两件
+ * (定义在 `ui/autocompletion/autocompletion-provider.ts:3-16`,本体是
+ * `ui/autocompletion/autocompleting-text-input.tsx` —— 826 行,**早已在树里**;
+ * 本轮之前它只有 Git 页 / 建 tag / 建分支那几条链在用)。
+ *
+ * 为什么**直指定义模块**而不是 `../core/desktop/ui/autocompletion/index.ts`:
+ * 那个 `export *` 桶在 2026-10 之前会把 3 个不存在的模块拉进客户端包,本仓已有
+ * **四条**登记过的偏离就是为这一件事(`autocompleting-text-input.tsx` /
+ * `ref-name-text-box.tsx` / `author-input.tsx` / `user-autocompletion-provider.tsx`)。
+ * 本轮把三个缺件补齐了(桶的回收条件成立),但那四条偏离**刻意不动**
+ * (理由与代价写在报告里),这里的 import 沿用同一口径:直指模块。
+ */
+import { AutocompletingInput, AutocompletingTextArea } from '../core/desktop/ui/autocompletion/autocompletion-provider.ts';
 /*
  * ---------------------------------------------------------------------------
  * 筛选选项弹层换**镜像 `Popover`**(2026-10-10;上游
@@ -260,10 +298,56 @@ import type { MultiCommitOperationKind } from '../core/desktop/models/multi-comm
 import { Dispatcher } from '../core/desktop/ui/dispatcher/index.ts';
 import {
   CONFIRM_COMMIT_FILTERED_CHANGES_KEY,
+  SHOW_COMMIT_LENGTH_WARNING_KEY,
   getConfirmCommitFilteredChanges,
+  getConfirmDiscardChanges,
+  getConfirmDiscardStash,
+  getConfirmUndoCommit,
+  getShowCommitLengthWarning,
   setConfirmCommitFilteredChanges,
   subscribePreference,
 } from './prefs.ts';
+
+/**
+ * **功能点 12.16:三条「确认框要不要弹」的偏好 —— 本文件唯一的读取点。**
+ *
+ * ## 为什么是「一个对象 + 三个函数引用」而不是在闸门里直接调 getter
+ *
+ * 三条偏好各自的闸门有**多处**(丢弃有:逐文件右键单选、行/块级丢弃;贮藏一处;撤销一处)。
+ * ⚠️ 2026-10 起「整文件行尾垃圾桶」那一处**已随行尾三颗图标一起删除**
+ * (用户裁决「上游行内没有任何动作图标,所以可以移除」);单文件丢弃仍由
+ * `menuActions.discard` 的 `targets.length === 1` 那一支覆盖,读的是**同一个键**。如果每处都写 `getConfirmDiscardChanges()`,
+ * 那么「这个键到底被读了几次、有没有哪一处读的是别的键」只能靠 grep,
+ * 而且 `--pre-fix` 那种「把闸门还原成恒弹」的阴性对照就**没有单点可斩**
+ * (见 `docs/probes/changes-confirm-pref-probe.mjs`)。
+ *
+ * 收成一个对象之后:每个键在**本文件里**只有一处绑定,闸门只写 `gateOf.discard()`。
+ * 上游同形 —— 它的三个闸门读的也是 `this.confirmDiscardChanges` /
+ * `this.confirmDiscardStash` / `this.confirmUndoCommit` 这三个**字段**
+ * (`lib/stores/app-store.ts:662-668` 的声明、`:7823-7873` 的 setter),不是三份内联读。
+ *
+ * ## 为什么存的是**函数引用**而不是值
+ *
+ * 存值 = 模块加载那一刻的快照 ⇒ 用户在设置页关掉开关之后,**必须刷新页面**才生效。
+ * 这里存 `getConfirmDiscardChanges` 本身、在**点击那一刻**调用 ⇒ 偏好写入
+ * (localStorage + `PREFERENCE_CHANGED_EVENT`)与下一次点击之间**不需要重挂任何组件**。
+ * 这正是本仓「只写不广播 = 看起来接上了、刷新才变」那条纪律要求的形态。
+ *
+ * ## 默认值是 `true`,所以这次改动**不改变默认行为**
+ *
+ * 三条上游声明的默认都是 `true`(`app-store.ts:490/492/495`),而且**都没有**迁移垫片
+ * (上游唯一那处垫片是 `showCommitLengthWarning`,`:2492-2498`;逐字核对结果写在
+ * `src/client/prefs.ts` 那一段 JSDoc 里)⇒ 改前「恒弹」与改后「默认弹」在用户眼里
+ * 完全一样。**能变的是关掉之后那一档。** 详见下面每个闸门的注释。
+ */
+const gateOf = {
+  /** 丢弃(整文件单选 + 行/块级)。⚠️ 「丢弃全部 / 选中 N 个」**不**读它 —— 见 `headerMenu` 与 `menuActions`。 */
+  discard: getConfirmDiscardChanges,
+  /** 丢弃一条贮藏。 */
+  stash: getConfirmDiscardStash,
+  /** 撤销提交。⚠️ 合并提交**不**受它控制 —— 见 `requestUndo`。 */
+  undo: getConfirmUndoCommit,
+};
 
 /*
  * ⚠️ 这个**门面类必须定义在 `ChangesView` 之前**:`no-use-before-define` 会把
@@ -297,11 +381,25 @@ import {
  * `store.setCommitField('summary', '')` + `('description', '')`。
  */
 class OversizedFilesDispatcher extends Dispatcher {
-  public constructor(private readonly onCommitAnyway: () => Promise<void>) {
+  /**
+   * @param onCommitAnyway - 镜像 `OversizedFiles.onSubmit` 那句
+   *   `dispatcher.commitIncludedChanges(repository, context)` 的落点。
+   *   ⚠️ **它必须收下那个 `context`**(2026-10,功能点 7.15):上游把
+   *   `ICommitContext`(含 `trailers`)交给 dispatcher,再由 dispatcher 交给
+   *   `commitIncludedChanges(repository, context)`;我们这一层的终点是
+   *   `store.commit(trailers)`,所以「共同作者」那一行从弹窗里点「Commit Anyway」
+   *   提交时**照样进提交消息**(丢掉它就等于:同一个表单,走弹窗提交时 trailer 没了)。
+   */
+  public constructor(
+    private readonly onCommitAnyway: (context: ICommitContext) => Promise<void>,
+  ) {
     super();
   }
-  public async commitIncludedChanges(): Promise<boolean> {
-    await this.onCommitAnyway();
+  public async commitIncludedChanges(
+    _repository: Repository,
+    context: ICommitContext,
+  ): Promise<boolean> {
+    await this.onCommitAnyway(context);
     return true;
   }
   public async setCommitMessage(): Promise<void> {
@@ -390,31 +488,36 @@ export function ChangesView(props: {
   const [showStashedChanges, setShowStashedChanges] = useState(false);
 
   /**
-   * 行尾两颗单文件按钮(暂存 / 取消暂存 / 丢弃)的**具名回调**。
+   * ⚠️ 2026-10(用户裁决):**行尾那三颗图标(丢弃 / 暂存 / 取消暂存)已删除**。
    *
-   * **为什么不能写成 JSX 内联箭头**:`react/jsx-no-bind`(`scripts/lint-baseline.json`
-   * 是**只拦上升**的棘轮)会把组件作用域里的内联箭头记成新增违规。
-   * 这几个回调的依赖只有 `store`(引用稳定),所以身份稳定,不会让下游行白白重渲染。
+   * 用户原话:「**上游行内没有任何动作图标,所以可以移除。**」
    *
-   * ⚠️ 2026-10:**顶部那两颗「全部暂存 / 取消暂存」已按用户指令移除**
+   * 机器证据:上游 `ui/changes/changed-file.tsx`(121 行)全文只有
+   * 勾选框 + `PathLabel` + 状态 Octicon ⇒ 这三颗从来就是**我们自造的一族**、不是抄漏;
+   * 而它们在生产里**一个像素都不可见** —— `src/client/styles.ts:96` 的
+   * `.gw-x{display:none}` 是唯一起作用的配方,唯一那条揭示规则
+   * `.gw-pop-item:hover .gw-x`(`:99`)要求父级带 `gw-pop-item`,而行不带
+   * (行是 `.gw-frow`)。真 Chrome 实测(`changes-list-hscroll-probe` 旧 `H10/H11`):
+   * `display:none` / rect `0×0`,**可信 `mouseMoved` 悬停到行上之后仍然如此**。
+   * ⇒ 既无上游依据、又不可达,于是整族删除
+   * (功能点 3.1 / 3.2,见 `docs/changes-function-points.md` §3)。
+   *
+   * 随之删除的**只有**那些只服务这三颗的东西:`FileRow` 的
+   * `onDiscard` / `onStage` / `onUnstage` 三个 props、它们各自的 `useCallback`
+   * 与调用点传参,以及这里的 `stageRow` / `unstageRow` / `discardRow` 三个工厂。
+   *
+   * **`store` 上的能力一个字没删**(「先做,不删」):`discardFiles` /
+   * `stageFile` / `unstageFile` 都还在。前两个里,单文件丢弃仍有**右键菜单**那条
+   * **活**入口(`menuActions.discard` 的 `targets.length === 1` 那一支,偏好语义逐字未变);
+   * `store.stageFile` / `store.unstageFile` 自本次删除起**产品路径上没有调用点**
+   * (只剩探针直接调 `store`,见 `docs/probes/changes-discard-lines-probe.mjs` 的 C 组)。
+   *
+   * 前一轮(2026-10)删掉的是顶部那两颗「全部暂存 / 取消暂存」
    * (上游 `ui/changes/**` 与 `ui/diff/**` 里 `Staged|staged|Stage |Unstage` 命中 **0**,
-   * 见 `docs/goal-port-desktop.md` §11.4 ⇒ 那两颗是我们发明的入口,不是抄漏)。
-   * 与之配套的 `onStageAll` / `onUnstageAll` 两个 `useCallback` 一起删掉了(它们只服务那两颗按钮);
-   * **`store.stageSelected` / `store.unstageSelected` 一个字没删**(「先做,不删」),
-   * 只是今天没有产品调用点了(探针仍会直接调 `store` 的那两条,见
-   * `docs/probes/changes-discard-lines-probe.mjs` 的 D 组)。
+   * 见 `docs/goal-port-desktop.md` §11.4)—— 同一族、同一条用户纪律,
+   * 当时保留的 `store.stageSelected` / `store.unstageSelected` 今天仍在
+   * (探针直接调 `store`,见同一个探针的 D 组)。
    */
-  /**
-   * `FileRow` 那三颗行尾按钮的**行内**回调工厂。
-   *
-   * 为什么用「工厂 + 具名引用」而不是 JSX 内联箭头:`react/jsx-no-bind` 只认
-   * `useCallback` 这类 CallExpression,不认组件作用域里的箭头 —— 而 `FileRow` 是
-   * **模块作用域**的组件,它自己那三个 `onClick` 也是同一个问题。
-   * 所以这里按「行」生成三个稳定的回调(依赖只有 store 与那个路径)。
-   */
-  const stageRow = useCallback((path: string) => { void store.stageFile(path); }, [store]);
-  const unstageRow = useCallback((path: string) => { void store.unstageFile(path); }, [store]);
-  const discardRow = useCallback((file: ChangedFile) => { setConfirmDiscard([file]); }, []);
 
   /**
    * 外部编辑器清单**早加载**。
@@ -432,9 +535,9 @@ export function ChangesView(props: {
   useEffect(() => { void store.loadExternalApps(); }, [store]);
 
   /**
-   * 右键菜单的**动作面** —— 与行尾三颗图标、表头勾选框是**同一批真动作**
+   * 右键菜单的**动作面** —— 与表头勾选框是**同一批真动作**
    * (没有为菜单新开第二条路):
-   *  · `discard` ⇒ 走**同一个**确认框状态(与行尾垃圾桶同一条路);
+   *  · `discard` ⇒ 见下(**单文件**受 `confirmDiscardChanges` 控制,**多选恒弹**);
    *  · `setFilesIncluded` ⇒ `store.setFilesIncluded`(与表头三态勾选框同一个,只改客户端纳入状态,不发 git 命令);
    *  · `revealInFileManager` / `openInExternalEditor` ⇒ `store.*`(`system/reveal` / `system/open-in-app`);
    *  · `copyText` ⇒ `navigator.clipboard`(`bits.tsx:799` 的 SHA 胶囊用的是同一个 API)。
@@ -445,9 +548,33 @@ export function ChangesView(props: {
    * 会 `refreshStatus()` ⇒ 文件**当场**从列表里消失(不是刷新页面之后)。
    * `stashAll` **仍然刻意不传**:`STASH_ROUTE_AVAILABLE` 还是 `false`(没有 stash 路由,
    * 已登记的取舍),缺动作 ⇒ 「贮藏全部改动」那一项**在列但诚实禁用**。
+   *
+   * ## 功能点 12.16:`discard` 的分档与上游**逐字相同**(单文件受偏好控制,多选恒弹)
+   *
+   * 上游 `filter-changes-list.tsx:488-520` 的 `onDiscardChanges(files)`:
+   *
+   * ```ts
+   * if (files.length === 1) { …this.props.onDiscardChanges(modifiedFile)… }   // ⇒ sidebar.tsx:244 那条,读偏好
+   * else { …this.props.onDiscardChangesFromFiles(modifiedFiles, discardingAllChanges)… }  // ⇒ sidebar.tsx:256,恒弹
+   * ```
+   *
+   * 而 `sidebar.tsx:256-267` 的 `onDiscardChangesFromFiles` **无条件** `showPopup`
+   * (它还写死 `showDiscardChangesSetting: false` —— 连「不再提示」复选框都不给)。
+   * ⇒ **多选那一档不受 `confirmDiscardChanges` 控制**,这是上游的刻意行为,不是我们漏接。
+   *
+   * ⚠️ 因此这里**不能**把整个 `discard` 都接到 `gateOf.discard()` 上:
+   * 那会让「丢弃选中的 N 个文件」在偏好关掉之后**静默直落**,而上游仍会拦一道。
+   * 判据:`changes-confirm-pref-probe.mjs` 的 `A1`(偏好关 + 多选/全部 ⇒ **仍然弹**)。
    */
   const menuActions = useMemo(() => ({
-    discard: (targets: readonly ChangedFile[]) => { setConfirmDiscard([...targets]); },
+    discard: (targets: readonly ChangedFile[]) => {
+      if (targets.length === 1 && !gateOf.discard()) {
+        const file = targets[0];
+        void store.discardFiles([file.path], file.untracked === true ? [file.path] : []);
+        return;
+      }
+      setConfirmDiscard([...targets]);
+    },
     setFilesIncluded: (paths: readonly string[], included: boolean) => { store.setFilesIncluded(paths, included); },
     revealInFileManager: (absolutePath: string) => { void store.revealInFileManager(absolutePath); },
     openInExternalEditor: (absolutePath: string, appId?: string) => {
@@ -499,6 +626,17 @@ export function ChangesView(props: {
        */
       hasStash: current.stashEntry !== null,
     }, {
+      /**
+       * 表头右键的「丢弃全部改动…」—— 上游 `filter-changes-list.tsx:477-482`
+       * `onDiscardAllChanges` ⇒ `onDiscardChangesFromFiles(allFiles, true)`
+       * ⇒ `sidebar.tsx:256-267` 那个**无条件** `showPopup`。
+       *
+       * ⚠️ **功能点 12.16:这一档刻意不读 `confirmDiscardChanges`**。
+       * 上游把「全部丢弃」设计成**永远**要确认一次(连「不再提示」复选框都不给,
+       * `showDiscardChangesSetting: false`),因为它的破坏面是整棵工作区。
+       * 把它也接到偏好上会是**比上游更宽松**的行为 —— 正是本功能点最该避免的方向。
+       * 判据:`changes-confirm-pref-probe.mjs` 的 `A1`(偏好关 ⇒ 这里**仍然弹**)。
+       */
       discardAll: (targets: readonly ChangedFile[]) => { setConfirmDiscard([...targets]); },
       /*
        * **`stashAll` 2026-10 接上了**。确认闸门留在本层(与 `discardAll` 同一条分工):
@@ -507,6 +645,10 @@ export function ChangesView(props: {
        * 而是弹 `PopupType.ConfirmOverwriteStash`(`:4865-4871`);
        * 确认之后才走 `createStashAndDropPreviousEntry`(`:8980-9000`)——
        * 那一步就是 `store.stashAllChanges()`。
+       *
+       * ⚠️ 「覆盖贮藏」这个弹窗**不受 `confirmDiscardStash` 控制**(那是**丢弃**一条
+       * 已有贮藏,这是**覆盖**它)。上游也**没有**给覆盖弹窗任何偏好
+       * (`:4865-4871` 无键),所以这里同样不读 —— 与 `discardAll` 同一裁决。
        */
       stashAll: () => {
         if (store.snapshot().stashEntry !== null) { setConfirmStashOverwrite(true); return; }
@@ -514,9 +656,31 @@ export function ChangesView(props: {
       },
     });
   }, [store]);
+  /**
+   * 行/块级丢弃(上游 `ui/changes/changes.tsx:76-100` 的 `onDiscardChanges`)。
+   *
+   * ## 功能点 12.16:与单文件丢弃**同一个键**
+   *
+   * ```ts
+   * // references/desktop/app/src/ui/changes/changes.tsx:84-99
+   * if (this.props.askForConfirmationOnDiscardChanges) { …showPopup(ConfirmDiscardSelection)… }
+   * else { …this.props.dispatcher.discardChangesFromSelection(…)… }
+   * ```
+   *
+   * ⇒ 关掉 `confirmDiscardChanges` 时,选中的那几行**直接丢**。
+   * 与 `menuActions.discard` 一样,这条路只丢**选中的行**(`store.discardLines` ⇒ 宿主
+   * `git apply --reverse`,索引一个字节不动),不是整文件。
+   * 判据:`changes-confirm-pref-probe.mjs` 的 `L1`(开 ⇒ 弹)/ `L2`(关 ⇒ 不弹 + 恰好一条 `discard-lines`)。
+   */
   const onDiscardLinesSelected = useCallback(
-    (file: string, spec: LineSelectionSpec) => { setConfirmDiscardLines({ file, spec }); },
-    [],
+    (file: string, spec: LineSelectionSpec) => {
+      if (!gateOf.discard()) {
+        void store.discardLines(file, spec);
+        return;
+      }
+      setConfirmDiscardLines({ file, spec });
+    },
+    [store],
   );
   /**
    * 打开 stash 面板(空态那两处入口 —— 卡片按钮与左下角那颗按钮 —— 用的是**同一个**回调)。
@@ -534,16 +698,32 @@ export function ChangesView(props: {
   const onToggleStashView = useCallback(() => { setShowStashedChanges((showing) => !showing); }, []);
   /**
    * stash 面板里那颗「丢弃」按钮 —— 上游 `StashDiffHeader.onDiscardClick`
-   * (`ui/stashing/stash-diff-header.tsx:79-103`)的**判定那一半**:
+   * (`ui/stashing/stash-diff-header.tsx:66-93`)的**判定那一半**:
    * `askForConfirmationOnDiscardStash` 为真时弹 `PopupType.ConfirmDiscardStash`,
    * 否则**直接**丢。
    *
-   * 那个偏好(`confirmDiscardStash`,`lib/stores/app-store.ts:245` / `:4635` 一族)今天
-   * **没有写侧**(我们没有那个「Do not show this message again」复选框的落点),
-   * 所以它按**默认值 `true` 走确认框** —— 与上游出厂设置一致,不是我们发明的拦截。
-   * 探针把两条分支都量过(见 `docs/probes/stash-ui-probe.mjs` 的 D 组)。
+   * ## 功能点 12.16:键是 `confirmDiscardStash`(上游声明默认 `true`,**无迁移垫片**)
+   *
+   * 上游那个 prop 的来源是 `app-store.ts:1317` 的
+   * `askForConfirmationOnDiscardStash: this.confirmDiscardStash`(字段声明 `:665`,
+   * 首启读 `:2515-2518`,setter `:7842-7846`),键名 `'confirmDiscardStash'`(`:503`)。
+   * 我们逐字用同一个键(localStorage,键名见 `src/client/prefs.ts`)。
+   *
+   * ⚠️ 两条与改前不同的、必须说清的地方:
+   *  1. 偏好的**写侧今天仍然只有设置页**(我们没有上游那个
+   *     「Do not show this message again」复选框的落点 —— 见
+   *     `StashDiffViewer` 的 JSDoc 那张表)。所以**关**这个键只能去设置页。
+   *  2. 旁路那一半照上游:关掉 ⇒ **直接** `dropStash()`,并且与确认框那条路**同形**
+   *     —— 成功之后把面板切回工作区(否则会停在一个已经不存在的 stash 上)。
+   *     判据:`changes-confirm-pref-probe.mjs` 的 `T1`(开 ⇒ 弹)/ `T2`(关 ⇒ 不弹 + 恰好一条 `stash/drop`)。
    */
-  const onDiscardStashClick = useCallback(() => { setConfirmDiscardStash(true); }, []);
+  const onDiscardStashClick = useCallback(() => {
+    if (!gateOf.stash()) {
+      void store.dropStash().then((dropped) => { if (dropped) { setShowStashedChanges(false); } });
+      return;
+    }
+    setConfirmDiscardStash(true);
+  }, [store]);
   /** 左栏宽度(变更列表 + 提交区 | diff),持久化到 `dsh-git.sidebar-width`。 */
   const split = useSplitWidth(SIDEBAR_WIDTH_STORAGE_KEY);
   /**
@@ -590,6 +770,39 @@ export function ChangesView(props: {
   const [filterText, setFilterText] = useState('');
   const [activeOptions, setActiveOptions] = useState<FilterKey[]>([]);
   const [filterOpen, setFilterOpen] = useState(false);
+
+  /**
+   * **列表键盘入口**(上游 `FilterChangesList` 的 `filterListRef`,
+   * `ui/changes/filter-changes-list.tsx:308-309`)—— 让表头的筛选框把按键转进列表。
+   *
+   * 上游的实现与它转发的键(`:1229-1233`):
+   *
+   * ```ts
+   * private onFilterKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+   *   if (this.filterListRef.current) {
+   *     this.filterListRef.current.onKeyDown(event)
+   *   }
+   * }
+   * ```
+   *
+   * 转发之后到达的是 `AugmentedSectionFilterList.onKeyDown`
+   * (`ui/lib/augmented-filter-list.tsx:725-801`),它只认三支:
+   *  · `ArrowDown` ⇒ 从 `InvalidRowIndexPath` 往下找**第一个**可选行 ⇒ 它是第 0 行
+   *    (`ui/lib/list/selection.ts:100-118` 的 `direction === 'down' && row === -1` 特例)
+   *    ⇒ `setState({ selectedRows:[0] }, () => list.focus())` —— 选中 + **把焦点搬进列表**;
+   *  · `ArrowUp` ⇒ 从 `{section:0,row:0}` 往上找 ⇒ `wrap` 默认开启
+   *    (`ui/lib/list/selection.ts:103`)⇒ **最后一行**(同一支 `:758-778`),同样搬焦点;
+   *  · `Enter` ⇒ 第一行 + `onRowClick(row, {kind:'keyboard'})`(`:779-800`;上游 ⇒ 切「纳入提交」)。
+   *
+   * ⚠️ **我们与上游有一处结构性差别(不能照抄 `ref` 的形状)**:上游筛选框与列表都在
+   * **同一个类**(`FilterChangesList`)里,`this.filterListRef` 直接够得着;我们的筛选框在
+   * `ChangesView` 的表头里、列表在 `ChangesFileList` 组件里 ⇒ 只能由父级拿一个
+   * **只含 `onKeyDown` 的句柄**(`IChangesFileListHandle`)。转发本身**逐字同形**。
+   */
+  const listKeyDownRef = useRef<IChangesFileListHandle>(null);
+  const onFilterKeyDown = useCallback((event: React.KeyboardEvent<HTMLInputElement>): void => {
+    listKeyDownRef.current?.onKeyDown(event);
+  }, []);
 
   /**
    * 五项筛选的**单一真源** —— 镜像 `IFileListFilterState`(`lib/app-state.ts:873-...`)。
@@ -798,7 +1011,7 @@ export function ChangesView(props: {
    * (替身给类型面,这里给行为),业务仍然全部由**镜像那份** `OversizedFiles` 执行。
    */
   const oversizedDispatcher = useMemo(
-    () => new OversizedFilesDispatcher(() => store.commit()),
+    () => new OversizedFilesDispatcher((context) => store.commit(context.trailers)),
     [store],
   );
   /**
@@ -847,10 +1060,6 @@ export function ChangesView(props: {
     focusedRow: flat[0]?.file.path ?? null,
   }), [status, snap.includeState, snap.selectedFiles, filtered, pathWidth, snap.busy, flat]);
 
-  const toggle = (file: ChangedFile, event: React.MouseEvent): void => {
-    store.toggleFile(file.path, event.metaKey || event.ctrlKey || event.shiftKey);
-  };
-
   /**
    * 列表体的四个回调 —— 分工**照上游**(`FilterChangesList` + `ui/changes/sidebar.tsx`):
    *
@@ -858,6 +1067,10 @@ export function ChangesView(props: {
    *   `shift` = 「从锚点到这一行」的**范围**选择、`meta/ctrl` = 逐个追加),
    *   结果进 `onSelectionChanged` ⇒ `store.selectFiles(...)`(**右栏多选**的输入);
    *   上游同一分工:`filter-changes-list.tsx:1188-1193` 的 `onFileSelectionChanged`。
+   *   **平铺路径同义**(功能点 1.3):那边由 `changes-file-list.tsx` 的 `onFlatRowSelect`
+   *   把**同一个** `onRowClick` 交给行组件 ⇒ 也走这一条 `onSelectionChanged`;
+   *   改前这里另有一条 `toggle` ⇒ `store.toggleFile(…, event.shiftKey)`(additive),
+   *   于是同一个 `shift` 动作在两条路径上给出不同选区。那条 `toggle` 已删(没有第二个消费者)。
    * · **键盘(空格/回车)** ⇒ 切换「纳入提交」,`sidebar.tsx:336-349` 的
    *   `onChangedItemClick` **只**处理 `source.kind === 'keyboard'`。勾选 ≠ 暂存(零 git)。
    * · **双击** ⇒ 外部编辑器(`filter-changes-list.tsx:1132-1134`)。我们此前**没有**这条。
@@ -924,31 +1137,29 @@ export function ChangesView(props: {
   const openRowInExternalEditor = useCallback((path: string): void => {
     void store.openInExternalEditor(path);
   }, [store]);
-  /** 平铺路径上「单击整行」的稳定回调(虚拟路径不传,见 `FileRow.onSelect` 的注释)。 */
-  const onRowSelect = useCallback((event: React.MouseEvent, file: ChangedFile): void => {
-    toggle(file, event);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store]);
 
   /**
    * 一行(两条渲染路径**共用**)。`virtual` 只影响两件事:
    *  · 虚拟路径上外层 `ListRow` **已经**是 `role="option"`(`section-list.tsx:1245`)
    *    ⇒ 我们的行不再重复声明 `role="option"`(嵌套 option 对读屏是错的);
    *  · 虚拟路径上行不需要 `tabIndex`(焦点由镜像列表管)。
+   *
+   * 第 4 个实参 `onSelect` 是**平铺路径**的整行点击:`changes-file-list.tsx` 传下来的是
+   * 它自己的 `onRowClick`(`shift` = 范围、`meta`/`ctrl` = 逐个追加、普通 = 只留这一行)——
+   * 与虚拟路径**同一个函数**,见那边的 `onFlatRowSelect`(功能点 1.3)。
+   * 虚拟路径**不传**:行的点击由 `Grid` 的 `onRowClick` 走 `VirtualCell`,
+   * 再挂一层会两边同时改游标(见 `FileRow.onSelect` 的注释)。
    */
-  const renderRow = useCallback((row: IChangesRowItem, matches: IMatches | undefined, virtual: boolean) => (
+  const renderRow = useCallback((row: IChangesRowItem, matches: IMatches | undefined, virtual: boolean, onSelect?: (event: React.MouseEvent) => void) => (
     <FileRow key={row.id} file={row.file} include={stateOf(row.file)} selected={selected.has(row.file.path)}
       focused={!virtual && flat[0]?.file.path === row.file.path}
       virtual={virtual} matches={matches} pathWidth={pathWidth}
-      store={store} onSelect={virtual ? undefined : onRowSelect}
-      onDiscard={discardRow}
-      onStage={stageRow}
-      onUnstage={unstageRow}
+      store={store} onSelect={virtual ? undefined : onSelect}
       onContextMenu={rowMenu}
       onOpenInExternalEditor={openRowInExternalEditor}
     />
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [store, selected, flat, pathWidth, discardRow, stageRow, unstageRow, rowMenu, openRowInExternalEditor, snap.includeState]);
+  ), [store, selected, flat, pathWidth, rowMenu, openRowInExternalEditor, snap.includeState]);
 
   /** 0 行时的空态(**两条路径共用**;上游 `renderNoItems`)。 */
   const renderNoItems = useCallback((): JSX.Element => (
@@ -1089,7 +1300,8 @@ export function ChangesView(props: {
                 <Icon name="chevron-down" size={10} />
               </button>
               <input className="gw-filter-input" placeholder="Filter"
-                value={filterText} onChange={(event) => setFilterText(event.target.value)} />
+                value={filterText} onChange={(event) => setFilterText(event.target.value)}
+                onKeyDown={onFilterKeyDown} />
               {filterOpen && (
                 <FilterOptionsPopover
                   counts={optionCounts}
@@ -1156,8 +1368,13 @@ export function ChangesView(props: {
 
                 ⇒ 那两颗按钮是审计第 4 项接线时**我们发明的入口**,不是抄漏;
                 **移除的是按钮**,`store.stageSelected` / `store.unstageSelected` 一个字没删
-                (「先做,不删」)。行尾的单文件「暂存 / 取消暂存」图标**保留**
-                (用户只点名了顶部这两颗)。
+                (「先做,不删」)。
+
+                ⚠️ 2026-10(用户裁决「上游行内没有任何动作图标,所以可以移除」):
+                当时**保留**下来的行尾那三颗单文件图标(丢弃 / 暂存 / 取消暂存)**也已删除**
+                —— 它们的可见性证据是旧 `changes-list-hscroll-probe` 的 `H10/H11`
+                (`display:none` / rect `0×0`,可信悬停后仍如此),即从未对用户存在过。
+                详见本文件 `ChangesView` 里那一段注释与 `docs/changes-function-points.md` §3。
               */}
             </div>
           </div>
@@ -1211,6 +1428,7 @@ export function ChangesView(props: {
              * `useMemo` 在这里不是为了省几次比较,而是为了让**本来就不该变的帧**不换身份。
              */
             invalidationProps={invalidationProps}
+            listKeyDownRef={listKeyDownRef}
           />
 
           {/*
@@ -1347,11 +1565,11 @@ export function ChangesView(props: {
           body={
             /*
              * 「全部」那一档说清是全部:表头右键的 `Discard All Changes…`
-             * (上游 `filter-changes-list.tsx:556-561`)与行尾垃圾桶共用这一个确认框状态,
+             * (上游 `filter-changes-list.tsx:556-561`)与逐文件右键单选共用这一个确认框状态,
              * 而上游那个弹窗有一个 `discardingAllChanges` 变体
              * (`ui/discard-changes/confirm-discard-changes-dialog.tsx`)。
              * 我们按「确认集合是否覆盖了整个变更集」分流 —— 这在两条入口上都是**真话**
-             * (行尾垃圾桶只带一个文件,所以只有回落到逐条列举那一边)。
+             * (逐文件单选只带一个文件,所以只有回落到逐条列举那一边)。
              */
             confirmDiscard.length === files.length && files.length > 1
               ? `这会丢弃全部 ${files.length} 个文件的改动。\n\n丢弃后无法从 dsh-git 恢复(已提交的内容不受影响)。`
@@ -1544,7 +1762,8 @@ export function ChangesView(props: {
  *   `All` ⇒ 行上打勾 + diff 每行都勾;`None` ⇒ 都不勾;`Partial` ⇒ 行上横杠。
  * 点它**只改客户端纳入状态,不发任何 git 命令**;索引在提交时才写。
  *
- * 与 Desktop 的差异:丢弃入口保留为行尾垃圾桶(Desktop 只有右键菜单),带确认框。
+ * 与 Desktop 的差异:丢弃入口**只有右键菜单**(2026-10 起 —— 行尾那三颗自造图标已按用户
+ * 裁决删除,理由与证据见 `ChangesView` 里那一段注释),带确认框。
  *
  * **勾选控件用上游的 `<Checkbox>`**(2026-10 修):以前这里是裸 `<input class="gw-cb">`,
  * 于是控件被我们手写的 `.gw-cb{width:20px;height:20px}`(styles.ts:560)直接撑成 20×20
@@ -1571,41 +1790,26 @@ function FileRow(props: {
   focused: boolean;
   store: GitStore;
   /**
-   * 单击整行(**只**在平铺路径上挂):换「在看哪个 diff」那个游标。
-   * 虚拟路径上**不挂** —— 那里由镜像 `SectionList` 自己算选择(含 `shift` 范围选择)
-   * 并走 `onSelectionChanged`;再挂一层会两边同时改游标,而且 `shift` 会被这一层
-   * 当成 additive,把刚算好的范围打散。
+   * 单击整行 ⇒ 换「在看哪个 diff」那个游标(**两条路径都挂,但来源不同**)。
+   *
+   *  · 虚拟路径:由镜像 `SectionList` 自己算选择(含 `shift` 范围选择)并走
+   *    `onSelectionChanged` —— 所以 **`Grid` 那条链不传这个 prop**(它会经
+   *    `VirtualCell` 的 `onRowClick` 直接改游标;两层都挂会两边同时改),
+   *    行的 `onClick` 因此是 `undefined`;
+   *  · 平铺路径:传的是 `changes-file-list.tsx` 的 `onFlatRowSelect`,而它调的就是
+   *    虚拟路径那**同一个** `onRowClick`(`shift` 范围 / `meta`·`ctrl` 追加 / 普通单选)。
+   *
+   * ⚠️ 改前这里写的是「平铺路径传的是我们那条 additive 的 `toggle`」——那正是功能点 1.3
+   * (`H14` 旧读数:同一套操作虚拟路径 5 行、平铺路径 2 行)。现在两条路径同一个函数。
    * 签名收 `file` 是**为了不写内联箭头**(`react/jsx-no-bind`):调用点传一个具名回调。
    */
   onSelect?: (event: React.MouseEvent, file: ChangedFile) => void;
-  /**
-   * 行尾三颗图标的动词。**签名收 `file` 而不是零参**:这样调用点可以不写内联箭头
-   * (`onDiscard={onDiscardRow}`),同时组件内部仍然用 `file` 去调它 ——
-   * `react/jsx-no-bind` 对「多传一个实参」这种写法会判违规,所以只能让 props
-   * 自己收参数。
-   */
-  onDiscard: (file: ChangedFile) => void;
-  /**
-   * **单文件暂存** —— `store.stageFile`(`git add -- <path>`)。
-   *
-   * ⚠️ 这与「行首那个勾选框」**不是**同一件事,两者都留(「先做,不删」):
-   *  - 勾选框改的是**客户端纳入状态**(`includeState`,提交那一刻才 materialize 索引);
-   *  - 这两条按钮**立刻写 git 索引**(`api.stage` / `api.unstage`)。
-   * 上游 Desktop 只有前者(它没有「现在就把这个文件加进索引」这个交互);
-   * 这两条是「我要现在就 `git add`」这个真实诉求的落点,也是审计第 4 项
-   * (`store.stageFile` / `store.unstageFile` 此前 0 调用点)的接线处。
-   * 两条都在时**不冲突**:索引与客户端模型本就是两个东西(见 `Snapshot.includeState`
-   * 那段注释里的那张表)。
-   */
-  onStage: (path: string) => void;
-  /** **单文件取消暂存** —— `store.unstageFile`(`git reset -- <path>`)。 */
-  onUnstage: (path: string) => void;
   /**
    * **行右键** —— 上游 `ui/changes/filter-changes-list.tsx:839-857` 的
    * `onItemContextMenu`(`list.tsx:1218` → `list-row.tsx:229-230` 的
    * `onContextMenu(rowIndex, e)` 那一层)。
    *
-   * 与 `onDiscard` / `onStage` / `onUnstage` 同样是「组件把 `file` 自己补上」的签名:
+   * 与 `onSelect` 一样是「组件把 `file` 自己补上」的签名:
    * 调用点可以不写内联箭头(`onContextMenu={rowMenu}`),行内不出现 `react/jsx-no-bind`
    * 会记账的箭头函数。
    *
@@ -1634,25 +1838,14 @@ function FileRow(props: {
   onOpenInExternalEditor: (path: string) => void;
 }): ReactNode {
   const { file, include } = props;
-  /**
-   * 行尾三颗图标的**事件回调**。`FileRow` 是**模块作用域**的组件,但它内部仍然算
-   * 「组件作用域」给 `react/jsx-no-bind` 记账 —— 所以这里必须包 `useCallback`
+  /*
+   * 行上那三个具名回调的来源。`FileRow` 是**模块作用域**的组件,但它内部仍然算
+   * 「组件作用域」给 `react/jsx-no-bind` 记账 —— 所以下面必须包 `useCallback`
    * (JSX 上挂具名引用),不能写 `onClick={(event) => …}`。
-   * 三个回调都只是「停冒泡 + 转发给 props 上的那个动词」,没有别的逻辑。
+   * 2026-10 起只剩右键 / 双击 / 单击三条:行尾那三颗图标(以及它们的
+   * `onDiscard` / `onStage` / `onUnstage` 三个 props)已按用户裁决删除。
    */
-  const { onDiscard, onStage, onUnstage, onContextMenu, onOpenInExternalEditor, onSelect } = props;
-  const discardSelf = useCallback((event: React.MouseEvent) => {
-    event.stopPropagation();
-    onDiscard(file);
-  }, [onDiscard, file]);
-  const stageSelf = useCallback((event: React.MouseEvent) => {
-    event.stopPropagation();
-    onStage(file.path);
-  }, [onStage, file.path]);
-  const unstageSelf = useCallback((event: React.MouseEvent) => {
-    event.stopPropagation();
-    onUnstage(file.path);
-  }, [onUnstage, file.path]);
+  const { onContextMenu, onOpenInExternalEditor, onSelect } = props;
   /**
    * 行右键。**不 stopPropagation**:表头那一层的 `onContextMenu` 挂在 `.gw-chead` 上,
    * 而行不在它里面(行住在 `.gw-files`),所以冒泡不会把两级菜单同时打开
@@ -1673,7 +1866,7 @@ function FileRow(props: {
   const doubleClickSelf = useCallback(() => {
     onOpenInExternalEditor(file.path);
   }, [onOpenInExternalEditor, file.path]);
-  /** 单击整行(只认平铺路径上的 `onSelect`;虚拟路径不传)。 */
+  /** 单击整行(平铺路径的 `onSelect`;虚拟路径那一格是 `undefined`,见 `FileRow.onSelect` 的注释)。 */
   const selectSelf = useCallback((event: React.MouseEvent) => {
     onSelect?.(event, file);
   }, [onSelect, file]);
@@ -1831,33 +2024,6 @@ function FileRow(props: {
       <span className={`status status-${meta.kind}`} title={meta.label}>
         <Octicon symbol={iconForStatus(appStatus)} />
       </span>
-
-      <span className="gw-x" title="丢弃此文件的改动"
-        onClick={discardSelf}>
-        <Icon name="trash" size={10} />
-      </span>
-
-      {/*
-        ⭐ 单文件「暂存 / 取消暂存」(2026-10 接线;审计第 4 项)。
-        两条按钮的**出现条件**是各自的 git 事实,不是同一个开关:
-          · 「暂存」:工作区里还有未暂存的内容(`unstaged !== undefined`,含未跟踪 `?`)
-            —— 这也是「已暂存」的按钮不该出现的时候(索引已经等于工作区);
-          · 「取消暂存」:索引里真的有这个文件(`staged !== undefined`)。
-        一个文件**两边都有**(既 `staged` 又 `unstaged`,= 部分暂存)时两颗按钮同时在列 ——
-        这正是要区分两个动作的场景。用 `title` 与 aria 文案区分(图标本身很接近)。
-      */}
-      {file.conflicted !== true && file.unstaged !== undefined && (
-        <span className="gw-x" title="暂存此文件(git add -- 立刻写索引)"
-          onClick={stageSelf}>
-          <Icon name="plus" size={10} />
-        </span>
-      )}
-      {file.conflicted !== true && file.staged !== undefined && (
-        <span className="gw-x" title="取消暂存此文件(git reset -- 立刻改索引)"
-          onClick={unstageSelf}>
-          <Icon name="check" size={10} />
-        </span>
-      )}
     </div>
   );
 }
@@ -3330,6 +3496,29 @@ function CommitBox(props: {
   const [confirmGenerate, setConfirmGenerate] = useState(false);
   const [confirmUndo, setConfirmUndo] = useState(false);
   /**
+   * **「摘要超过 50 字给一条提示」那个开关的当前值**(功能点 **12.13** / 7.20)。
+   *
+   * 改前这一格**不存在**:下面那条提示是**硬编码常驻**的(`form.summary.length > 50`),
+   * 不受任何偏好控制。上游由 `showCommitLengthWarning` 控制
+   * (`ui/changes/commit-message.tsx:1747-1751`),键与默认值、以及
+   * **「声明默认 `false` / 观测默认 `true`」的分歧与本实现取观测默认(⇒ 默认行为不变)
+   * 这件事**,逐字写在 `src/client/prefs.ts` 那个键的 JSDoc 里 —— 这里只做接线,
+   * 不复制那份账。⚠️ 该偏好今天**没有设置面**(上游的开关在 Prompts 页;自造的外观页
+   * 那一行已按用户裁决删除,回收条件写在 `preferences-pages.tsx` 原处)。
+   *
+   * React 侧写法与页那一层的 `confirmCommitFilteredChanges` **逐字同形**
+   * (读一次当初值 + 订阅同一个广播),理由也相同:20+ 条 jsdom 探针直接挂本组件、
+   * 跑的是 React 17,而 `useSyncExternalStore` 是 18-only。
+   */
+  const [showCommitLengthWarning, setShowCommitLengthWarning] = useState(getShowCommitLengthWarning);
+  useEffect(
+    () => subscribePreference(
+      SHOW_COMMIT_LENGTH_WARNING_KEY,
+      () => { setShowCommitLengthWarning(getShowCommitLengthWarning()); },
+    ),
+    [],
+  );
+  /**
    * **读屏宣告的当前文本** —— 上游 `commit-message.tsx:258` 的
    * `isCommittingStatusMessage`(`:318` 初值 `''`、`:1848-1850` 渲染成
    * `<span className="sr-only" aria-live="polite" aria-atomic="true">`)。
@@ -3391,7 +3580,7 @@ function CommitBox(props: {
    */
   const undoCommit = undoableCommitOf(snap);
   /**
-   * 点 Undo 之后的**确认条件** —— 逐字对着上游 `app-store.ts:5830-5843`:
+   * 点 Undo 之后的**确认条件** —— 逐字对着上游 `app-store.ts:5829-5840`:
    *
    * ```ts
    * // Warn the user if there are changes in the working directory
@@ -3400,26 +3589,37 @@ function CommitBox(props: {
    *     ((this.confirmUndoCommit && !isWorkingDirectoryClean) || commit.isMergeCommit)) { …弹出… }
    * ```
    *
-   * 三点必须说清:
+   * 四点必须说清:
    *  1. 上游**不是每次都弹框**。`showConfirmationDialog` 的默认值是 `true`
    *     (`dispatcher.ts:951-955`),`confirmUndoCommit` 的默认值也是 `true`
    *     (`app-store.ts:495`)⇒ 判据化简成「**工作区脏 OR 是合并提交**」才弹。
    *     工作区干净、又不是合并提交时,上游**直接撤**,没有中间那一步。
-   *  2. `confirmUndoCommit` 这条偏好我们**没有**(`grep confirmUndoCommit src/client` = 0 命中,
-   *     上游的开关在 Preferences ▸ Prompts,`ui/preferences/prompts.tsx:298-302`),
-   *     所以按上游默认值 `true` 处理。等 Prompts 页接线时把这一条换成真偏好。
+   *  2. ✅ **2026-10(功能点 12.16):`confirmUndoCommit` 现在是一条真偏好**。
+   *     改前这里写的是「我们没有这个键(`grep` = 0 命中),所以按默认值 `true` 处理」。
+   *     键名逐字用上游 `app-store.ts:508` 的 `'confirmUndoCommit'`,读 / 写 / 订阅在
+   *     `src/client/prefs.ts`,设置行在 `preferences-pages.tsx`。
+   *     `showConfirmationDialog` 那一半我们**恒为 `true`**(与 `dispatcher.ts:954`
+   *     的默认实参一致;我们没有那条传 `false` 的调用点,除非经过这个确认框自己)。
    *  3. `isMergeCommit` 在**关掉确认偏好时也仍然弹** —— 上游注释写死了这一条
    *     (撤合并提交会丢掉一整条父线,破坏性远大于普通提交)。所以它**不能**被
-   *     第 2 点那个默认值带走:那是 `||`,不是 `&&`。
+   *     这个偏好带走:那是 `||`,不是 `&&`。⇒ 下面的布尔式里 `isMergeCommit` 在
+   *     偏好的**短路之外**。判据:`changes-confirm-pref-probe.mjs` 的 `U3`。
+   *  4. 于是「关掉偏好」只去掉**一档**:工作区脏、且不是合并提交时的那次确认。
+   *     工作区干净那一档**改前本来就不弹**(见第 1 点)⇒ 这次改动没有把任何
+   *     「上游会弹而我们不会」的情形引进来。
+   *
+   * 判据:`changes-confirm-pref-probe.mjs` 的 `U1`(开 + 脏 + 非合并 ⇒ 弹)/ `U2`
+   * (关 + 脏 + 非合并 ⇒ 不弹 + 恰好一条 `undo-commit`)。既有的
+   * `undo-commit-strip-probe.mjs` 的 A10e / A10f 是这两档的**默认值**对照(必须仍绿)。
    */
   const requestUndo = () => {
     if (undoCommit === null) { return; }
     const isWorkingDirectoryClean = (status?.files.length ?? 0) === 0;
-    if (isWorkingDirectoryClean && !undoCommit.isMergeCommit) {
-      void store.undoCommit(undoCommit.sha);
+    if (undoCommit.isMergeCommit || (!isWorkingDirectoryClean && gateOf.undo())) {
+      setConfirmUndo(true);
       return;
     }
-    setConfirmUndo(true);
+    void store.undoCommit(undoCommit.sha);
   };
   const branch = status === null || status.detached || status.unborn ? '' : status.branch;
 
@@ -3644,9 +3844,11 @@ function CommitBox(props: {
    *     第二个实参就是上游那条闸门 `isCoAuthorInputEnabled`
    *     (`commit-message.tsx:815-817`:`repository.gitHubRepository !== null`)——
    *     **不写死 `true`**:非 GitHub 仓库里共同作者一个都不进 commit message,这是上游语义。
-   *     ⚠️ 2026-10-10 **仍然只说一半**:`store.commit()` 的载荷里**没有** `trailers`
-   *     字段、宿主 `commit` 路由也不收它(见 `getCoAuthorTrailers` 的 JSDoc)⇒
-   *     这个数组今天是**签名的一部分 + 探针读数**,不是「提交里真的有那一行」。
+   *     ⚠️ 2026-10(功能点 7.15)**已经不是「只说一半」了**:这个数组由 `CommitBox`
+   *     交给 `store.commit(commitContext.trailers)`、进 `api.commit` 的载荷、由宿主
+   *     `commit` 路由交给 `git interpret-trailers`(两条提交路径交的是**同一个**数组,
+   *     见 `createCommitGate` 与 `OversizedFilesDispatcher` 的注释)。
+   *     仍然要连着读的**一条**:闸门(第二个实参)在产品里恒假 ⇒ 实际发出去的恒是 `[]`。
    *  2. 不传可选的 `messageGeneratedByCopilot`:我们的 `form.generatedBy` 是
    *     **provider/模型名**(字符串),与上游那个「是不是 Copilot 生成的」布尔不是同一件事,
    *     硬映射会造出一个错的语义;
@@ -3730,7 +3932,21 @@ function CommitBox(props: {
         }
       }
     }
-    await store.commit();
+    /*
+     * **共同作者的 trailer 跟着这一跳走**(功能点 7.15)。
+     *
+     * 上游的分工是「`CommitMessage` 造 `commitContext`(含 `trailers`)⇒ 交给
+     * `onCreateCommit` ⇒ `sidebar.tsx:217` 的 `dispatcher.commitIncludedChanges(repository, context)`」,
+     * 而 `context.trailers` 正是 `commit-message.tsx:577-585` 的 `getCoAuthorTrailers()`。
+     * 我们这一侧的终点是 `store.commit(trailers)`,所以这里把**同一个** memo 出来的
+     * `commitContext.trailers` 交过去 —— 与上面 `onOversizedFiles` 交的是**同一份**对象,
+     * 两条提交路径(直接提交 / 弹窗里的 Commit Anyway)因此不可能分家。
+     *
+     * ⚠️ 闸门在 `commitContext` 里(`repository !== null && repository.gitHubRepository !== null`),
+     * 而它今天**恒为假** ⇒ 这里实际发出去的是 `[]`。那是如实的(见 `store.commit` 的 JSDoc),
+     * 不是「没接上」。
+     */
+    await store.commit(commitContext.trailers);
   }, [repository, workingDirectory, commitContext, onOversizedFiles, store]);
 
   const onSubmitCommit = useCallback((): void => {
@@ -3860,6 +4076,167 @@ function CommitBox(props: {
    * `docs/probes/changes-commit-flow-probe.mjs` 与
    * `docs/probes/rebase-continue-route-probe.mjs`。
    */
+  /**
+   * **描述框自己的 ref** —— 镜像 `FocusContainer` 的 `onClick` 靠它聚焦描述框,
+   * 与上游 `commit-message.tsx:1192-1206` 的
+   * `if (!event.defaultPrevented) { this.descriptionComponent.focus() }` 同一件事
+   * (上游那个 `descriptionComponent` 是 `AutocompletingTextArea` 实例的 `focus()`,
+   * 由 `onDescriptionFieldRef` 落的;我们只有一个宿主 `<textarea>`,所以直接持 ref)。
+   *
+   * ## 为什么用 `cloneElement` 把 `onClick` 挂到镜像件上(而不是重写一个容器)
+   *
+   * 镜像 `FocusContainer` 收 `onClick` 这个 prop(`focus-container.tsx:7`)并原样
+   * 转发给那个包装 div(`:77-81`)。所以「接上」= **给它传一个 `onClick`**,与上游
+   * `commit-message.tsx:1813` 的 `onClick={this.onFocusContainerClick}` 同形。
+   *
+   * 但**容器本身**必须仍然是镜像件渲出来的那一个(类 `focus-container` +
+   * `onMouseDown` 的 `preventDefault` 都在它里面)⇒ 用 `cloneElement` 在**产物元素**上
+   * 补一个 prop,而不是另写一个 div 包一层(那会得到两层 div,`e.target === wrapperRef`
+   * 的判断对象就变了)。
+   *
+   * ⚠️ **`cloneElement` 的第 2/3 个参数别传错**(实测踩过,容器当场渲染成空 div、
+   * 文本域整个消失):第 2 个是 `config`(要补的 props),第 3 个起才是 `children`。
+   * 传 `cloneElement(el, config)` 时**原 children 保留**;一旦多传一个 `null`
+   * (`cloneElement(el, config, null)`),那个 `null` 会被当成新的 children ⇒
+   * 原来的子节点被**整个丢掉**。React 自己对第 2 个参数里的字符串/数字有特殊处理
+   * (`typeof config === 'object' && config !== null` 才当 props),这也是上游
+   * 那份镜像件从来没有这个问题的原因 —— 它是被 JSX 调的,不走这条路径。
+   *
+   * ## 刻意没有照抄的两处(别读成抄漏)
+   *
+   * 1. **`onKeyDown` 没接**(上游 `:1812` 的 `onFocusContainerKeyDown`):本仓把
+   *    `react` 标成 external(`scripts/build.mjs:136`)、宿主给的是 React 18,
+   *    而镜像件是**类组件**、`IFocusContainerProps` 里没有 `children`(见
+   *    `createElement` 那处注释)⇒ 传 `onKeyDown` 类型上过不去,而镜像文件与上游
+   *    逐字节相同、**不许改**(`verify-mirror.mjs`)。行为差别只有一条:
+   *    「焦点在操作行按钮上时按 `Cmd/Ctrl+Enter` 也能提交」我们没有(文本域自己
+   *    那份 `onKey` 照旧)。
+   * 2. **`event.defaultPrevented` 那一句没写**:镜像件的 `onMouseDown` 只在
+   *    「命中容器自己」时 `preventDefault`(`:89-96`),而**正是那一格**不会触发
+   *    这次聚焦 —— 换句话说,能走到这个 `onClick` 的点击必然是「打中了子元素」,
+   *    `defaultPrevented` 恒为 false。为可读性保留 `if` 也只是复述一遍上游的注释。
+   *    这条结论由探针 `changes-description-blank-click-probe` 的 `D3` 现场钉住
+   *    (`preventedAfterDispatch === true` 的那一格,`e.target` 就是容器)。
+   */
+  /*
+   * ⚠️ 泛型必须是 `HTMLTextAreaElement | null`(而不是只写元素类型):只写元素类型时
+   * `useRef` 回的是 `RefObject<T>`,它的 `current` 是 **readonly** ⇒ 下面
+   * `onDescriptionElementRef` 里那句赋值在类型层过不去(TS2540,实测)。
+   * 这不是 React 18 专有写法:`useRef<T|null>(null)` 在 17/18 两代都是
+   * `MutableRefObject<T|null>`。
+   */
+  const descriptionRef = useRef<HTMLTextAreaElement | null>(null);
+  const onDescriptionContainerClick = useCallback((): void => {
+    descriptionRef.current?.focus();
+  }, []);
+
+  /**
+   * **描述框里面那个真 `<textarea>`** —— 只把它收进 `descriptionRef`,**一个类都不补**。
+   *
+   * `descriptionRef` 的唯一消费方是 `onDescriptionContainerClick`
+   * (镜像 `FocusContainer` 的 `onClick` ⇒ 上游 `commit-message.tsx:1192-1206` 的
+   * `this.descriptionComponent.focus()`)。接的是镜像件 `onElementRef` 给我们的那个
+   * 内部元素(上游 `commit-message.tsx:1824` 的 `onDescriptionTextAreaRef` 是同一处 seam)。
+   *
+   * ## 2026-10 修订:去掉「把配方类补到真元素上」那一步(功能点 7.16 的适配层)
+   *
+   * 改前这里还有一句 `stampClassOnElement('gw-area', element)`,于是**容器与真
+   * `<textarea>` 同时**带 `.gw-area`。用户截图报的正是它:
+   * 「描述 输入框 有问题,怎么包了两层?输入框高度还嵌套了?」
+   *
+   * 为什么两层会变成「嵌套高度」—— 不是审美问题,是两条**实测**的机制:
+   *   1. `.gw-area` 带 `min-height:44px` ⇒ 同一份高度约束在两层**各声明一条**。
+   *      渲染高在改前**恰好是对的**(那条「视觉清零」补丁把容器的 padding/border 都
+   *      清成 0,把增量抵消掉了;探针实测:改前容器 46px = 真元素 46px + 0,
+   *      与 7.16 之前那个裸 `textarea.gw-area` 的 46px 逐像素相等),所以这一条
+   *      **只有补丁退役、或真元素再被补一次类时才现形** —— 那正是探针
+   *      `changes-commit-input-box-probe` 的 `B6` 阳性对照量到的:补上类 46px ⇒ 54px;
+   *   2. `.gw-area` 还带 `resize:vertical`,而 `resize` **只在 `overflow` 不为
+   *      `visible` 的元素上生效** —— 容器有 `overflow:hidden`(它来自上游
+   *      `ui/_autocompletion.scss:12`),所以容器上**真的画出了第二个拖拽角**
+   *      (改前实测:容器 `resize=vertical` + `overflow=hidden/hidden`,真元素
+   *      `resize=vertical` + `overflow=auto/auto`),拖容器那个角撑高的是一层
+   *      **看不见的框**,里面那个文本域一动不动。
+   * ⇒ 用户看到的「两层」是结构上的两层真源;两条判据(`B2`/`B4`)量的就是它们。
+   * 探针与实测读数逐条写在 `docs/probes/changes-commit-input-box-probe.mjs` 的文件头。
+   *
+   * ## 上游的分工(逐条量过,照它做)
+   *
+   *   镜像件 `autocompleting-text-input.tsx:562-570`:`className` 挂在**它自己的容器**
+   *   上,`renderTextInput()`(`:434-471`)给真 `input` / `textarea` 的那张 props 表里
+   *   **根本没有 `className`** —— 上游就是这么设计的(`IAutocompletingTextInputProps`
+   *   的 `className` JSDoc 逐字写着「applied to the rendered top level element」)。
+   *   上游于是用**后代选择器**把「框」与「里面的元素」分开:
+   *     · `ui/changes/_commit-message.scss:209-212` —— 容器画 `border / border-radius /
+   *       background`(那个「假文本框」);
+   *     · `:236-250` —— `textarea` 那条规则把 `border` 清成 `none`、`resize` 清成
+   *       `none`、内边距与字号写在**里面那个元素**上;
+   *     · `:243` —— `min-height` 也写在**里面那个元素**上。
+   *   ⇒ 「配方只落在一层」是上游的设计,不是我们发明的。
+   *
+   * ## 我们的落点(与上游的一处**有意**差别,理由必须留下)
+   *
+   * 上游描述框的框画在 `FocusContainer`(`.description-focus-container`)上,
+   * 我们画在**镜像件自己的容器**上(`.autocompletion-container.gw-area`,也就是
+   * `className` 天然落到的那个元素)。两条理由:
+   *   a. 这是 `className` 的落点 —— 不补类、不写重置规则就成立(改前那条
+   *      `.gw-input.autocompletion-container` 的「视觉清零」补丁随之**退役**,
+   *      见 `src/client/styles.ts` 里那一段);
+   *   b. 我们的 `.gw-cm-desc`(FocusContainer)外面还有 `padding:2px 0`,而
+   *      **动作行是它的兄弟**:把框画在 FocusContainer 上就等于让
+   *      「生成 / 模型 / 齿轮」那一行也进框,那不是 7.16 之前的样子,
+   *      而且会动到 `commit-form-layout-probe` / `commit-form-parity-probe` 量的一整族几何。
+   *      (这条 2026-10 第二次修订时同样解释了为什么**焦点描边**也从 FocusContainer
+   *      上删掉:那一圈 box-shadow 画的是 `.gw-cm-desc` 的整个盒子,所以它本来也
+   *      罩着动作行。删掉之后这个 div 一个可见像素都不画,只剩 2px 可点空白。
+   *      用户原话与裁决记在 `src/client/styles.ts` 的 `.gw-cm-desc` 上方。)
+   *
+   * 摘要框照同一条规矩做(同样是容器那一层画框),理由写在
+   * `src/client/styles.ts` 里那条后代规则的注释里 —— 上游对摘要用的是
+   * `.text-box-component input`(`ui/_text-box.scss:20-25` + `mixins/_textboxish.scss`),
+   * 也就是**里面那个元素**画框;我们**刻意不跟**那半边,换来的是两个框同一套结构、
+   * 以及那条重置补丁的退役。
+   */
+  const onDescriptionElementRef = useCallback(
+    (element: HTMLTextAreaElement | null): void => {
+      descriptionRef.current = element;
+    },
+    [],
+  );
+
+  /**
+   * **提交信息输入框(摘要 / 描述)的右键菜单** —— 上游 `commit-message.tsx:929-950`
+   * 的 `onAutocompletingInputContextMenu`,由 `:1795`(摘要)与 `:1832`(描述)
+   * 两处挂在 `AutocompletingInput` / `AutocompletingTextArea` 的 `onContextMenu` 上。
+   *
+   * 三件必须在这里说清的事:
+   *
+   *  1. **`preventDefault()` 是刻意的**(与 `rowMenu` / `headerMenu` 同一个约定):
+   *     原生右键菜单画在网页内容**之上**,不挡就只看得到原生那个、我们的菜单被压在下面。
+   *     ⇒ 真浏览器里这两个输入框上**不再出现原生菜单**(代价:原生的拼写建议与原生粘贴
+   *     也一并不可达;前者没有浏览器等价 API,已登记在 `commit-input-menu.ts` 的文件头,
+   *     后者由那份菜单里的「粘贴」项接住)。
+   *  2. **`event.currentTarget` 必须在这一句里同步取走**(`target`),因为菜单是
+   *     异步打开的:React 的事件对象虽然在 17+ 不再池化,但 `currentTarget` 只在
+   *     派发期间有意义。
+   *  3. **粘贴的出声通道是 `store.toast`**:读剪贴板被拒/API 不在时给一条**点名原因 +
+   *     替代动作**的 toast(本仓那条「不许静默 no-op」的规矩,先例是
+   *     `commit-avatar-notices.ts` 那一族)。`notify` 的 `kind` 由结局决定:
+   *     被拒是 `err`,「剪贴板是空的」是 `ok`(它不是失败)。
+   */
+  const onCommitInputContextMenu = useCallback(
+    (event: React.MouseEvent<HTMLInputElement | HTMLTextAreaElement>): void => {
+      event.preventDefault();
+      const target = event.currentTarget;
+      void showCommitInputMenu(commitInputStateOf(target), {
+        paste: () => {
+          void pasteFromClipboard(target, (message, kind) => { store.toast(message, kind); });
+        },
+      });
+    },
+    [store],
+  );
+
   const rebaseConflictState: RebaseConflictState = useMemo(() => ({
     kind: 'rebase',
     currentTip: status?.headSha ?? '',
@@ -3897,6 +4274,142 @@ function CommitBox(props: {
     );
   }
 
+
+  /*
+    ==========================================================================
+    提交信息两个输入框 = 镜像 AutocompletingTextArea / AutocompletingInput
+    (功能点 7.16,2026-10)
+    ==========================================================================
+    Upstream wires them at 'ui/changes/commit-message.tsx:1783-1839':
+
+        AutocompletingInput    ... the summary field  (':1783-1804')
+        AutocompletingTextArea ... the description    (':1813-1839')
+
+    and both get the same three things from upstream that we now wire too:
+      - 'autocompletionProviders': the list built by buildAutocompletionProviders
+        and filtered by 'findCommitMessageAutoCompleteProvider'
+        ('commit-message.tsx:270-278'), i.e. everything EXCEPT the co-author
+        provider. We read it from 'store.commitMessageAutocompletionProviders',
+        which applies exactly that filter;
+      - 'onValueChanged' (NOT onChange): the mirror's own 'onChange' wrapper
+        updates the invisible caret and tries autocompletion before forwarding
+        the text ('autocompleting-text-input.tsx:782-793');
+      - 'onContextMenu' (function point 7.24's in-page edit menu).
+
+    WHAT DID NOT CHANGE (deliberately, and load-bearing):
+      - the recipe class ('gw-input' / 'gw-area') is on the CONTAINER the mirror
+        renders — that is where the mirror puts the 'className' prop, and it is
+        upstream's own design. It is NOT also stamped onto the inner element:
+        doing exactly that was the 2026-10 defect the user reported ("wrapped in
+        two layers, and the height is nested"). See 'onDescriptionElementRef'
+        above, and the 'src/client/styles.ts' rules that strip the inner element
+        instead. Probe criteria therefore query the container by class and the
+        real element structurally ('.gw-cm-summary input' / '.gw-cm-desc
+        textarea');
+      - 'placeholder', 'value', 'readOnly', 'onKeyDown' (Cmd/Ctrl+Enter) and
+        'onContextMenu' are the same values as before;
+      - the description field is still the only child of the mirrored
+        FocusContainer apart from the action bar (function point 7.2).
+
+    WHAT WE DROPPED HERE (and why that is not a silent gap):
+      - the summary no longer passes 'onElementRef'. Upstream passes
+        'onSummaryInputRef' ('commit-message.tsx:1790'), but its only readers are
+        'this.summaryTextInput.focus()' (':541') and a popover anchor (':1463'),
+        and our port has neither path. Passing a callback that stores the element
+        nobody reads would be dead code, so we pass nothing; the description still
+        passes 'onElementRef' because 'descriptionRef' has a real reader
+        ('onDescriptionContainerClick').
+  */
+  const commitMessageAutocompletionProviders = store.commitMessageAutocompletionProviders(repository);
+
+  /*
+    'descriptionInput' and 'actionBar' are extracted into variables instead of
+    being inlined at the FocusContainer call below, because esbuild cannot parse
+    JSX markup written directly inside a call argument list (it reports
+    'Expected ")" but found "className"'). Same markup, same DOM place.
+  */
+  const descriptionInput = (
+    <AutocompletingTextArea
+      className="gw-area"
+      screenReaderLabel="提交描述"
+      placeholder="描述(可选)"
+      value={form.description}
+      readOnly={form.generating}
+      onValueChanged={(value: string) => store.setCommitField('description', value)}
+      onKeyDown={onKey}
+      onContextMenu={onCommitInputContextMenu}
+      onElementRef={onDescriptionElementRef}
+      autocompletionProviders={commitMessageAutocompletionProviders}
+    />
+  );
+
+  const actionBar = (
+    <div className="row" style={{ flexWrap: 'nowrap' }}>
+      <button className="gw-btn" aria-disabled={form.generating || status === null || stagedCount === 0}
+        style={{ flexShrink: 0, whiteSpace: 'nowrap' }}
+        title={stagedCount === 0
+          ? '请先勾选一个或多个文件(生成只依据纳入提交的变更)'
+          : '用 DSH 模型列表里的模型生成提交信息'}
+        onClick={() => {
+          if (form.generating || status === null || stagedCount === 0) { return; }
+          if (form.summary.trim() !== '') setConfirmGenerate(true);
+          else void store.generateCommitMessage({ force: true });
+        }}>
+        <Icon name="sparkle" size={11} />
+        {form.generating ? '生成中…' : '生成'}
+      </button>
+      {/*
+        模型**选择器**(用户 2026-10-07:「生成按钮右边的模型应该是模型选择器,
+        要读取宿主可用的模型列表,允许用户选择不同的模型来生成 commit msg」)。
+
+        改前这里是一个只读的 `<span>{snap.model.split('/').pop()}</span>` ——
+        它显示的就是**真正会被发出去**的那个模型(生成请求的 `provider`/`model`
+        由 `store.generateCommitMessage` 从 `snap.model` 拆出来),但用户改不了它:
+        想换模型必须去设置弹窗的「默认模型」。
+
+        数据源是**宿主的模型清单** `snap.models`(`api.models()` → 宿主
+        `commit-message/models` → `ctx.llm.listProviders()` + `listModels()`,
+        由 `store.start()` 的 `loadPrefs() → loadModels()` 读回)。
+
+        选中项直接写进**同一个偏好**(`store.setModelPersisted`),也就是设置页
+        「默认模型」那个下拉写的**同一个键** —— 不新增第二份偏好存储。
+        值用 `provider/id`(与 `snap.model` 和 `store.loadModels` 的判据同形)。
+
+        **两处文案(用户 2026-10-07 第二轮裁决)**:
+         · **收起时只显示模型名**(`modelButtonText()`,用户原话「当前选中模型只用显示
+           模型名称,不用显示 provider 名称」);
+         · **下拉列表里保持原设计**:每一项 `name · providerName`,provider 名在**末尾**。
+        这两条**原生 `<select>` 满足不了**(`<option label>` 会把两处一起改短 ——
+        本机 headless Chrome 实测的 AX 树读数与理由写在 `modelMenuItems()` 的 JSDoc 里),
+        所以下拉用本仓已有的菜单宿主,与齿轮同一个机制。
+
+        **宽度**(用户第二轮追加:「宽度可缩小一点」):`maxWidth: 132`;超长模型名按
+        `text-overflow:ellipsis` 截断,完整 `provider/id` 仍在 `title` 与菜单里。
+        观感(截断是否好看、宽度是否合适)只能由用户截图判定 —— jsdom 没有布局引擎。
+      */}
+      <ModelSelect
+        models={snap.models}
+        value={snap.model}
+        onSelect={(next) => { void store.setModelPersisted(next); }} />
+      {/* 空操作 span:本面没有 `.gw-commit .row .grow` 规则(见上面操作行的注释),右对齐靠齿轮的 marginLeft。 */}
+      <span className="grow" />
+      <button className="gw-btn ghost" title="提交选项" aria-expanded={optionsOpen}
+        style={{ marginLeft: 'auto', flexShrink: 0 }}
+        onClick={() => {
+          /*
+           * 上游 `commit-message.tsx:1079-1128`:`e.preventDefault()` 之后现拼
+           * `IMenuItem[]` 交给 `showContextualMenu`。`optionsOpen` 只用来表达
+           * 「菜单正开着」(aria-expanded),菜单关闭后复位 —— 面板已经不在了
+           * (用户要求:设置项进菜单而不是出现在下面),但状态位保留。
+           */
+          setOptionsOpen(true);
+          void showCommitOptionsMenu(store, form).finally(() => { setOptionsOpen(false); });
+        }}>
+        <Icon name="gear" size={12} />
+      </button>
+    </div>
+  );
+
   return (
     <div className="gw-commit">
       {/*
@@ -3909,6 +4422,9 @@ function CommitBox(props: {
         ⚠️ **一处有意偏离**:上游那条 50 字长度提示(`:1801-1803`)在 `.summary` **内部**,
         但它是 `position:absolute` 的浮标、不参与 flex 流;我们的是**块级**提示
         (在输入框下方独占一行),放进 flex 行会被挤成第三列 ⇒ 保持在本行**之后**。
+        **位置这半边是刻意保留的偏离**(见功能点 7.20),但**闸门那半边已经对齐上游**:
+        该不该显示由偏好 `showCommitLengthWarning` 决定(功能点 12.13),
+        值与默认见 `src/client/prefs.ts` 里那个键的 JSDoc。
       */}
       <div className="gw-cm-summary">
         <CommitAuthorAvatar
@@ -3916,103 +4432,131 @@ function CommitBox(props: {
           onOpenGitSettings={openGitSettings}
           onOpenRepositorySettings={openRepositorySettings}
         />
-        <input className="gw-input" placeholder={placeholder}
-          value={form.summary} readOnly={form.generating}
-          onChange={(event) => store.setCommitField('summary', event.target.value)} onKeyDown={onKey} />
+        <AutocompletingInput
+          className="gw-input"
+          screenReaderLabel="提交摘要"
+          required={true}
+          placeholder={placeholder}
+          value={form.summary}
+          readOnly={form.generating}
+          onValueChanged={(value: string) => store.setCommitField('summary', value)}
+          onKeyDown={onKey}
+          onContextMenu={onCommitInputContextMenu}
+          autocompletionProviders={commitMessageAutocompletionProviders}
+        />
       </div>
-      {form.summary.length > 50 && (
+      {/*
+        上游的闸门逐字是(`commit-message.tsx:1747-1751`):
+        `showCommitLengthWarning && !showRepoRuleCommitMessageFailureHint &&
+         summary.length > IdealSummaryLength`。我们**没有**那个 repo-rules 提示
+        (产品里恒 false),所以这里就是「偏好 **且** 超过 50」两项。
+      */}
+      {showCommitLengthWarning && form.summary.length > 50 && (
         <div className="gw-hint" style={{ padding: 0 }}>
           好的摘要通常在 50 个字符以内(Desktop 的 IdealSummaryLength);更详细的内容放到描述里。
         </div>
       )}
-      <textarea className="gw-area" placeholder="描述(可选)"
-        value={form.description} readOnly={form.generating}
-        onChange={(event) => store.setCommitField('description', event.target.value)} onKeyDown={onKey} />
-
       {/*
-        操作行 —— **三项必须同一行,齿轮右对齐,生成与模型选择器依次左对齐**
-        (用户 2026-10-07 第三轮裁决)。
+        ==================================================================
+        Description input -- function point 7.2, "click the blank area to focus".
+        Wired the same way upstream wires it: through the MIRRORED FocusContainer,
+        not a hand-written click handler.
+        ==================================================================
+        Upstream 'ui/changes/commit-message.tsx:1811-1839' wraps two things in it:
 
-        改前的两个问题(都是布局,不是数据):
-         1. `.gw-commit .row{display:flex;…;flex-wrap:wrap}`(`styles.ts:466`)⇒ 空间紧时
-            **齿轮会被挤到第二行**;这里用**行内** `flexWrap:'nowrap'` 顶掉它
-            (不动那个共享规则 —— 它还给别的行用);
-         2. 行里那个 `<span className="grow" />` 在本面**是个空操作**:全仓只有
-            `.gw-toolbar .grow{flex:1}`(`styles.ts:416`)与 `.gw-pitem .grow{…}`
-            (`:608`),**没有** `.gw-commit .row .grow` 的规则 ⇒ 齿轮一直贴在模型选择器
-            右边,不是右对齐。所以右对齐改由齿轮自己的 `marginLeft:'auto'` 兑现
-            (span 保留:先做不删,而且它将来若被补上规则也不冲突)。
+            FocusContainer(className='description-focus-container',
+                           onClick=this.onFocusContainerClick)
+              +-- AutocompletingTextArea   ... the description input
+              +-- this.renderActionBar()   ... the action bar (generate / model / gear)
 
-        ⚠️ **与上游不同,而且这一次是用户裁决压过上游**:上游
-        `ui/changes/commit-message.tsx:1235-1245` 的 `.action-bar` 是
-        `display:flex`(无 `justify-content`、无 `margin-left:auto`),齿轮**紧跟**
-        生成按钮左对齐(`_commit-message.scss:252-257`)。用户明确要求齿轮右对齐 ⇒
-        按用户的来;**不要**把这一条读成「抄漏了」。
+        and 'onFocusContainerClick' (':1192-1206') has exactly two statements:
+          - if 'event.defaultPrevented' then RETURN (the click landed on the
+            container itself, see below);
+          - otherwise 'this.descriptionComponent.focus()'.
+
+        NOTE (this cost a build cycle -- keep the block in prose): an esbuild JSX
+        comment child is NOT opaque. A slash-star sequence inside it ends the
+        comment early, and a backtick inside it makes esbuild enter expression
+        context so that later braces are parsed as code. Both failures point at
+        harmless lines. Hence: no JSX tags, no backticks, no slash-star and no
+        braces in this block.
+
+        WHAT FocusContainer ACTUALLY DOES (mirror at
+        src/core/desktop/ui/lib/focus-container.tsx, byte-identical to upstream
+        references/desktop/app/src/ui/lib/focus-container.tsx; verify-mirror.mjs
+        enforces that):
+          - it renders one wrapper div (class: focus-container plus our className)
+            and does NOT swallow the click -- its onClick forwards to props
+            (':77-81');
+          - 'onMouseDown' (':89-96'): if the event target IS the wrapper element
+            itself, it calls preventDefault(). That kills the native
+            focus-transfer of the press (and avoids a focusout/focusin flicker),
+            so the subsequent click sees 'defaultPrevented === true' and upstream
+            ':1193' does NOT focus. Net effect: clicking the container's own blank
+            area focuses nothing -- which is fine, because the same press already
+            put the caret in the input natively;
+          - the interesting half is the other direction: when the press lands on a
+            CHILD (the input, or one of the action-bar buttons) the target is not
+            the wrapper, nothing is prevented, so 'descriptionComponent.focus()'
+            really runs. That is how upstream implements its own comment "we do not
+            want to steal focus when the user clicks one of the buttons in the
+            action bar";
+          - 'onWrapperRef' (':63-75') additionally attaches NATIVE focusin/focusout
+            listeners, used only to toggle the 'focus-within' class (a CSS outline
+            aid); they take no part in the focus decision.
+
+        WHAT WE ADAPT HERE:
+          - copied: the same mirrored FocusContainer wraps "input + action bar", and
+            no click handler is hand-written. The class name 'gw-cm-desc' is ours:
+            upstream's '.description-focus-container' hangs under
+            '.commit-message-component', which our hand-written commit form does not
+            render, so it can never match (same reason '.gw-cm-summary' exists);
+          - adapted: the action bar stays INSIDE the container (same position as
+            upstream), so the shared '.gw-commit .row' rule still reaches it -- a
+            descendant selector does not care about the extra div in between. The
+            probes 'commit-form-layout-probe', 'commit-form-selector-and-options-probe'
+            and 'changes-generate-failure-probe' all query '.gw-commit .row button'
+            and keep matching;
+          - deliberate deviation, 2026-10 REWRITTEN (do not read it as "copied
+            wrong"): upstream paints the border/radius/background on the
+            FocusContainer itself ('_commit-message.scss:209-212', the
+            '.description-focus-container' rule) and strips the textarea
+            (':236-250'). We now strip the textarea too -- but our box lives one
+            level lower, on the mirror's own container ('.autocompletion-container
+            .gw-area'), NOT on this FocusContainer. Why: (a) that is where the
+            'className' prop already lands by upstream's own design, so no reset
+            rule is needed; (b) this FocusContainer also wraps the action bar, so
+            painting the box here would put the generate/model/gear row inside the
+            border -- not the pre-7.16 look, and it would move geometry that
+            'commit-form-layout-probe' / 'commit-form-parity-probe' measure. The
+            FULL reason is in the 'onDescriptionElementRef' comment above. After the
+            2026-10 second revision (the user reported a blue ring on top of the
+            box, plus a resize grip that was not on the corner) what this
+            FocusContainer keeps is ONLY the 2px vertical padding that makes 7.2's
+            blank area clickable: the ':focus-within' box-shadow ring was DELETED,
+            and the focus indication now lives on the box itself (the same
+            ':focus-within' border-color rule the summary box uses). See the
+            comments on '.gw-cm-desc' and on the ':focus-within' rule in
+            'styles.ts'; the probe criteria are B10 (this div paints nothing) and
+            B11 (the box's computed border-color really changes on focus).;
+          - known gap: upstream also forwards 'onKeyDown' on the container (':1812'),
+            so Cmd/Ctrl+Enter submits from anywhere inside it. We keep that handler on
+            the textarea only (see the 'descriptionRef' comment above); "Cmd+Enter on
+            an action-bar button also submits" is therefore an upstream behaviour we
+            do NOT have, recorded here rather than faked.
       */}
-      <div className="row" style={{ flexWrap: 'nowrap' }}>
-        <button className="gw-btn" aria-disabled={form.generating || status === null || stagedCount === 0}
-          style={{ flexShrink: 0, whiteSpace: 'nowrap' }}
-          title={stagedCount === 0
-            ? '请先勾选一个或多个文件(生成只依据纳入提交的变更)'
-            : '用 DSH 模型列表里的模型生成提交信息'}
-          onClick={() => {
-            if (form.generating || status === null || stagedCount === 0) { return; }
-            if (form.summary.trim() !== '') setConfirmGenerate(true);
-            else void store.generateCommitMessage({ force: true });
-          }}>
-          <Icon name="sparkle" size={11} />
-          {form.generating ? '生成中…' : '生成'}
-        </button>
-        {/*
-          模型**选择器**(用户 2026-10-07:「生成按钮右边的模型应该是模型选择器,
-          要读取宿主可用的模型列表,允许用户选择不同的模型来生成 commit msg」)。
-
-          改前这里是一个只读的 `<span>{snap.model.split('/').pop()}</span>` ——
-          它显示的就是**真正会被发出去**的那个模型(生成请求的 `provider`/`model`
-          由 `store.generateCommitMessage` 从 `snap.model` 拆出来),但用户改不了它:
-          想换模型必须去设置弹窗的「默认模型」。
-
-          数据源是**宿主的模型清单** `snap.models`(`api.models()` → 宿主
-          `commit-message/models` → `ctx.llm.listProviders()` + `listModels()`,
-          由 `store.start()` 的 `loadPrefs() → loadModels()` 读回)。
-
-          选中项直接写进**同一个偏好**(`store.setModelPersisted`),也就是设置页
-          「默认模型」那个下拉写的**同一个键** —— 不新增第二份偏好存储。
-          值用 `provider/id`(与 `snap.model` 和 `store.loadModels` 的判据同形)。
-
-          **两处文案(用户 2026-10-07 第二轮裁决)**:
-           · **收起时只显示模型名**(`modelButtonText()`,用户原话「当前选中模型只用显示
-             模型名称,不用显示 provider 名称」);
-           · **下拉列表里保持原设计**:每一项 `name · providerName`,provider 名在**末尾**。
-          这两条**原生 `<select>` 满足不了**(`<option label>` 会把两处一起改短 ——
-          本机 headless Chrome 实测的 AX 树读数与理由写在 `modelMenuItems()` 的 JSDoc 里),
-          所以下拉用本仓已有的菜单宿主,与齿轮同一个机制。
-
-          **宽度**(用户第二轮追加:「宽度可缩小一点」):`maxWidth: 132`;超长模型名按
-          `text-overflow:ellipsis` 截断,完整 `provider/id` 仍在 `title` 与菜单里。
-          观感(截断是否好看、宽度是否合适)只能由用户截图判定 —— jsdom 没有布局引擎。
-        */}
-        <ModelSelect
-          models={snap.models}
-          value={snap.model}
-          onSelect={(next) => { void store.setModelPersisted(next); }} />
-        {/* 空操作 span:本面没有 `.gw-commit .row .grow` 规则(见上面操作行的注释),右对齐靠齿轮的 marginLeft。 */}
-        <span className="grow" />
-        <button className="gw-btn ghost" title="提交选项" aria-expanded={optionsOpen}
-          style={{ marginLeft: 'auto', flexShrink: 0 }}
-          onClick={() => {
-            /*
-             * 上游 `commit-message.tsx:1079-1128`:`e.preventDefault()` 之后现拼
-             * `IMenuItem[]` 交给 `showContextualMenu`。`optionsOpen` 只用来表达
-             * 「菜单正开着」(aria-expanded),菜单关闭后复位 —— 面板已经不在了
-             * (用户要求:设置项进菜单而不是出现在下面),但状态位保留。
-             */
-            setOptionsOpen(true);
-            void showCommitOptionsMenu(store, form).finally(() => { setOptionsOpen(false); });
-          }}>
-          <Icon name="gear" size={12} />
-        </button>
-      </div>
+      {/*
+        Deviation #3, purely to satisfy the TYPE CHECKER (not a behavioural one):
+        this wrapper is written with createElement instead of the JSX element
+        syntax. Reason: our React types are @types/react 18, where a CLASS
+        component no longer gets the implicit children prop (the JSX tag form
+        fails with TS2322 'children does not exist on type ... IFocusContainerProps').
+        The mirror file is byte-identical to upstream and MUST NOT be edited
+        (verify-mirror.mjs), and upstream compiled fine only because its React 17
+        types allowed it. createElement carries children with no prop-type check,
+        and the rendered DOM is identical.
+      */}
+      {cloneElement(createElement(FocusContainer, { className: 'gw-cm-desc' }, descriptionInput, actionBar), { onClick: onDescriptionContainerClick })}
 
       {/*
         **共同作者行**(上游 `ui/changes/commit-message.tsx:1806` 的
@@ -4029,7 +4573,7 @@ function CommitBox(props: {
           coAuthors={snap.coAuthors}
           isCommitting={isCommitting}
           isAmending={form.amend}
-          autocompletionProviders={store.coAuthorAutocompletionProviders()}
+          autocompletionProviders={store.coAuthorAutocompletionProviders(repository)}
         />
       )}
 
@@ -4326,7 +4870,7 @@ function StashFileRow(props: {
  * | 文件列表 | `ui/history/file-list.tsx`(虚拟滚动 + 图标) | 手写的行(状态字母 + 路径),无虚拟滚动 |
  * | 文件列表宽度可拖 | `Resizable` + `stashedFilesWidth` 偏好 | 固定宽度(没有那个偏好项) |
  * | 缩进/几何 | `_stash-diff-viewer.scss` 一族 | 未接(jsdom 无布局引擎 ⇒ 本探针不判几何) |
- * | 「Do not show this message again」 | `confirm-discard-stash.tsx:60-72` 的复选框 + 偏好写侧 | **没有写侧** ⇒ 恒走确认框(照上游默认值 `true`) |
+ * | 「Do not show this message again」 | `confirm-discard-stash.tsx:60-72` 的复选框 + 偏好写侧 | **弹窗里那个复选框仍然没有**(共用 `bits.tsx` 的 `ConfirmDialog`,无复选框面)⇒ 写侧只剩**设置页**(`preferences-pages.tsx` 的「确认提示」三行);`confirmDiscardStash` 这个**键**已经接了(功能点 12.16) |
  */
 function StashDiffViewer(props: {
   store: GitStore;

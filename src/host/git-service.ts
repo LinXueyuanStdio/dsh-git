@@ -25,7 +25,7 @@ import {
   branchRenameArgv, checkoutBranchArgv, checkoutDetachArgv, checkoutPathsArgv, checkoutRemoteArgv, cherryPickArgv,
   cleanArgv, cloneArgv, commitArgv, commitDetailStatArgv, configGetArgv, configGetEffectiveArgv, configSetArgv, configUnsetArgv, diffCommitArgv,
   diffCommitNumstatArgv, diffNumstatArgv, diffStagedArgv, diffUnstagedArgv, diffUntrackedArgv,
-  fetchArgv, initArgv, logArgv, nameStatusCommitArgv, pullArgv, pushArgv, pushDeleteRemoteBranchArgv,
+  fetchArgv, initArgv, interpretTrailersArgv, logArgv, nameStatusCommitArgv, pullArgv, pushArgv, pushDeleteRemoteBranchArgv,
   lsFilesArgv, remoteListArgv, remoteSetUrlArgv, remoteUrlArgv, resetMixedArgv, resetPathsArgv, resetToCommitArgv,
   rebaseInteractiveArgv,
   revertArgv, rmCachedAllArgv,
@@ -309,6 +309,15 @@ export interface CommitRequest {
   allowEmpty?: boolean;
   /** 参与提交的路径;空数组 = 直接提交当前索引。 */
   paths: readonly string[];
+  /**
+   * 提交消息的 trailer(`Co-Authored-By` 等)—— 逐字对应上游
+   * `ICommitContext.trailers`(`models/commit.ts:31`)。
+   *
+   * 值的来源是上游 `ui/changes/commit-message.tsx:577-585` 的 `getCoAuthorTrailers()`
+   * (token 恒为 `'Co-Authored-By'`,value 是 `name <email>`),客户端原样送来。
+   * **省略或 `[]` ⇒ 一个字节都不追加**(与改前逐字节相同)。
+   */
+  trailers?: readonly { readonly token: string; readonly value: string }[];
 }
 
 /**
@@ -877,11 +886,50 @@ export class GitService {
     // (GitHub Desktop 之所以要重建,是因为它的勾选状态是客户端模型而非索引;
     //  见 app/src/lib/git/commit.ts:15-31。我们的模型是索引即真相,所以直接提交。)
     void request.paths;
-    const message = [request.message.trim(), (request.description ?? '').trim()]
+    let message = [request.message.trim(), (request.description ?? '').trim()]
       .filter((s) => s !== '')
       .join('\n\n');
     if (message === '' && request.amend !== true) {
       throw new GitServiceError('bad-request', '提交摘要不能为空。');
+    }
+    /*
+     * ---------- trailer(功能点 7.15:`Co-Authored-By` 真的写进提交消息) ----------
+     *
+     * 上游那一跳是 `lib/format-commit-message.ts:33-35`:
+     *
+     * ```ts
+     * return trailers !== undefined && trailers.length > 0
+     *   ? mergeTrailers(repository, message, trailers)   // lib/git/interpret-trailers.ts:152-176
+     *   : message
+     * ```
+     *
+     * 这里逐条对应,而且**顺序**也必须一样(先合并进消息文本,再写消息文件、再 commit):
+     *  · **真跑 git**:`git interpret-trailers --no-divider --trailer token=value`,
+     *    消息走 stdin(argv 由 `src/core/git-argv.ts` 的 `interpretTrailersArgv` 造);
+     *  · **不是字符串拼接**。差别是可观察的:位置(`trailer.ifexists` /
+     *    `trailer.where` 配置)、重复 trailer 的合并规则、以及正文里出现 `---`
+     *    时的截断语义,全都由 git 决定 —— 手拼一套只会在某些仓库配置下**静默分叉**;
+     *  · **空数组 ⇒ 一个字节都不追加**(连 `interpret-trailers` 都不跑),
+     *    所以「没有共同作者」的提交与改前逐字节相同。
+     *
+     * 为什么放在这里而不是客户端:消息文本的最终形态必须由**跑 git 的那一侧**定,
+     * 否则「客户端算出 A、宿主发出 B」这类分家没有判据。判据见
+     * `docs/probes/api-declaration-vs-host-probe.mjs` 的 `B2`(真 git 提交后
+     * 用 `git log -1 --format=%B` 读回消息逐字)与 `B3`(**同一次运行**里一个
+     * 不带 trailer 的对照提交必须**没有**那一行)。
+     */
+    const trailers = request.trailers ?? [];
+    if (trailers.length > 0) {
+      const merged = await this.must(
+        interpretTrailersArgv(trailers),
+        root,
+        '合并提交 trailer',
+        // `interpret-trailers` 要求 stdin 最后有换行,否则最后一行不被当作 trailer。
+        { input: `${message}\n` },
+      );
+      // 结尾的换行交给写文件那一步统一补(与 `trailers.length === 0` 时同形),
+      // 免得出现「有 trailer 时消息尾部多一个空行」这种只在一条分支上的差异。
+      message = merged.stdout.replace(/\n+$/, '');
     }
     // 消息文件必须落在仓库内:git 拒绝读取仓库外的 -F 文件。
     // 放在 .git 目录并传绝对路径:既不会被工作区状态看到,也不会被 git 当成 pathspec。

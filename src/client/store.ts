@@ -95,6 +95,27 @@ import type { ITrailer } from '../core/desktop/lib/git/interpret-trailers.ts';
  */
 import type { IAutocompletionProvider } from '../core/desktop/ui/autocompletion/autocompletion-provider.ts';
 /*
+ * `CoAuthorAutocompletionProvider` 是**值**(不是类型):两个分流都靠
+ * `instanceof` 判它(上游 `commit-message.tsx:273` / `:277` 用的就是 `instanceof`)——
+ * 按 `kind === 'user'` 挑会挑中普通的 `UserAutocompletionProvider`
+ * (两者 `kind` 都是 `'user'`),那会**静默丢掉**共同作者输入框的两条行为
+ * (理由逐字写在 `src/client/co-authors-row.tsx` 的 `findCoAuthorAutoCompleteProvider`)。
+ */
+import { CoAuthorAutocompletionProvider } from '../core/desktop/ui/autocompletion/user-autocompletion-provider.tsx';
+/*
+ * 整份清单的构造点(它内部调用**逐字镜像**的
+ * `ui/autocompletion/build-autocompletion-providers.ts`)。接缝(空 emoji 表 /
+ * 空数据源 / 空账户清单)与四类补全今天的真实性**逐条**写在那个文件的文件头。
+ */
+import { buildChangesAutocompletionProviders } from './commit-autocompletion.ts';
+/*
+ * `Repository` **只作类型**:两个自动补全清单方法的形参。
+ * 为什么用镜像那个模型而不是自己写 `{path, gitHubRepository}`
+ * (见 `changesAutocompletionProviders`):闸门 `gitHubRepository !== null` 必须
+ * 与 `src/client/co-authors-row.tsx` 读的**是同一个字段**,类型也必须同一份。
+ */
+import type { Repository } from '../core/desktop/models/repository.ts';
+/*
  * 镜像替身 `GitStore` **只作类型**(它就是本文件 `class GitStore` 要满足的那份
  * 契约;`implements Pick<MirrorGitStore, …>` 见类声明上方)。名字带 `Mirror` 前缀是
  * 为了避免与本文件的 `class GitStore` 撞名 —— 两个名字都必须是它们各自文件里的原名。
@@ -512,19 +533,28 @@ export function summaryOrPlaceholderOf(summary: string, files: readonly ChangedF
  *     (大小写逐字;`isCoAuthoredByTrailer`(`lib/git/interpret-trailers.ts:26-28`)
  *     比较时才 `toLowerCase()`)。
  *
- * ## 它今天**没有产品调用点**,原因(不是「忘了接」)
+ * ## 它的产品调用点(**2026-10 功能点 7.15 接通了**,前一版这段写的是「今天没有产品调用点」)
  *
  * 上游把这 9 行的结果放进 `ICommitContext.trailers`(`commit-message.tsx:617-626`),
  * 再由 `lib/format-commit-message.ts:33-35` 交给 `mergeTrailers()`
- * (一条 `git interpret-trailers --trailer …`,真跑 git)。我们这一侧**两处**都还没通:
- *   · `store.commit()` 发的载荷没有 `trailers` 字段(`api.commit`,
- *     `src/client/api.ts:1009-1012`);
- *   · 宿主 `commit` 路由也不收它(`src/host/routes.ts:877-889`),而
- *     `src/core/desktop/lib/git/interpret-trailers.ts:87-93` 的 `mergeTrailers`
- *     是**抛错替身**(`requiresHost`)。
- * ⇒ 把这个数组塞进**现在**的载荷 = 宿主静默忽略它 = 「界面收了但提交里没有」
- * (本仓最贵的那类静默缺陷)。所以本轮**只把唯一一份投影函数落下来**,
- * 端到端那一步(宿主路由 + `mergeTrailers`)写在报告里,不假装接通。
+ * (一条 `git interpret-trailers --trailer …`,真跑 git)。我们这一侧现在是**两跳**:
+ *  1. `src/client/changes-view.tsx` 的 `commitContext.trailers` 用**本函数**算出来
+ *     (`getCoAuthorTrailers(snap.coAuthors, repository !== null && repository.gitHubRepository !== null)`),
+ *     并由 `CommitBox` 交给 `store.commit(commitContext.trailers)` —— 两条提交路径
+ *     (直接提交 / 弹窗里的 Commit Anyway)交的是**同一个数组**;
+ *  2. `store.commit()` 把它放进 `api.commit` 的载荷;宿主 `commit` 路由收下
+ *     (`src/host/routes.ts` 的 `trailerList`,畸形输入 `bad-request`),
+ *     由 `src/host/git-service.ts` **真跑** `git interpret-trailers --no-divider`
+ *     (argv = `src/core/git-argv.ts` 的 `interpretTrailersArgv`,逐字照上游
+ *     `lib/git/interpret-trailers.ts:152-176`)。
+ *
+ * ⚠️ 两条**必须连着结论读**的事实(都不是缺陷,是读数):
+ *  · **产品路径上今天的 `trailers` 恒为 `[]`** —— 第二个实参那条闸门
+ *    (`repository.gitHubRepository !== null`)恒假(与功能点 7.14 剩下的**同一个**阻塞者);
+ *  · **宿主半改动 ⇒ 要重启 DSH**:旧宿主收到 `trailers` 会因为不认识这个字段而
+ *    **静默忽略**(载荷不拒)⇒ 那才是「界面收了、提交里没有」。重启之后由
+ *    `docs/probes/api-declaration-vs-host-probe.mjs` 的 `B1/B2/B3` 用**真 git**
+ *    把「消息里真的有那一行」读回来。
  *
  * @param coAuthors - 表单里当前的共同作者(**可能是 `UnknownAuthor`**)。
  * @param isCoAuthorInputEnabled - 上游 `commit-message.tsx:815-817` 的那条闸门
@@ -1058,6 +1088,21 @@ export class GitStore implements Pick<MirrorGitStore, 'setShowCoAuthoredBy' | 's
    * 「同一个仓库的选中态与共同作者一起被留/一起被弃」,不会出现一边命中一边不命中。
    */
   private readonly coAuthorStates = new Map<string, ICoAuthorState>();
+
+  /**
+   * **整份自动补全清单的缓存**(与 `repoStates` / `coAuthorStates` 同一个键:路径)。
+   *
+   * 上游只在 `props.repository.hash` / `props.accounts` / `emoji.size` 变化时重建
+   * (`ui/changes/sidebar.tsx:143-152` 的 `receiveProps`)。我们这边那三样里
+   * 只有第一条会变(接缝是常量),所以按路径缓存就等价 ——
+   * 而且它保证「同一个仓库的清单」是**同一个对象**,下游 props 不会每帧换引用。
+   *
+   * `null` = 还没建过。见 `changesAutocompletionProviders`。
+   */
+  private autocompletionCache: {
+    readonly path: string;
+    readonly providers: ReadonlyArray<IAutocompletionProvider<unknown>>;
+  } | null = null;
 
   /**
    * 定时器:**网络动作在飞期间**的进度轮询(见 {@link startSyncProgressPolling})。
@@ -2247,9 +2292,15 @@ export class GitStore implements Pick<MirrorGitStore, 'setShowCoAuthoredBy' | 's
    * | `stageSelected` / `stageFile` | **点击那一刻** | git 索引本身 |
    *
    * 两条都保留(用户 2026-10 裁决:「先做,不删」):前者是 Desktop 的模型,
-   * 后者是「我想现在就 `git add`」这个真实诉求。落点见
-   * `changes-view.tsx` 的 Changes 工具条(两个按钮)与
-   * `branches-view`/文件行的右键。
+   * 后者是「我想现在就 `git add`」这个真实诉求。
+   *
+   * ⚠️ **2026-10 现状:这一族今天没有产品调用点。** 曾经的两处落点都**已随 UI 一起
+   * 按用户裁决撤掉**:① `changes-view.tsx` 顶部那两颗「全部暂存 / 取消暂存」按钮
+   * (上游 `ui/changes/**`、`ui/diff/**` 里 `Staged|staged|Stage |Unstage` 命中 **0**);
+   * ② 同一文件**行尾**那三颗自造图标里的「暂存 / 取消暂存」
+   * (用户原话:「上游行内没有任何动作图标,所以可以移除」;功能点 3.1/3.2)。
+   * 删的是**入口**,方法与语义一字未动;判据改为**直接调 `store`**
+   * (`docs/probes/changes-discard-lines-probe.mjs` 的 C / D 组)。
    */
   async stageSelected(): Promise<void> {
     await this.applyIndexAction(this.targetedFiles(), 'stage');
@@ -2273,9 +2324,16 @@ export class GitStore implements Pick<MirrorGitStore, 'setShowCoAuthoredBy' | 's
   }
 
   /**
-   * **单文件暂存**。上游的调用点是文件行右键菜单的 **Stage file**
-   * (`ui/changes/changed-file.tsx` 那条),与 {@link stageSelected} 同一个落点
-   * (`api.stage`),只是文件集合固定成一个。
+   * **单文件暂存**。与 {@link stageSelected} 同一个落点(`api.stage`),
+   * 只是文件集合固定成一个。
+   *
+   * ⚠️ **上游没有这个方法的产品入口**:文件行右键菜单里**没有** `Stage file`
+   * (`ui/changes/filter-changes-list.tsx:659-720` 那批菜单项只有 Discard / Copy /
+   * Reveal / Open / Ignore;上游 `ui/changes/changed-file.tsx` 121 行全文没有菜单),
+   * 所以本条曾是**我们自造**的「行尾暂存图标」的落点 —— 那颗图标已于 2026-10
+   * 按用户裁决删除(功能点 3.1/3.2)⇒ 今天**产品路径上没有调用点**
+   * (「先做,不删」:方法保留,判据直接调它,见
+   * `docs/probes/changes-discard-lines-probe.mjs` 的 C 组)。
    *
    * 与 {@link stageSelected} 走同一个私有辅助:以前这里是**第二份实现**(自己 emit busy、
    * 自己 fail、自己 refresh),与 `stageSelected` 三处细节不一致 ——
@@ -2289,6 +2347,9 @@ export class GitStore implements Pick<MirrorGitStore, 'setShowCoAuthoredBy' | 's
    * **单文件取消暂存**。上游对应 `lib/git/reset.ts` 的 `resetPaths(repository, Mixed,
    * 'HEAD', [path])`(`app-store.ts` 的 `_unstageFiles` 对单文件走这一支)——
    * 我们落点是宿主既有的 `unstage` 路由(它内部就是 `git reset -- <paths>`)。
+   *
+   * ⚠️ 同 {@link stageFile}:它曾是我们自造的「行尾取消暂存图标」的落点,
+   * 那颗图标已于 2026-10 按用户裁决删除 ⇒ 今天产品路径上没有调用点(「先做,不删」)。
    */
   async unstageFile(file: string): Promise<void> {
     await this.applyIndexAction([file], 'unstage');
@@ -2594,44 +2655,141 @@ export class GitStore implements Pick<MirrorGitStore, 'setShowCoAuthoredBy' | 's
   }
 
   /**
-   * **共同作者输入框要的自动补全提供者清单** —— 上游那一件的清单由
-   * `ui/changes/sidebar.tsx:143-152` 的 `buildAutocompletionProviders(...)` 建出来,
-   * 里面同时有 emoji / issues / user 三族,`commit-message.tsx:271-281` 的
-   * `findCoAuthorAutoCompleteProvider()` 再从里面挑出 `CoAuthorAutocompletionProvider`。
+   * **提交信息两个输入框(摘要 / 描述)要的自动补全清单** —— 上游
+   * `ui/changes/commit-message.tsx:270-278` 的 `findCommitMessageAutoCompleteProvider()`
+   * 的**逐字**语义(那 6 行一段没改):
    *
-   * ⚠️ **今天返回空数组,而且这不是「还没写」,是缺两样前置**(逐条给证据):
-   *  1. `CoAuthorAutocompletionProvider`(`ui/autocompletion/user-autocompletion-provider.tsx:208`)
-   *     需要一个 **`GitHubUserStore`**(查 mentionable users)——
-   *     本仓 **client 根没有**它(只有 host 根的镜像
-   *     `src/host/mirror/lib/stores/github-user-store.ts`),而它要
-   *     `GitHubUserDatabase`(dexie)+ `API.fromAccount`
-   *     (`github-user-store.ts:53,96`),那是宿主能力;
-   *  2. 它还要一个 **`GitHubRepository` + `Account`** —— 而本插件的客户端
-   *     **没有** GitHub API / 认证集成,拿不到 `GitHubRepository`(它由
-   *     `lib/stores/repositories-store.ts` 从 API 载荷建出来,那份 store 在 host 根)。
-   *     实证:`src/client/changes-view.tsx:3380-3384` 的 `CommitBox` 与
-   *     `src/client/repo-state-cache.ts:210` 的 `repoFor()` 都按
-   *     `new Repository(path, 0, null, false[, alias])` 构造 ⇒
-   *     `repository.gitHubRepository` **恒为 `null`**。
-   * ⇒ 退而回**空清单**是**如实**的空值,而不是伪造一个「永远返回空命中的 provider」
-   * (那会让输入框看起来能用、但一个用户都补不出来 —— 本仓最贵的那类假绿)。
+   * ```ts
+   * function findCommitMessageAutoCompleteProvider(
+   *   providers: ReadonlyArray<IAutocompletionProvider<any>>
+   * ): ReadonlyArray<IAutocompletionProvider<any>> {
+   *   return providers.filter(
+   *     provider => !(provider instanceof CoAuthorAutocompletionProvider)
+   *   )
+   * }
+   * ```
    *
-   * `ui/autocompletion/build-autocompletion-providers.ts`(上游那份**真正的**清单构造器)
-   * **刻意没有逐字抄进来**:它 import `GitHubUserStore, IssuesStore from '../../lib/stores'`
-   * 与 `lib/emoji`,而 `src/core/desktop/lib/stores/` 没有 `index.ts`、
-   * `lib/stores/issues-store.ts`、`lib/databases/index.ts` 三个模块,且
-   * `issues-autocompletion-provider.tsx` 还要我们的 dispatcher 替身里**没有**的
-   * `refreshIssues`(`dispatcher.ts:1043`)⇒ 逐字加进来是 **+5 条新 tsc 诊断**
-   * (会红 `check-types` 的「无回归」判据)。登记在报告里,不凑数。
+   * 为什么必须**去掉** co-author 那一个(而不是「多一个也无所谓」):
+   * `CoAuthorAutocompletionProvider` 的 `getRegExp()` **少了 `@` 强制**
+   * (`user-autocompletion-provider.tsx:209-211`)⇒ 它的正则几乎匹配任何输入,
+   * 而 `attemptAutocompletion` 是**首个命中即返回**(`autocompleting-text-input.tsx:741-770`)
+   * ⇒ 留在清单里会把 `#issue` / `:emoji` 两条**整个吃掉**,而且界面看起来一样。
+   * 上游那个 filter 就是为这件事存在的,这里逐字照搬。
    *
-   * **退役条件**:① client 根补上 `GitHubUserStore`(真身或宿主路由门面)+
-   * `lib/stores/index.ts` / `lib/databases/index.ts` / `lib/stores/issues-store.ts`
-   * 三个类型模块,② 且本插件拿到 GitHub 仓库身份 —— 那时这个方法改成
-   * `ui/autocompletion/build-autocompletion-providers.ts` 的逐字调用
-   * (清单构造只有一处,不许在调用点另拼)。
+   * @param repository - 当前仓库(`src/client/changes-view.tsx` 的 `CommitBox` 里
+   *   那一份 `useMemo` 的产品;**必须**是它,见下面 `changesAutocompletionProviders` 的说明)。
+   * @returns 清单(可能为空);清单来源与四类补全今天的真实性见
+   *   `src/client/commit-autocompletion.ts` 的文件头。
    */
-  public coAuthorAutocompletionProviders(): ReadonlyArray<IAutocompletionProvider<unknown>> {
-    return [];
+  public commitMessageAutocompletionProviders(
+    repository: Repository | null,
+  ): ReadonlyArray<IAutocompletionProvider<unknown>> {
+    return this.changesAutocompletionProviders(repository).filter(
+      (provider) => !(provider instanceof CoAuthorAutocompletionProvider),
+    );
+  }
+
+  /**
+   * **共同作者输入框要的自动补全提供者清单** —— 上游
+   * `ui/changes/commit-message.tsx:271-281` 的 `findCoAuthorAutoCompleteProvider()`
+   * 的**逐字**语义(那 11 行一段没改):
+   *
+   * ```ts
+   * function findCoAuthorAutoCompleteProvider(
+   *   providers: ReadonlyArray<IAutocompletionProvider<any>>
+   * ): CoAuthorAutocompletionProvider | null {
+   *   for (const provider of providers) {
+   *     if (provider instanceof CoAuthorAutocompletionProvider) {
+   *       return provider
+   *     }
+   *   }
+   *   return null
+   * }
+   * ```
+   *
+   * 我们这一侧返回的是**数组**(而不是上游那个 `| null`):唯一的消费方
+   * `src/client/co-authors-row.tsx` 的 `findCoAuthorAutoCompleteProvider` 就是那份
+   * 逐字副本,它自己会挑出第一个 —— **不在这里做第二份挑选**(那会让「按什么挑」
+   * 有两处定义,而 `instanceof` 与 `kind === 'user'` 的差别是**行为差别**,见那个函数的
+   * JSDoc)。
+   *
+   * ## ⚠️ 它今天**仍然返回空数组** —— 但原因**换了**
+   *
+   * 改前:方法体是硬编码的 `return []`(清单构造器**根本没接**)。
+   * 改后:清单**真的**由上游那份构造器建出来
+   * (`src/client/commit-autocompletion.ts` → 逐字镜像的
+   * `ui/autocompletion/build-autocompletion-providers.ts`),而它**自己**那条闸门
+   * (`:31` 的 `isRepositoryWithGitHubRepository(repository)`)在本插件里**恒为假**:
+   * 客户端的 `Repository` 全由 `new Repository(path, 0, null, false[, alias])` 构造
+   * (`changes-view.tsx` ×2 / `repo-state-cache.ts` / `desktop-diff.tsx` / `history-view.tsx`),
+   * 第三格 `gitHubRepository` **恒为 `null`** —— 因为客户端**没有**「远端 URL →
+   * GitHubRepository」的解析链(宿主 `repos` 载荷里也没有这个字段)。
+   * ⇒ 「清单里挑不到 co-author provider」这一条的阻塞者,从「我们没接构造器」
+   * 变成「上游自己那条闸门关着」。**这是 7.14 剩下的全部内容**,
+   * ⛔ 不许为了让它出现而伪造 `gitHubRepository`(那会让整条补全链看起来能用、
+   * 实际一个用户都补不出来)。
+   *
+   * 判据(两条一起读):
+   *  · `docs/probes/changes-co-authors-mount-probe.mjs` 的 `H1` —— 内存里把**仓库**
+   *    那一条闸门打开(只改这一处、锚点恰好命中 1 次)⇒ 本方法**真的**返回
+   *    `[CoAuthorAutocompletionProvider]`,`CoAuthorsRow` 那一行**真的**渲染;
+   *  · 同探针的 `G1/G2/G3` —— 产品形状下它**仍然**是空,且 `G2` 证明「只放开清单」
+   *    不够、`G3` 证明「只放开仓库」也不够。
+   *
+   * @param repository - 当前仓库;`null`(未选中仓库)时返回空清单。
+   * @returns 清单里**所有** `CoAuthorAutocompletionProvider`(0 或 1 个)。
+   */
+  public coAuthorAutocompletionProviders(
+    repository: Repository | null,
+  ): ReadonlyArray<IAutocompletionProvider<unknown>> {
+    return this.changesAutocompletionProviders(repository).filter(
+      (provider) => provider instanceof CoAuthorAutocompletionProvider,
+    );
+  }
+
+  /**
+   * **整份**自动补全清单的**唯一**构造点(两条分流都从它来,见上面两个公开方法)。
+   *
+   * ## 为什么 `repository` 是**形参**而不是「store 自己现造一个」
+   *
+   * 上游那份清单的第一个形参就是**容器手里那个 `Repository`**
+   * (`ui/changes/sidebar.tsx:148` 的 `props.repository`),而本插件手里那一份是
+   * `src/client/changes-view.tsx` 的 `CommitBox` 里那个 `useMemo`。
+   * 本仓已经有 **4 处** `new Repository(path, 0, null, false[, alias])`
+   * (`changes-view.tsx` ×2、`repo-state-cache.ts`、`desktop-diff.tsx`、`history-view.tsx`),
+   * 而**共同作者那一行的可见性判定读的就是 CommitBox 那一份**
+   * (`src/client/co-authors-row.tsx:219` 的 `repository.gitHubRepository !== null`)。
+   * ⇒ 如果这里自己再 `new` 一份,就会出现「行按 A 那份显示、清单按 B 那份构造」——
+   * A 的 `gitHubRepository` 一旦有真值,行**出现了**但清单**仍然空**,
+   * 而界面上看不出任何区别(本仓最贵的那类静默分家)。
+   * ⇒ 让调用方把**同一份实例**传进来:闸门只有一处定义。
+   *
+   * ## 缓存
+   *
+   * 上游只在 `props.repository.hash` / `props.accounts` / `emoji.size` 变化时重建
+   * (`sidebar.tsx:143-152`)。我们这里同样按**路径**缓存:同一个路径的清单对象
+   * 恒定,渲染期不会每次都新建 4 个 provider(它们不影响正确性,但会让下游
+   * props 每帧都是新引用)。路径变了 ⇒ 重建。
+   *
+   * ⚠️ 缓存**不**改变闸门语义:闸门读的是传进来的那一份 `repository`,
+   * 而同一路径下它在产品里只有一份实例(上面刚说明的那一处 `useMemo`)。
+   * @param repository - 当前仓库;`null` ⇒ 空清单(**不**缓存,免得把「还没有仓库」
+   *   那一帧的空清单记成某个路径的结果)。
+   */
+  private changesAutocompletionProviders(
+    repository: Repository | null,
+  ): ReadonlyArray<IAutocompletionProvider<unknown>> {
+    if (repository === null) {
+      return [];
+    }
+    const path = repository.path;
+    const cached = this.autocompletionCache;
+    if (cached !== null && cached.path === path) {
+      return cached.providers;
+    }
+    const providers = buildChangesAutocompletionProviders(repository);
+    this.autocompletionCache = { path, providers };
+    return providers;
   }
 
   /**
@@ -3298,7 +3456,34 @@ async setHideWhitespaceHistory(value: boolean): Promise<void> {
     if (!result.value.ok) this.toast('无法用外部编辑器打开。', 'err');
   }
 
-  async commit(): Promise<void> {
+  /**
+   * 提交一次(把客户端的纳入状态 materialize 进索引,然后交给宿主 `commit` 路由)。
+   *
+   * ## `trailers` —— **共同作者(`Co-Authored-By`)真的写进提交消息**(功能点 7.15)
+   *
+   * 上游的数据流是**两跳**,我们这一侧逐跳对应:
+   *
+   * | 上游 | 这里 |
+   * |---|---|
+   * | `commit-message.tsx:607` 的 `const trailers = this.getCoAuthorTrailers()`(那 9 行) | `src/client/changes-view.tsx` 的 `commitContext.trailers`(`getCoAuthorTrailers` 逐字投影) |
+   * | `:614-626` 把 `trailers` 放进 `ICommitContext` ⇒ `onCreateCommit(context)` ⇒ `sidebar.tsx:217` 的 `dispatcher.commitIncludedChanges(repository, context)` | `CommitBox` 把 `commitContext.trailers` **作为实参**交给本方法 |
+   * | `lib/format-commit-message.ts:33-35` 的 `mergeTrailers(repository, message, trailers)`(真跑 `git interpret-trailers`) | 宿主 `git-service.commit()`(同一个 git 命令,argv 在 `src/core/git-argv.ts`) |
+   *
+   * **为什么是形参而不是在这里自己算**:上游算那个数组的地方
+   * (`commit-message.tsx:577-585`)握着**两样**本方法拿不到的东西 ——
+   * `repository.gitHubRepository`(闸门)与 `props.coAuthors`。我们这边的那份
+   * `Repository` 住在 `changes-view.tsx` 的 `CommitBox` 里(那里才是「产品那一份」),
+   * 而 `snap.coAuthors` 在快照里;在 store 里再拼一次 = **第二个真源**,
+   * 一旦两边的闸门/列表不同步就是「界面上有人、提交里没有」(静默)。
+   * 判据:`docs/probes/changes-co-authors-mount-probe.mjs` 的 `P1`
+   * (点真提交按钮 ⇒ `commit` 请求体里的 `trailers` 逐字等于上游投影)。
+   *
+   * ⚠️ **默认值 `[]` 是如实的**:没有 trailer 的提交(所有探针、以及任何
+   * 不传实参的调用点)与改前**逐字节相同** —— 宿主收到空数组时**一个字节都不追加**。
+   *
+   * @param trailers - 上游 `ICommitContext.trailers`;省略 = 本次提交没有 trailer。
+   */
+  async commit(trailers: ReadonlyArray<ITrailer> = []): Promise<void> {
     const path = this.state.current;
     const status = this.state.status;
     if (path === '' || status === null) { return; }
@@ -3407,6 +3592,13 @@ async setHideWhitespaceHistory(value: boolean): Promise<void> {
       signoff: form.signoff,
       noVerify: form.noVerify,
       allowEmpty: form.allowEmpty,
+      /*
+       * 共同作者的 trailer(功能点 7.15)—— 上游 `format-commit-message.ts:33-35`
+       * 把 `ICommitContext.trailers` 交给 `mergeTrailers`。**空数组照发**:
+       * 宿主对空数组的行为是「一个字节都不追加」,而「字段在不在」这件事本身
+       * 是探针的一条读数(`changes-co-authors-mount-probe` 的 `P1` 要求它**在**)。
+       */
+      trailers: [...trailers],
     });
     this.emit({ busy: '' });
     if (!result.ok) {
