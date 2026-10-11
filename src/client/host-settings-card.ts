@@ -377,15 +377,21 @@ export class DshGitSettingsCardController {
 }
 
 /**
- * 把宿主 `auth/state` 的原始登录态**收窄**成卡片要的那一份。
+ * 把宿主 `auth/state` 的原始登录态**收窄**成两个外壳要的那一份(`PreferencesDialog` 的
+ * `auth` prop 与卡片的 `live.auth` 同形)。
  *
  * ⚠️ **必须判 `signedIn`**:`auth/state` 在未登录时也回一个**对象**
  * (`{signedIn:false, login:'', tokenTail:'', …}`,`src/host/auth.ts:263-280`),
  * 所以「`auth !== null`」**不等于**「登录了」。只看后者会让账号页渲染出一个
  * 登录名为空串的假账号(`accountsWithEmails` 无条件造 `Account`;
  * `src/client/preferences-pages.tsx:1143` 只判 `identity === null`)。
+ *
+ * ⚠️ **2026-11:弹窗那一半也改走本函数**(`workbench.tsx` 的 `auth={cardAuthOf(snap.auth)}`)。
+ * 在那之前模态是手写等价物、且**漏了这条判定** ⇒ 登出(或令牌失效)后,弹窗里的账号页
+ * 会渲染出上面说的那张假账号卡;而卡片那一半一直是对的 —— 同一个判据出现两份就是这种形态。
+ * 顺带:端点面板「已登录时默认收起」也依赖这个 `null`,所以它不只是显示问题。
  * @param raw - 宿主登录态;`null` = 还没读到。
- * @returns 已登录时给卡片要的形状,否则 `null`。
+ * @returns 已登录时给外壳要的形状,否则 `null`。
  */
 export function cardAuthOf(raw: AuthStatePayload | null): IDshGitCardAuth | null {
   if (raw === null || !raw.signedIn) {

@@ -33,9 +33,9 @@
  *
  * ---
  *
- * ## ⭐ 2026-10-06:三个页面的**正文**已搬到 `./preferences-pages.tsx`
+ * ## ⭐ 2026-10-06:页面的**正文**已搬到 `./preferences-pages.tsx`(当时是三页,今天是六页)
  *
- * 同样的三页现在**也**渲染在**宿主设置 ▸ 内置插件 ▸ dsh-git**的卡片里
+ * 同样的正文现在**也**渲染在**宿主设置 ▸ 内置插件 ▸ dsh-git**的卡片里(`TABS` 逐页),而当时只有三页
  * (`./host-settings-card.tsx`,席位 `settings.plugins.tab`)—— 那是用户这次的要求,
  * 逐页的搬迁记录见 `docs/host-settings-card.md` §4.0。
  *
@@ -45,7 +45,7 @@
  *  - 上游**竖向** `TabBar`(卡片那一侧用的是宿主 `SegmentedTabs`,两边页签控件不同);
  *  - 页脚那个 `<form>`(`OkCancelButtonGroup` 靠它才有作用)。
  *
- * 为什么正文必须**一份**:三页里有一条跨面行为(无障碍页的勾选标记要真的驱动 diff 的
+ * 为什么正文必须**一份**:其中一条是跨面行为(无障碍页的勾选标记要真的驱动 diff 的
  * 勾选列),复制两份之后「哪一份才是生效的」将无法回答 —— 那是本仓反复踩过的形态。
  *
  * ---
@@ -65,8 +65,10 @@
  *     的一条硬断言钉住(「Integrations 页按设计账本整页删除(不在页签表 ⇒ 其 Shell 段
  *     不可能存在)」),把它加回页签表会立刻变红;
  *   - Git 与通知两页**在**表里(`TABS`),原表漏了。
- * 下表按 `TABS` 的**实际五页**重写(2026-10:**「仓库」页按用户指令移除**,
- * 见 `preferences-pages.tsx` 的 `TABS` 注释 —— 仓库管理回到顶栏的仓库下拉)。
+ * 下表按 `TABS` 的**实际六页**重写(2026-10:**「仓库」页按用户指令移除**
+ * —— 仓库管理回到顶栏的仓库下拉;**「提示与确认」(Prompts)按用户裁决
+ * 「可以加 Prompts 页」加回来**,位置在通知与无障碍之间)。
+ * 两份裁决的逐条理由见 `preferences-pages.tsx` 的 `TABS` 注释。
  *
  * | 页签 | 处置 | 导致处置的控件 |
  * |---|---|---|
@@ -75,32 +77,54 @@
  * | **Git** | 保留:**三个子页签全部接线**,并补上上游的两条行为(自动识别 / 姓名校验) | Author:全局 `user.name`/`user.email` 读、写 + **按 GitHub 账号自动识别**(上游 `preferences.tsx:267-278`)+ **姓名校验**(`ui/lib/identifier-rules.ts` → `preferences.tsx:866-871/1004`);Default branch:`init.defaultBranch`(上游 `lib/helpers/default-branch.ts`);Hooks:客户端镜像 `lib/hooks/config.ts` + 写穿到宿主偏好域。全部细节在 `src/client/git-page.tsx` 的文件头 |
  * | **外观** | 保留:**Theme 接线**(宿主主题服务)、格式与 tab size 接线;worktree 开关**删除** | Theme:读 `theme.getTheme().preference` / 写 `theme.setTheme` / 订阅 `theme/change`(宿主 `ui-theme` 的 `ctx.provide('theme', …)`;桥在 `src/client/host-theme.ts`,由 `index.ts` 的 `apply()` 可选注入)。**服务缺席时**卡片带 `gw-prefs-no-theme`,由 `scss/preferences.scss` 的适配块**删掉该分区** —— 不会出现点了没反应的色板;worktree(`.always-show-worktree-list`):产品里**没有 worktree**(§1.3 排除),上游那个值也没有任何消费方 |
  * | **通知** | 保留,**换成浏览器通知**(不是上游那条 Electron 原生链) | 上游那两样(`desktop-notifications` 原生插件、`main-process-proxy` 的权限请求)在我们的替身里恒 false ⇒ 沿用就是死开关。这一页走 Web Notifications + 一个真的生产者(`notify.ts`),页面本体是手写的 `notifications-panel.tsx`(上游 `notifications.tsx` **不在镜像里**) |
- * | **提示与确认** | **整页删除** | 见下「Prompts 逐项」 |
+ * | **提示与确认** | **保留(2026-10 用户裁决「可以加 Prompts 页」)**:页面本体是**逐字节镜像**的 `ui/preferences/prompts.tsx`;**12 个控件里发车 5 条、其余 7 条由适配层删除** | 发车判据 = 「被守卫的动作在本插件里真的存在、且读侧真的读那个键」:丢弃改动 / 丢弃贮藏 / 撤销提交(12.16)+ 提交被筛选隐藏的改动 + 提交摘要长度提示(12.13)。逐条见下「Prompts 逐项」;隐藏的 7 条由 `scss/preferences.scss` 适配块第 12/13 条 `display:none !important` 删除,判据在 `docs/probes/preferences-prompts-probe.mjs`(`H` 组) |
  * | **高级** | **整页删除** | 见下「Advanced 逐项」 |
  * | **无障碍** | 保留,两条都接线 | `Underline links` → `prefs.ts` 的 `underline-links` + 根/卡片类(`.gw-root` 那半在 `pref-adapt.ts`,`gw-prefs` 那半在 `scss/preferences.scss`);`Show check marks in the diff` → Desktop 原键 `diff-check-marks-visible`(`diff-mode.ts`) |
  *
- * ### 上游有、我们**没有**的三个整页(结论,明细见下两节 + `docs/preferences-port.md` §13)
+ * ### 上游有、我们**没有**的整页(结论,明细见下节 + `docs/preferences-port.md` §13)
  *
- * `integrations` / `prompts` / `advanced` 三个上游页面**都在镜像树里**
- * (`src/core/desktop/ui/preferences/{integrations,prompts,advanced}.tsx`),但**都不渲染**。
- * ⇒ 它们是「整页删除」(产品取舍),不是遗漏;判据与回收条件逐条列在下两节。
+ * `integrations` / `advanced` 两个上游页面**都在镜像树里**
+ * (`src/core/desktop/ui/preferences/{integrations,advanced}.tsx`),但**都不渲染**。
+ * ⇒ 它们是「整页删除」(产品取舍),不是遗漏;判据与回收条件逐条列在 `advanced` 那一节。
  *
- * ### Prompts(13 项,整页删除 —— 逐项:它守卫什么 / 为什么在我们这里不存在)
+ * ⚠️ **`prompts` 已经不在这张名单里**(2026-10 用户裁决「可以加 Prompts 页」)。
+ * 它曾是三条整页删除之一,而删除的**唯一有效理由**是「这一页上的控件一个都兑现不了」——
+ * 那条理由**早已过期**:12.13 / 12.16 的键与闸门陆续落地,`confirmCommitFilteredChangesKey`
+ * 两侧也都接了。用户裁决只是把「账本早该改的那一页」正式加回来。**上屏的是镜像页**,
+ * 12 个控件里只有 5 条有落点 ⇒ 其余 7 条由适配层删除(见下)。
  *
- * | 控件 | 它守卫什么(上游) | 为什么在这里不存在 |
- * |---|---|---|
- * | Removing repositories | 移除仓库前的确认框 | 我们**有**这个动作,但它今天**不在本弹窗里**:「仓库」页已按用户指令移除,移除仓库走顶栏仓库下拉的右键 `Remove…` ⇒ `repo-bar.tsx` 自己的 `ConfirmDialog`;上游那条 `dispatcher.confirmRepositoryRemoval` 路径不存在 ⇒ 该开关不会影响任何东西 |
- * | Discarding changes | 丢弃改动前的确认框 | 我们的丢弃确认写在 **`changes-view.tsx` 自己的** `ConfirmDialog` 里(无开关);接它要改那个文件的状态机,而本轮只授权了它的编辑器一处 |
- * | Discarding changes permanently | 「永久丢弃」(绕过回收站)确认框 | 我们只有一条丢弃路径(`api.discard` → `git checkout`/删未跟踪文件),**没有**「可恢复 vs 永久」两档 |
- * | Discarding stash | 丢弃 stash 确认框 | **没有 stash 界面**(host 也没有 stash 路由;§10.10 把 stash 族列为「必须补的宿主路由」) |
- * | Checking out a commit | 检出某提交确认框 | **没有检出提交的入口**(History 的 checkout 未接线) |
- * | Force pushing | 强推确认框 | 有强推动作(`repo-bar.tsx` 的 `force-push`),但确认框在 `repo-bar.tsx` 里、无开关;授权范围外的文件 |
- * | Undo commit | 撤销提交确认框 | **没有 undo commit** 动作(§10.10 已核实 `undoCommit` 是方法不是状态,我们没接) |
- * | Overriding commit message with generated message | 生成消息覆盖已填消息前确认 | 有生成能力(`commit-message/generate`),但覆盖确认要接在**提交区**(`changes-view.tsx`)里,授权范围外 |
- * | Removing worktrees | 移除 worktree 确认框 | **没有 worktree**(§1.3 排除) |
- * | Committing changes hidden by filter | 提交被筛选隐藏的改动前确认 | ⚠️ **本格原先的理由已过期,已更正**:它写「没有 hidden-changes 告警/筛选隐藏语义」,而 `changes-view.tsx:25` 现在 import 并渲染了 `HiddenChangesWarning`(`:348`,谓词 `isCommittingFileHiddenByFilter`)。真正缺的是**确认对话框**(提交前问一句),不是告警 ⇒ 该开关今天仍然没有落点,但理由是「确认流程未接线」而不是「语义不存在」 |
- * | If I have changes and I switch branches…(3 选 1) | 切分支时未提交改动的去向 | **没有切分支动作**(分支面板只读列表;`lib/stores` 的 app-store 与策略类型在 §1.3 排除) |
- * | Show commit length warning | 提交摘要过长时告警 | **没有「提交长度告警」**这个界面(只有手写的提交区) |
+ * ### Prompts(12 个控件:**发车 5 条 / 适配层删除 7 条** —— 逐项,含判据)
+ *
+ * ⚠️ **这张表是 2026-10 重测的**(上一版整页删除时的表**已过期三处**:`Discarding stash` 写
+ * 「没有 stash 界面」、`Undo commit` 写「没有 undo commit 动作」、`Committing changes hidden
+ * by filter` 写「缺确认对话框」—— 那三件事今天**都已经有落点**)。判据统一为:
+ * **被守卫的动作真的存在,且读侧真的读那个键**。
+ *
+ * | # | 控件(镜像里的位置) | 处置 | 落点 / 证据(逐条 `file:line`) |
+ * |---|---|---|---|
+ * | 1 | Removing repositories | **删除** | 动作**在**,但今天**不在本弹窗里**:移除仓库走顶栏仓库下拉的右键 `Remove…` ⇒ `repo-bar.tsx:1456-1470` 的 `ConfirmDialog`(**恒弹、无偏好键**)。上游那条 `dispatcher.confirmRepositoryRemoval` 路径不存在 ⇒ 接一个键没有读方 = 死开关 |
+ * | 2 | Discarding changes | **发车** | `prefs.ts` 的 `confirmDiscardChanges` ⇒ `changes-view.tsx` 的 `gateOf.discard`(单文件)+ 行/块级丢弃闸门。判据 `changes-confirm-pref-probe`(`D2`/`S4`) |
+ * | 3 | Discarding changes permanently | **删除** | 我们只有一条丢弃路径(`api.discard` → `git checkout` / 删未跟踪文件),**没有**「可恢复 vs 永久」两档 ⇒ 该开关无从生效 |
+ * | 4 | Discarding stash | **发车** | `prefs.ts` 的 `confirmDiscardStash` ⇒ `changes-view.tsx:1760` 的 stash 面板「丢弃」闸门(改前写的是「没有 stash 界面」—— **已过期**,`stash-probe` 53/53) |
+ * | 5 | Checking out a commit | **删除** | 动作**在**(`history-view.tsx` 的 `onCheckoutCommit`),但那里的确认框是**恒弹**的,且它的回收条件逐字登记为「`ui/branches/**` 的分离头横幅落地后换成上游那条偏好门」⇒ 今天**没有**这个偏好键,接上就得先把那条裁决翻掉 |
+ * | 6 | Force pushing | **删除** | 强推动作**在**(`repo-bar.tsx` 的 `force-push` / `store.push(true)`),但**连确认框都没有**、也没有偏好键 ⇒ 一个只写 localStorage 的开关什么都不会改变 |
+ * | 7 | Undo commit | **发车** | `prefs.ts` 的 `confirmUndoCommit` ⇒ `changes-view.tsx` 的 `requestUndo`(工作区脏那一档;合并提交那半边不受控,判据 `U3`)(改前写的是「没有 undo commit 动作」—— **已过期**) |
+ * | 8 | Overriding commit message with generated message | **删除** | 有生成能力(`commit-message/generate`),但「生成的信息覆盖已填信息」前的那次确认**没有接线**(它要接在提交区的生成流程里)⇒ 今天没有读方 |
+ * | 9 | Removing worktrees | **删除** | **没有 worktree**(§1.3 排除) |
+ * | 10 | Committing changes hidden by filter | **发车** | `prefs.ts` 的 `confirmCommitFilteredChangesKey`:写侧 = 镜像 `ui/changes/confirm-commit-filtered-changes-dialog.tsx`(经 `changes-view.tsx:1663` 的 `setConfirmCommitFilteredChanges`),读侧 = `changes-view.tsx:995-997` 的 `showPromptForCommittingFileHiddenByFilter`(改前写的是「真正缺的是确认对话框」—— **已过期**,那个弹窗就在 `:1631-1667`) |
+ * | 11 | If I have changes and I switch branches…(3 选 1) | **删除**(整节) | **没有切分支动作**(分支面板只读列表);`models/uncommitted-changes-strategy.ts` 在本仓**只有声明与镜像页的渲染者,零消费方** |
+ * | 12 | Show commit length warning | **发车** | `prefs.ts` 的 `showCommitLengthWarning`(观测默认 **开**)⇒ `changes-view.tsx` 的 `CommitBox`:`showCommitLengthWarning && form.summary.length > 50`。判据 `changes-summary-length-pref-probe`(`C2`/`C3`,以及本轮改写后的 `S1`) |
+ *
+ * **删除是怎么落的**:镜像一字不改 ⇒ 那 7 条**照样渲染**,由
+ * `src/client/scss/preferences.scss` 的适配块**第 12 条**(确认组里第 1/3/5/6/8/9 个
+ * `.checkbox-component`,锚点是镜像自己的 `aria-labelledby="show-confirm-dialog-heading"`)
+ * 与**第 13 条**(`.advanced-section:has(#switch-branch-heading)`)**`display:none !important`**
+ * 删除。⇒ 可见的每一个控件都真能兑现;删掉的每一个都有具名理由。判据:
+ * `docs/probes/preferences-prompts-probe.mjs` 的 `H1`/`H2`/`H3`(`H2` 是同帧阳性对照)
+ * + `P1`/`P2`(隐藏的行**仍在 DOM** ⇒ 判的是「删掉」不是「没渲染」)。
+ *
+ * **接线在哪一层**:`src/client/preferences-pages.tsx` 的 `usePromptsWiring`(读 / 写 / 订阅
+ * 5 条真偏好)+ `case 'prompts'`(把 prop 喂给镜像;那 7 条给**具名空实现**)。
  *
  * ### Advanced(3 项渲染,整页删除 —— 逐项)
  *
@@ -179,15 +203,16 @@ import {
 } from './preferences-pages.tsx';
 
 /*
- * ⚠️ 2026-10:三个页面(账号 / 仓库 / 无障碍)的**正文本身**已搬到
- * `./preferences-pages.tsx` —— 因为同样的三页现在**也**渲染在
+ * ⚠️ 2026-10:页面的**正文本身**已搬到(当时是账号 / 仓库 / 无障碍三页;仓库后来移除、
+ * 提示与确认后来加回 —— 今天的清单以 `TABS` 为准)
+ * `./preferences-pages.tsx` —— 因为同样的页面现在**也**渲染在
  * **宿主设置 ▸ 内置插件 ▸ dsh-git** 的卡片里(`./host-settings-card.tsx`,
  * 席位 `settings.plugins.tab`)。留在本文件里的只有**模态专有**的那一半:
  * 本文件现在只剩**模态外壳**:`PluginDialog` + 上游竖向 `TabBar` + 页脚 `<form>`。
  *
  * 为什么必须拆而不是复制一份:「两份拷贝一定漂移」是本仓反复踩过的形态
  * (见 `docs/generated-css.md` 与 goal 文档 §3 的失败模式 10 那一族),
- * 而这三页里有一条**跨面行为**(无障碍页的勾选标记要真的驱动 diff 的勾选列),
+ * 而这些页里有一条**跨面行为**(无障碍页的勾选标记要真的驱动 diff 的勾选列),
  * 复制之后「哪一份才是生效的」将无法回答。
  *
  * 逐页的保真度账本(哪个控件接线 / 哪个页面删除 / 凭什么)仍留在本文件头上 ——
@@ -200,7 +225,7 @@ export type { PreferencesTabId };
 /*
  * 下面这四个类型**不在这里定义,只在这里转出**:它们的真源是
  * `./preferences-pages.tsx`。骨架(`store` / `snap` / 设备码载荷)从本文件搬到那边,
- * 是因为那边才是「三个页面要什么」的定义处;留在两处 = 两份一定会漂移的契约。
+ * 是因为那边才是「页面要什么」的定义处;留在两处 = 两份一定会漂移的契约。
  */
 export type { IPreferencesRepoEntry, IPreferencesSnapshot, IPreferencesStore };
 
@@ -309,7 +334,7 @@ export interface IPreferencesDialogProps {
 /**
  * 渲染 Preferences 模态。
  *
- * 三个页面的**正文**来自 `./preferences-pages.tsx`(`PreferencesPageBody`);
+ * 页面的**正文**来自 `./preferences-pages.tsx`(`PreferencesPageBody`,**按 `TABS` 逐页**);
  * 本函数只负责**模态外壳**与**上游竖向 `TabBar`**。
  * @param props - 见 `IPreferencesDialogProps`。
  */
@@ -374,7 +399,7 @@ export function PreferencesDialog(props: IPreferencesDialogProps): ReactNode {
    *
    * ⚠️ 为什么不再包一层 `useRef` 取「最新值」:`workbench.tsx` 传进来的那个箭头
    * (`() => setPrefsRevision((value) => value + 1)`)在依赖上只让两个 `useCallback`
-   * 换一次身份(`onLogout` / 下面那三个页面回调),而它们接在上游的
+   * 换一次身份(`onLogout` / 下面那些页面回调),而它们接在上游的
    * `React.Component` 上、**不参与** `React.memo` 比较 ⇒ 没有可观测的代价。
    * 少一层包装 = 少一处「读的是哪个 props」的心智负担。
    */
@@ -397,7 +422,7 @@ export function PreferencesDialog(props: IPreferencesDialogProps): ReactNode {
     // 保留包装**不是**为性能,而是为了让「弹窗这一侧有哪些回调」在调用点一次可见。
   }, [props]);
 
-  /** 三个页面要的那一份输入;只组装一次,免得每次渲染新建一个对象。 */
+  /** 页面正文要的那一份输入;只组装一次,免得每次渲染新建一个对象。 */
   const pageBody = (
     <PreferencesPageBody
       tab={selected}

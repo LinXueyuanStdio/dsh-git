@@ -238,6 +238,63 @@ $gray-500: var(--text-secondary-color);
         删掉本条 —— 那时它就从「适配」退化成第二份真源。 */
   .theme-selector .radio-button-component label > span img { aspect-ratio: 228 / 120; }
 
+  /*
+   * --------------------------------------------------------------------------
+   * 12. **提示与确认(Prompts)▸ 没有落点的 7 个控件** —— 2026-10 加回这一页时新增
+   * --------------------------------------------------------------------------
+   *
+   * 这一页的用户裁决是「**可以加 Prompts 页**」,而页面本体是**逐字节镜像**
+   * (`ui/preferences/prompts.tsx`)⇒ 上游那 12 个控件**都会渲染**。发车判据是
+   * 「被守卫的动作在本插件里真的存在、且读侧真的读这个键」,只满足 5 条
+   * (丢弃改动 / 丢弃贮藏 / 撤销提交 / 提交被筛选隐藏 / 提交信息长度提示),
+   * 其余 7 条**没有落点** ⇒ 只能落在渲染层删除 —— 与上面第 1 条(worktree)同一手法、
+   * 同一条纪律:**看得见的控件全都真能兑现,删掉的各有具名理由**,
+   * 不存在第三种「可见但无作用」的静默缺陷。
+   *
+   * ## 为什么选择器是「`aria-labelledby` + `nth-child`」而不是类名
+   *
+   * 上游那 10 个复选框**没有任何一个**带自己的类名(`<Checkbox>` 只产出
+   * `checkbox-component`,类名从 `prompts.tsx` 的调用点根本传不进去,而镜像不许改)。
+   * 唯一稳定、可断言的结构锚点是上游自己写下的
+   * `<div role="group" aria-labelledby="show-confirm-dialog-heading">`(`:240`)——
+   * 它就是「Show a confirmation dialog before…」那一组,组内子元素的**顺序由镜像固定**:
+   *
+   * ```text
+   * 1 Removing repositories           ← 删(确认框在 repo-bar.tsx 里恒弹,无偏好键)
+   * 2 Discarding changes              ← 发车(prefs.ts `confirmDiscardChanges`)
+   * 3 Discarding changes permanently  ← 删(产品只有一条丢弃路径,没有「可恢复 vs 永久」两档)
+   * 4 Discarding stash                ← 发车
+   * 5 Checking out a commit           ← 删(确认框在 history-view.tsx 里恒弹;回收条件绑在分离头横幅)
+   * 6 Force pushing                   ← 删(repo-bar 有强推动作,但没有任何确认框/偏好键)
+   * 7 Undo commit                     ← 发车
+   * 8 Overriding commit message …     ← 删(生成能力有,覆盖确认没接)
+   * 9 Removing worktrees              ← 删(产品里没有 worktree,§1.3 排除)
+   * 10 Committing changes hidden by filter ← 发车(弹窗就在 changes-view.tsx)
+   * ```
+   *
+   * ⚠️ **顺序一旦被上游改动,这一条会失准** —— 但不会静默:逐项几何由
+   * `docs/probes/preferences-prompts-probe.mjs` 的 `H` 组在真 Chrome 里断言
+   * (6 个被删的 `0×0`、4 个发车的 `>0` 且**文案逐个点名**),上游增删一条就会变红。
+   */
+  [aria-labelledby='show-confirm-dialog-heading'] > .checkbox-component:nth-child(1),
+  [aria-labelledby='show-confirm-dialog-heading'] > .checkbox-component:nth-child(3),
+  [aria-labelledby='show-confirm-dialog-heading'] > .checkbox-component:nth-child(5),
+  [aria-labelledby='show-confirm-dialog-heading'] > .checkbox-component:nth-child(6),
+  [aria-labelledby='show-confirm-dialog-heading'] > .checkbox-component:nth-child(8),
+  [aria-labelledby='show-confirm-dialog-heading'] > .checkbox-component:nth-child(9) {
+    display: none !important;
+  }
+
+  /*
+   * 13. **提示与确认 ▸ 「If I have changes and I switch branches…」整节** —— 同上。
+   *
+   * 产品里**没有切分支动作**(分支面板只读),上游那三档策略
+   * (`models/uncommitted-changes-strategy.ts` 的 `UncommittedChangesStrategy`)在本仓
+   * 连一个消费方都没有 ⇒ 整节(标题 + `RadioGroup`)删除,而不是留三个点了不改任何东西的
+   * 单选按钮。锚点是上游自己写下的 `id="switch-branch-heading"`(`prompts.tsx:204`)。
+   */
+  .advanced-section:has(#switch-branch-heading) { display: none !important; }
+
   //
   // ---------- 卡片形态:三个页面的横向页签 + 面板 ----------
   //

@@ -5,13 +5,13 @@
  * (见 `packages/client/ui-plugin-manager/src/client/PluginManagerPage.tsx` 与
  * `packages/client/ui-settings-plugins/src/client/PluginsSettingsSection.tsx`):
  *  - `view: 'summary'` —— 卡片标题下的那一行说明;
- *  - `view: 'page'` —— 点开后的正文。**这里放的是三个页面本体**
- *    (账号 / 仓库 / 无障碍,与 `preferences-dialog.tsx` 那份弹窗同源,
+ *  - `view: 'page'` —— 点开后的正文。**这里放的是 `TABS` 的每一个页面本体**
+ *    (今天 6 页,与 `preferences-dialog.tsx` 那份弹窗同源,
  *    真正渲染它们的是 `./preferences-pages.tsx` 的 `PreferencesPageBody`)。
  *
  * ## 作用域根(`.gw-prefs`)为什么必须由**本文件**包一层
  *
- * 那三个页面的样式全部来自移植面 `src/client/scss/preferences.scss`,而
+ * 那些页面的样式全部来自移植面 `src/client/scss/preferences.scss`,而
  * `scripts/styles.mjs` 的 `PORT_SURFACES` 把它的作用域根定成 `.gw-prefs`
  * (前缀化方式是 `.gw-prefs ` + 选择器 = **后代组合子**)。
  *
@@ -95,7 +95,7 @@ const TAB_ITEMS = TABS.map((entry) => ({
 })) as unknown as readonly [SegmentedTab<PreferencesTabId>, ...SegmentedTab<PreferencesTabId>[]];
 
 /**
- * 渲染 dsh-git 的一行说明,或它的完整设置面(三个页面 + 宿主配置表单)。
+ * 渲染 dsh-git 的一行说明,或它的完整设置面(`TABS` 的每个页面 + 宿主配置表单)。
  *
  * @param props - 要的视图、表单快照(经钩子)、页面数据面与其写动作。
  * @returns 一行说明,或那张设置面。
@@ -214,14 +214,14 @@ export function DshGitCard(props: DshGitCardProps): ReactNode {
       ))}
 
       {/*
-        ## 已有的「Pulls 自动刷新周期」表单**保留**,与三个页面**并列**在下面
+        ## 已有的「Pulls 自动刷新周期」表单**保留**,与各页面**并列**在下面
 
         为什么并列而不是塞进「仓库」页:它是**宿主配置文档**里的一段(host 半
         `src/index.ts` 的 `export const Config` 里那个 volatile 字段),与三个
         客户端页面**不是同一类东西** —— 前者写 profile 的 `cordis.patch.yml`、
         由宿主的 `SettingsFormModel` 负责暂存/保存,后两者当场生效。
 
-        为什么不合并进 `SettingsForm`:三个页面的开关「当场生效」(写 localStorage
+        为什么不合并进 `SettingsForm`:各页面的开关「当场生效」(写 localStorage
         并广播),把它们塞进一个「保存才写」的外壳会造出**两套写入语义在同一张表单里**
         —— 那是比「多一个小节」坏得多的东西。
       */}

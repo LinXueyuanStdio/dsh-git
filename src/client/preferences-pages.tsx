@@ -1,9 +1,13 @@
 /**
- * **Preferences 三个页面的共用正文**(账号 / 仓库 / 无障碍)。
+ * **Preferences 各页面的共用正文**(今天是 **6 页**:账号 / Git / 外观 / 通知 / 提示与确认 / 无障碍)。
+ *
+ * ⚠️ 标题里的「三个」是历史:本模块最初只承载账号 / 仓库 / 无障碍三页(见下面第 2 段),
+ * 此后 Git、外观、通知各按自己的账本加进来,2026-10「仓库」页按用户指令移除、
+ * 「提示与确认」按用户裁决加回来 ⇒ **真源永远只有下面那张 `TABS`**。
  *
  * ## 为什么要从 `preferences-dialog.tsx` 里拆出来
  *
- * 这三个页面原来只在一个渲染面里出现:我们自己那个模态(`PreferencesDialog`)。
+ * 这些页面原来只在一个渲染面里出现:我们自己那个模态(`PreferencesDialog`)。
  * 2026-10 用户要求把它们**也**搬进**宿主设置 ▸ 内置插件 ▸ dsh-git**的页签
  * (`settings.plugins.tab` 席位,卡片见 `./host-settings-card.tsx`)。两个渲染面的
  * 页签外壳必须**不同**(模态里是上游竖向 `TabBar`,卡片里是宿主 `SegmentedTabs`
@@ -14,7 +18,7 @@
  *
  * | 谁拥有 | 什么 |
  * |---|---|
- * | 本模块 | `TABS`(页面表)、`TAB_DOM_ID` / `PAGE_PANEL_ID`、三个页面的正文、**设备码轮询状态机**、两条真偏好的读写回调 |
+ * | 本模块 | `TABS`(页面表)、`TAB_DOM_ID` / `PAGE_PANEL_ID`、各页面的正文(含各页的读写接线)、**设备码轮询状态机**、真偏好的读写回调 |
  * | 外壳(`preferences-dialog.tsx` / `host-settings-card.tsx`) | 「当前选中哪一页」的 state、页签控件本体、`role=tabpanel` 容器、**登录怎么起**(设备码那一半) |
  *
  * ## 依赖方向(不许成环)
@@ -48,7 +52,19 @@ import type { ChangeEvent, ReactNode } from 'react';
 import { Accessibility } from '../core/desktop/ui/preferences/accessibility.tsx';
 import { Accounts } from '../core/desktop/ui/preferences/accounts.tsx';
 import { Appearance } from '../core/desktop/ui/preferences/appearance.tsx';
+/*
+ * **Prompts 页 —— 2026-10 用户裁决「可以加 Prompts 页」之后加回来的整页。**
+ *
+ * 它一直是**逐字节镜像**(`src/core/desktop/ui/preferences/prompts.tsx`,与上游
+ * `references/desktop/app/src/ui/preferences/prompts.tsx` 一致;唯一一处已登记的偏离是
+ * 用户「统一中文」裁决下的**字面量本地化**,登记在 `scripts/verify-mirror.mjs` 的
+ * `EXPECTED`)—— 与 `accounts` / `appearance` / `git` / `accessibility` 四条同源。
+ * 本模块只负责**接线**(哪些控件的动作真的落地在本插件里、其余由适配层删除),
+ * 逐条账本见 `preferences-dialog.tsx` 文件头的「Prompts」一节。
+ */
+import { Prompts } from '../core/desktop/ui/preferences/prompts.tsx';
 import { Account } from '../core/desktop/models/account.ts';
+import { UncommittedChangesStrategy } from '../core/desktop/models/uncommitted-changes-strategy.ts';
 import { ApplicationTheme } from '../core/desktop/ui/lib/application-theme.ts';
 import {
   getDateFormatPreference,
@@ -77,10 +93,12 @@ import { api, type AuthStatePayload } from './api.ts';
  * 「点企业登录按钮时如实说明设备码不支持企业端点」收在一处。
  */
 import {
-  AccountEmailSourceNotice,
+  AccountNotice,
   accountsWithEmails,
-  EnterpriseSignInPanel,
+  PatSignInAction,
+  PatSignInForm,
   useAccountEmails,
+  useAppInstallation,
   useEnterpriseSignIn,
   type IAuthIdentity,
 } from './account-emails.tsx';
@@ -104,15 +122,32 @@ import {
  */
 import { NotificationsPanel } from './notifications-panel.tsx';
 import {
+  CONFIRM_COMMIT_FILTERED_CHANGES_KEY,
+  CONFIRM_DISCARD_CHANGES_KEY,
+  CONFIRM_DISCARD_STASH_KEY,
+  CONFIRM_UNDO_COMMIT_KEY,
+  SHOW_COMMIT_LENGTH_WARNING_KEY,
+  getConfirmCommitFilteredChanges,
+  getConfirmDiscardChanges,
+  getConfirmDiscardStash,
+  getConfirmUndoCommit,
+  getShowCommitLengthWarning,
+  setConfirmCommitFilteredChanges,
+  setConfirmDiscardChanges,
+  setConfirmDiscardStash,
+  setConfirmUndoCommit,
   setDiffTabSize,
+  setShowCommitLengthWarning,
   setUnderlineLinks,
+  subscribePreference,
   useDiffTabSize,
   useUnderlineLinks,
 } from './prefs.ts';
 
 /**
- * 本模块能渲染的分区。**5 页**(2026-10:`appearance` 与 `git` 按用户指令**加进来**;
- * 同月 **`repositories` 按用户指令移除** —— 见 `TABS` 上面那张表)。
+ * 本模块能渲染的分区。**6 页**(2026-10:`appearance` 与 `git` 按用户指令**加进来**;
+ * 同月 **`repositories` 按用户指令移除**,**`prompts` 按用户裁决「可以加 Prompts 页」
+ * 加回来** —— 见 `TABS` 上面那张表)。
  *
  * 类型从 `preferences-dialog.tsx` 搬来(那份逐页账本留在那边;这里是不含任何
  * 「宿主能表达什么」判断的机械类型)。
@@ -122,11 +157,12 @@ export type PreferencesTabId =
   | 'git'
   | 'appearance'
   | 'notifications'
+  | 'prompts'
   | 'accessibility';
 
 /**
- * 页签表 —— **5 页**。前 2 页各有一份「为什么必须是我们的 UI」的理由;另 2 页
- * (`appearance` / `git`)是 2026-10 用户**明确要求加入**的(见下)。
+ * 页签表 —— **6 页**。前 2 页各有一份「为什么必须是我们的 UI」的理由;另 3 页
+ * (`appearance` / `git` / `prompts`)是 2026-10 用户裁决或明确要求加入的(见下)。
  *
  * | 页 | 为什么留 |
  * |---|---|
@@ -134,6 +170,7 @@ export type PreferencesTabId =
  * | `accounts` | **设备码面板**接的是本插件 host 半的 `auth/device-*`,宿主没有对应 UI |
  * | `git` | **2026-10 加入**(见下) |
  * | `appearance` | **2026-10 加回**(见下);同月**接手了原「仓库」页的「界面缩放」控件** |
+ * | `prompts` | **2026-10 用户裁决「可以加 Prompts 页」之后加回来**(见下) |
  *
  * ## `repositories` 为什么被移除(2026-10 用户指令,**这是一次产品裁决**)
  *
@@ -171,18 +208,26 @@ export type PreferencesTabId =
  * | Diff Tab Size | `src/client/prefs.ts` 的 `KEY_DIFF_TAB_SIZE` | 消费方 `src/client/desktop-diff.tsx:970` 的 `useDiffTabSize()` → `:978 style={{ tabSize }}` ⇒ **改完 diff 当场变** |
  * | Always show worktree list | **无**(产品里没有 worktree) | 由适配层 `display:none !important` 删除(`scss/preferences.scss` 适配层第 1 条)⇒ 是**不可见**控件,不是死控件 |
  *
- * 上游 `preferences.tsx:400-437` 里还有 `integrations` / `prompts` / `advanced`,
- * 它们在本轮的保真度账本(`preferences-dialog.tsx` 文件头)里已逐项证明控件**无法兑现**,
- * 所以仍然整页删除 —— 留着就是「可见但无作用」的静默缺陷类。**删除是取舍,不是遗漏**;
- * 三个文件**都在镜像树里**(`ui/preferences/{integrations,prompts,advanced}.tsx`),
- * 要加随时是接线活。
+ * ## `prompts` 为什么**原来是整页删除、现在加回来了**(2026-10 用户裁决)
+ *
+ * 上游 `preferences.tsx:400-437` 里还有 `integrations` / `prompts` / `advanced` 三页。
+ * 其中 **`integrations` 与 `advanced` 仍然整页删除** —— 保真度账本
+ * (`preferences-dialog.tsx` 文件头)里已逐项证明它们的控件**无法兑现**,留着就是
+ * 「可见但无作用」的静默缺陷类。**删除是取舍,不是遗漏**;两个文件都在镜像树里
+ * (`ui/preferences/{integrations,advanced}.tsx`),要加随时是接线活。
+ *
+ * **`prompts` 不再是删除项**:用户 2026-10 裁决「可以加 Prompts 页」,而这条裁决
+ * 是**有落点支撑**的 —— 12.16 的三个键、12.13 的闸门、以及「提交被筛选隐藏」那一条
+ * 都已经真的接线(逐条见 `TABS` 里 `prompts` 那条注释)。
+ * 页面本体是**镜像**;控件的取舍(哪些接线、哪些由适配层删除)写在
+ * `preferences-dialog.tsx` 文件头的 Prompts 表里。
  */
 /*
  * ==========================================================================
  * 外壳契约(两个渲染面都必须遵守的三条,写在这里免得下一个外壳漏掉)
  * ==========================================================================
  *
- * 1. **作用域根自带**:这三个页面的样式全部住在 `src/client/scss/preferences.scss`
+ * 1. **作用域根自带**:这些页面的样式全部住在 `src/client/scss/preferences.scss`
  *    这一面里,而那一面的作用域根是 `.gw-prefs`(`scripts/styles.mjs` 的
  *    `PORT_SURFACES`)。所以**每个外壳都必须让 `.gw-prefs` 成为正文的祖先** ——
  *    模态那边它由 `host-modal.tsx` 的 `PluginDialog` 加在**卡片自己**身上;卡片那边由
@@ -214,9 +259,11 @@ export const TABS: ReadonlyArray<{
    */
   { id: 'git', label: 'Git', symbol: octicons.gitCommit },
   /*
-   * 位置照**上游相对顺序**:`preferences.tsx:400-437` 是 Accounts → Integrations →
-   * [Copilot] → Git → **Appearance** → Notifications → Prompts → Advanced → **Accessibility**。
-   * 我们今天的 5 页按该顺序的相对位置排 = 账号 → 仓库(我们独有,上游在左栏)→ Git → 外观 → 无障碍。
+   * 位置照**上游相对顺序**:`preferences.tsx:400-437` 的 TabBar 是 Accounts →
+   * Integrations → [Copilot] → Git → **Appearance** → Notifications → **Prompts** →
+   * Advanced → **Accessibility**。我们今天的 6 页按该顺序的相对位置排 =
+   * 账号 → Git → 外观 → 通知 → **提示与确认** → 无障碍(上游的 Integrations / Advanced
+   * 两页仍是整页删除;Copilot 按用户指令排除)。
    * 图标同上游 `:419` 的 `octicons.paintbrush`。
    */
   { id: 'appearance', label: '外观', symbol: octicons.paintbrush },
@@ -232,6 +279,43 @@ export const TABS: ReadonlyArray<{
    * 包了一层完成回调)。页面本体见 `./notifications-panel.tsx`。
    */
   { id: 'notifications', label: '通知', symbol: octicons.bell },
+  /*
+   * ======================================================================
+   * **提示与确认(Prompts)—— 2026-10 用户裁决「可以加 Prompts 页」之后加回来**
+   * ======================================================================
+   *
+   * ## 位置(与上游逐条对齐,不是随手放的)
+   *
+   * 上游 `preferences.tsx:426-430` 的 `TabBar` 里,Prompts 排在 **Notifications 之后、
+   * Advanced 之前**;图标是 `:429` 的 `octicons.question`(⚠️ **不是** gear —— 那是
+   * Advanced 的)。我们的页签表没有 Advanced(整页删除),所以它的落点是
+   * **通知与无障碍之间** —— 这就是上游的相对顺序在「去掉两页之后的表」上的投影。
+   *
+   * ## 这一页为什么现在能加(它原先为什么被整页删除)
+   *
+   * 它曾是保真度账本里三条「整页删除」之一(`integrations` / `prompts` / `advanced`)。
+   * 但删除的**唯一有效理由**是「这一页上的控件一个都兑现不了」,而那条理由**早已过期**:
+   *   · 12.16 已经把 `confirmDiscardChanges` / `confirmDiscardStash` / `confirmUndoCommit`
+   *     接成了**真偏好**(消费方在 `changes-view.tsx`,判据 `changes-confirm-pref-probe`);
+   *   · 12.13 的 `showCommitLengthWarning` **早就有真的闸门**(`changes-view.tsx` 的
+   *     `CommitBox`),只缺设置面 —— 上一轮把它塞进「外观」页是**自造入口**,已按用户
+   *     裁决删除,回收条件写的就是「若将来 Prompts 页真的落地,接在**这一页**」;
+   *   · `confirmCommitFilteredChangesKey` **两侧都落了地**(写侧 = 镜像
+   *     `ui/changes/confirm-commit-filtered-changes-dialog.tsx` 经 `prefs.ts`;
+   *     读侧 = `changes-view.tsx` 的 `showPromptForCommittingFileHiddenByFilter`),
+   *     而账本原先记的「真正缺的是确认对话框」**也已过期**(那个弹窗就在
+   *     `changes-view.tsx:1631-1667`)。
+   * ⇒ 三条有落点的控件 + 上游**同一节**的第六个控件合起来足够撑起一整页,而用户已裁决加页。
+   *
+   * ## 没落点的控件**不删页,也不留死开关**
+   *
+   * 上游这一页有 12 个控件(10 个复选框 + 1 组三选一 + 1 个复选框)。镜像**一字不改**,
+   * 所以「不发车」的那 7 个由**适配层**删除(`scss/preferences.scss` 适配块第 12 条:
+   * `display:none !important`,与 worktree 那条同一手法、同一条纪律),逐条理由与判据
+   * 写在 `preferences-dialog.tsx` 文件头的 Prompts 表里。⇒ 可见的每一个控件都真的能兑现,
+   * 隐藏的每一个都有**具名**理由(不是「没接完」)。
+   */
+  { id: 'prompts', label: '提示与确认', symbol: octicons.question },
   { id: 'accessibility', label: '无障碍', symbol: octicons.accessibility },
 ];
 
@@ -241,6 +325,7 @@ export const TAB_DOM_ID: Readonly<Record<PreferencesTabId, string>> = {
   git: 'preferences-tab-git',
   appearance: 'preferences-tab-appearance',
   notifications: 'preferences-tab-notifications',
+  prompts: 'preferences-tab-prompts',
   accessibility: 'preferences-tab-accessibility',
 };
 
@@ -257,6 +342,7 @@ export const PAGE_PANEL_ID: Readonly<Record<PreferencesTabId, string>> = {
   git: 'dsh-git-preferences-panel-git',
   appearance: 'dsh-git-preferences-panel-appearance',
   notifications: 'dsh-git-preferences-panel-notifications',
+  prompts: 'dsh-git-preferences-panel-prompts',
   accessibility: 'dsh-git-preferences-panel-accessibility',
 };
 
@@ -334,9 +420,21 @@ export interface IDeviceCodeStart {
  * 而这一步要做两件事(向 host 要设备码 + `window.open` 授权页)。放进 prop 面,
  * 「谁在什么时候打开浏览器」在调用点一眼可见;本模块只拥有**轮询状态机**。
  *
+ * ## 失败通道(2026-11 接上,见下)
+ *
+ * `result.ok === false` 时(host 没配 Client ID、App 没开 Device Flow、网络不通…)
+ * 必须把 `result.error.message` 交给面板 —— 否则状态机停在 `starting`,面板显示
+ * 「正在向 GitHub 申请设备码…」而**什么都没在申请**,用户看到的是一句谎。
+ * 这条通道是**可选参数**(`onError`),因为它的三个注入点(模态 / 卡片 / 卡片的另一半)
+ * 都只关心「成功之后怎么办」;只有面板状态机需要知道失败。
+ *
  * @param onStarted - 拿到设备码后调一次,把面板切到「等待授权」。
+ * @param onError - 起不来时调一次(省略 = 保持「静默」的旧行为,只有探针会那样调)。
  */
-export type StartDeviceSignIn = (onStarted: (started: IDeviceCodeStart) => void) => void;
+export type StartDeviceSignIn = (
+  onStarted: (started: IDeviceCodeStart) => void,
+  onError?: (message: string) => void,
+) => void;
 
 /** 设备码登录面板的状态机。 */
 export type DeviceFlowState =
@@ -359,6 +457,60 @@ export interface IDeviceSignIn {
 }
 
 /**
+ * `slow_down` 的兜底自增步长(秒)。
+ *
+ * GitHub 的规则原文是 *5 extra seconds are added to the minimum interval*,并且响应里
+ * 还会带**新的 `interval`**;后者优先(见 {@link nextDevicePollInterval})。这个常量只在
+ * 响应没带 `interval` 时兜底(老 host 会把它丢掉,见 `src/host/auth.ts` 的 `DeviceFlowPoll`)。
+ */
+export const DEVICE_POLL_SLOW_DOWN_STEP_SEC = 5;
+
+/**
+ * 下一次轮询该等多少秒 —— 纯函数,判据只此一处(2026-11)。
+ *
+ * ## 为什么必须有它(这是"授权了却拿不到令牌"的现场原因)
+ *
+ * 旧实现把 `slow_down` 当普通 pending:**固定 `setInterval(interval)` 继续按原节奏打**。
+ * 而 GitHub 的行为是「你打太快 ⇒ 我要求更慢」,而且**每次都再加码**,令牌始终不下发。
+ * 真机实测(对 `POST /login/oauth/access_token` 每 1 秒打一次):
+ *
+ * ```
+ * 第 1 次 authorization_pending            (响应里没有 interval)
+ * 第 2 次 slow_down  interval=10
+ * 第 3 次 slow_down  interval=15
+ * 第 4 次 slow_down  interval=20    …      ← 令牌始终没有
+ * ```
+ *
+ * 而**按要求的间隔等够之后再打,就恢复正常**:
+ *
+ * ```
+ * (等 20 秒,≥ 最后要求的 15)
+ * 下一次 authorization_pending             ← 退避解除
+ * ```
+ *
+ * ⇒ 规则:**只增不减**,且**优先采用响应里给的 `interval`**(官方文档:*The error
+ * response includes the new interval that you must use*)。
+ *
+ * @param current - 当前生效的间隔(秒)。
+ * @param poll - host 给的轮询结果(只读 `slowDown` / `interval`)。
+ * @returns 下一次轮询前要等的秒数;不是 `slow_down` 时**原样返回** `current`。
+ */
+export function nextDevicePollInterval(
+  current: number,
+  poll: { readonly slowDown?: boolean; readonly interval?: number },
+): number {
+  if (poll.slowDown !== true) {
+    return current;
+  }
+  const fromServer =
+    typeof poll.interval === 'number' && Number.isFinite(poll.interval) && poll.interval > 0
+      ? poll.interval
+      : current + DEVICE_POLL_SLOW_DOWN_STEP_SEC;
+  // `Math.max`:GitHub 的间隔是单调递增的,任何"变小"的值都当作没听见,免得把节奏又打快。
+  return Math.max(current, fromServer);
+}
+
+/**
  * 「去要一个设备码」—— **两个外壳共用**的那一半实现。
  *
  * 它做两件事:调本插件 host 半的 `auth/device-start`,以及把用户送到授权页
@@ -371,20 +523,28 @@ export interface IDeviceSignIn {
  * 外壳要注入的只是**这一个函数**(`IPreferencesPageBodyProps.startDeviceSignIn`),
  * 于是「谁在什么时候打开浏览器」在调用点仍然一眼可见。
  *
- * ## ⚠️ 已知弱点(如实登记,不顺手改)
+ * ## ⚠️ 为什么必须在 `onError` 里说人话(2026-10 登记的弱点,2026-11 修掉)
  *
- * `result.ok === false` 时(例如 host 没配 OAuth Client ID)**什么都不做** ——
- * 状态机会停在 `starting`,面板显示「正在向 GitHub 申请设备码…」。
- * `result.error.message` 其实可读(host 会明说「host 未配置 GitHub OAuth App
- * Client ID」),但把它接到面板上需要在 prop 面再加一条「起不来」的通道。
- * 本轮授权范围是「把三页搬进卡片」,所以这里**逐字保留**旧行为,不夹带改动。
+ * 改前这里 `result.ok === false` 时**什么都不做** —— 状态机停在 `starting`,面板显示
+ * 「正在向 GitHub 申请设备码…」,而 `result.error.message` 其实可读(host 会明说
+ * 「host 未配置 GitHub OAuth App Client ID」)。当初不改是因为那一轮的授权范围是
+ * 「把三页搬进卡片」,加一条 prop 通道属于夹带改动。
+ *
+ * 2026-11 必须改的理由:包内开始内置一个 **GitHub App** 的 Client ID ⇒ 设备码按钮
+ * **默认就会出现**,而这一步恰好是最可能失败的一步(App 没开 Device Flow、
+ * 授权请求被拒、网络不通)。让「点了没反应」成为默认路径上的表现不可接受。
  *
  * @param onStarted - 拿到设备码后调一次,把面板切到「等待授权」。
+ * @param onError - 起不来时调一次,把面板切到错误态(省略 = 旧行为:静默)。
  */
-export function startDeviceSignIn(onStarted: (started: IDeviceCodeStart) => void): void {
+export function startDeviceSignIn(
+  onStarted: (started: IDeviceCodeStart) => void,
+  onError?: (message: string) => void,
+): void {
   void (async () => {
     const result = await api.deviceStart();
     if (!result.ok) {
+      onError?.(result.error.message);
       return;
     }
     const { deviceCode, userCode, verificationUri, interval, expiresIn } = result.value;
@@ -401,8 +561,18 @@ export function startDeviceSignIn(onStarted: (started: IDeviceCodeStart) => void
  * 的 UI —— 细节与「为什么上游 `accounts.tsx` 的 CTA 不够用」写在
  * `preferences-dialog.tsx` 文件头的「登录为什么是真的」一节。
  *
- * 用 `setInterval` 而不是链式 `setTimeout`:间隔由 host 给(`interval`,慢下来时只提示),
- * 而**终止**由状态机完成 —— 成功/出错/过期都会把 `kind` 从 `waiting` 移走,这个 effect
+ * ## 为什么是「上一次结束后再排下一次」而不是 `setInterval`(2026-11 重写)
+ *
+ * 旧实现用固定 `setInterval(interval)`,并把 `slow_down` 当成普通 pending **完全忽略**
+ * —— 于是用户已经授权、令牌却永远拿不到:GitHub 每次都回 `slow_down`、每次把要求的
+ * 间隔再加 5 秒,而客户端照旧按原节奏打(真机实测见 {@link nextDevicePollInterval})。
+ * 现在:
+ *  - 用 `setTimeout` **链**:下一次只在本轮 `await` 结束之后才排,永远不会叠加并发轮询;
+ *  - `slow_down` 时按 GitHub 给的 `interval`(缺失才 +5 秒)退避,**只增不减**;
+ *  - 退避只更新 `state.interval`(见下面那条注释),面板上「每 N 秒检查一次」因此与
+ *    真实节奏是同一个数。
+ *
+ * 终止仍由状态机完成:成功 / 出错 / 过期都会把 `kind` 从 `waiting` 移走,这个 effect
  * 随之清理定时器(不会留下孤儿轮询,这是 §10.8 记的那类泄漏)。
  *
  * @param store - 登录成功后要同步登录态的那份 store 面。
@@ -436,39 +606,71 @@ export function useDeviceSignIn(
 
   const start = useCallback(() => {
     setState({ kind: 'starting' });
-    startDeviceSignIn(accept);
+    /*
+     * 失败通道:host 起不来时面板必须**说话**(改前是静默 return ⇒ 永远停在
+     * 「正在向 GitHub 申请设备码…」)。`aliveRef` 守卫与轮询那条同源:卸载后不再 setState。
+     */
+    startDeviceSignIn(accept, (message) => {
+      if (!aliveRef.current) { return; }
+      setState({ kind: 'error', message });
+    });
   }, [startDeviceSignIn, accept]);
 
   useEffect(() => {
     if (state.kind !== 'waiting') { return; }
     const deviceCode = state.deviceCode;
     const expiresAt = state.expiresAt;
-    const timer = window.setInterval(() => {
-      void (async () => {
-        if (Date.now() > expiresAt) {
-          setState({ kind: 'error', message: '设备码已过期,请重新点击登录。' });
+    /*
+     * 本轮 effect 的存活标记:比 `aliveRef` 更严 —— 它连「同一次挂载里 effect 因
+     * `state.interval` 变化而重排」也算作作废(`await` 之后的续体不许再动状态)。
+     */
+    let cancelled = false;
+    let timer: number | undefined;
+
+    const tick = async (): Promise<void> => {
+      if (cancelled) { return; }
+      if (Date.now() > expiresAt) {
+        setState({ kind: 'error', message: '设备码已过期,请重新点击登录。' });
+        return;
+      }
+      const result = await api.devicePoll(deviceCode);
+      if (cancelled) { return; }
+      if (!result.ok) {
+        setState({ kind: 'error', message: result.error.message });
+        return;
+      }
+      const poll = result.value;
+      if (poll.status === 'pending') {
+        const next = nextDevicePollInterval(state.interval, poll);
+        /*
+         * ⚠️ `slow_down` 时**只更新 state、不在这里排下一次**:effect 的依赖里有 `state`,
+         * 它会用新间隔重排。若改成「自己排下一次 + 顺手 setState」,就会同时存在两条链
+         * (effect 重排一条、本函数一条),间隔再也说不清 —— 而「面板显示的间隔」与
+         * 「真实节奏」必须是同一个数。
+         */
+        if (next !== state.interval) {
+          setState({ ...state, interval: next });
           return;
         }
-        const result = await api.devicePoll(deviceCode);
-        if (!aliveRef.current) { return; }
-        if (!result.ok) {
-          setState({ kind: 'error', message: result.error.message });
-          return;
-        }
-        const poll = result.value;
-        if (poll.status === 'pending') { return; }
-        if (poll.status === 'error') {
-          setState({ kind: 'error', message: poll.message });
-          return;
-        }
-        // 成功:host 已经把令牌落盘,这里只把**登录态**同步进 store(并刷新远端清单)。
-        store.setAuth(poll.state);
-        void store.loadRemoteRepos(true);
-        store.toast(`已登录 @${poll.state.login}`);
-        setState({ kind: 'done', login: poll.state.login });
-      })();
-    }, state.interval * 1000);
-    return () => { window.clearInterval(timer); };
+        timer = window.setTimeout(() => { void tick(); }, next * 1000);
+        return;
+      }
+      if (poll.status === 'error') {
+        setState({ kind: 'error', message: poll.message });
+        return;
+      }
+      // 成功:host 已经把令牌落盘,这里只把**登录态**同步进 store(并刷新远端清单)。
+      store.setAuth(poll.state);
+      void store.loadRemoteRepos(true);
+      store.toast(`已登录 @${poll.state.login}`);
+      setState({ kind: 'done', login: poll.state.login });
+    };
+
+    timer = window.setTimeout(() => { void tick(); }, state.interval * 1000);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) { window.clearTimeout(timer); }
+    };
   }, [state, store]);
 
   const dismiss = useCallback(() => { setState({ kind: 'idle' }); }, []);
@@ -479,7 +681,10 @@ export function useDeviceSignIn(
 /**
  * 设备码登录面板。
  *
- * 为什么不塞进上游 `accounts.tsx`:那个文件是**字节一致的镜像**,不接受额外 children;
+ * 为什么不塞进上游 `accounts.tsx`:那个文件是**上游镜像**(只在镜像闸门里登记过
+ * 少量偏离),而它开出来的两个插槽是给**PAT 入口**的窄口子(见 `patSignInAction` /
+ * `patSignInForm`);设备码面板是**页级**结构(在 `Accounts` 之上),`AccountNotice` 在它之下 ——
+ * 塞进「谁已登录」的清单里也不合理;
  * 而这是**我们产品**多出来的一条通道(宿主有设备码后端,Desktop 没有)。所以它渲染在
  * 页面容器里、上游页面**之上** —— 与「仓库」页同理:我们独有的 UI 放我们这层。
  * @param props - 状态机当前值 + 重试/关闭。
@@ -788,6 +993,11 @@ export function PreferencesPageBody(props: IPreferencesPageBodyProps): ReactNode
    * 按页签提前 `return`,所以钩子只能在这里调一次。
    */
   const appearance = useAppearanceWiring(props.onPreferencesChanged);
+  /*
+   * 「提示与确认」页的 5 条真偏好(其余 7 个控件由适配层删除,见 `case 'prompts'`)。
+   * 与上面同一条理由:**必须无条件调用** —— `switch` 会按页签提前 `return`。
+   */
+  const prompts = usePromptsWiring(props.onPreferencesChanged);
 
   /*
    * ---- 账号邮箱(Author 邮箱下拉 / misattribution 告警的数据源)----
@@ -800,19 +1010,27 @@ export function PreferencesPageBody(props: IPreferencesPageBodyProps): ReactNode
    */
   const emails = useAccountEmails(props.auth !== null);
   const reloadEmails = emails.reload;
+  /*
+   * GitHub App 的**安装状态**(「授权 ≠ 安装」)。与邮箱同一个形状:登录后才查,
+   * 且只有 `not-installed` 会在页面上说话(`account-emails.tsx` 的 `AccountNotice` 里那句)。
+   */
+  const installation = useAppInstallation(props.auth !== null);
+  const reloadInstallation = installation.reload;
 
   /*
    * 登录成功之后的回声。前三件与设备码那条路**逐字同形**(`useDeviceSignIn` 内部做的
    * 就是 `store.setAuth` → `loadRemoteRepos(true)` → `toast`;这里自己实现是因为
    * PAT 那条路不经过它)。第四件是新增的:重拉账号邮箱 —— 换账号(令牌轮换 / 换企业
    * 实例)之后下拉里的邮箱必须跟着换,否则用户可能把提交记到上一个账号的地址上。
+   * 第五件同理:换账号之后**安装状态也可能不同**(PAT ↔ GitHub App、装了 A 没装 B)。
    */
   const onEnterpriseSignedIn = useCallback((state: AuthStatePayload) => {
     props.store.setAuth(state);
     void props.store.loadRemoteRepos(true);
     props.store.toast(`已登录 @${state.login}`);
     reloadEmails();
-  }, [props.store, reloadEmails]);
+    reloadInstallation();
+  }, [props.store, reloadEmails, reloadInstallation]);
 
   const emailList = emails.result !== null && emails.result.kind === 'ok' ? emails.result.emails : [];
   const identity: IAuthIdentity | null =
@@ -872,20 +1090,14 @@ export function PreferencesPageBody(props: IPreferencesPageBodyProps): ReactNode
             <DeviceFlowPanel state={device.state} onRetry={device.start} onDismiss={device.dismiss} />
           </DialogContent>
           {/*
-            端点 + PAT 登录面板。放在上游 `Accounts` **之前**:上游那两段
-            (GitHub.com / GitHub Enterprise)是「谁已登录」的清单,而端点是
-            「登到哪儿去」的输入 —— 先有输入,再谈结果。
-            ⚠️ 必须包 `DialogContent`(理由见上面「仓库」那一支):它是**我们手写的**面板,
-            上游没有对应物,所以内边距得自己带上;否则同页里会出现两条内容左边线
-            (实测 1px 与 21px 并存 —— 用户截图里「账号页看着不齐」就是这个)。
+            **账号页从上到下就是三段(2026-11 用户给定)**:
+              ① 设备码面板(只在流程进行中有内容)
+              ② 上游 `Accounts`(谁已登录的清单 + 两个登录 CTA;**PAT 入口与表单也在这里**,
+                 见它那两个插槽 `patSignInAction` / `patSignInForm`)
+              ③ `AccountNotice`(安装检测与引导;邮箱**成功**时不再上屏)
+            每块各包一层 `DialogContent`(内边距来源与理由见上面那一段;
+            左边线是 `docs/preferences-port.md` §11 与节奏探针钉住的读数)。
           */}
-          <DialogContent>
-            <EnterpriseSignInPanel signIn={signIn} />
-          </DialogContent>
-          {/* 同上:它渲染的是一个 `.settings-description` 段落,同样要落在内容盒里。 */}
-          <DialogContent>
-            <AccountEmailSourceNotice result={emails.result} />
-          </DialogContent>
           <Accounts
             accounts={emailCandidates}
             // 上游 `preferences.tsx:484-492`:登录先关弹窗,再交给 dispatcher。
@@ -895,14 +1107,24 @@ export function PreferencesPageBody(props: IPreferencesPageBodyProps): ReactNode
              * ⚠️ **不能**把它接成 `device.start`(改前就是):`api.deviceStart()`
              * 没有端点参数,host 打的是 github.com 的设备码端点 ⇒ 选了企业实例再点
              * 「Sign in to GitHub Enterprise」会**静默登进 github.com**。
-             * 端点不是 GitHub.com 时,`signIn.onEnterpriseSignIn` 会把焦点移到 PAT
-             * 输入并说清原因,而不是假装登录。
+             * 端点不是 GitHub.com 时,`signIn.onEnterpriseSignIn` 会**把 PAT 表单打开**、
+             * 把焦点移到令牌输入,并说清原因,而不是假装登录。
              */
             onEnterpriseSignIn={signIn.onEnterpriseSignIn}
             // 以前这里是空实现(`onLogout: () => {}`)⇒「Sign Out」点了没反应。
             // 现在走 store 的 `logout()`(`api.logout` → `auth/logout` 路由,host 删令牌)。
             onLogout={props.onLogout}
+            /*
+              ★ PAT 那两个插槽(2026-11,在上游镜像里登记过的**结构**偏离):按钮进
+              GitHub.com 的动作行(与登录 / 退出登录并排),表单紧跟 GitHub.com 那一段。
+              默认都关着 —— 只有点【PAT 令牌登录】或企业 CTA 才会出现输入框。
+            */
+            patSignInAction={<PatSignInAction signIn={signIn} />}
+            patSignInForm={<PatSignInForm signIn={signIn} />}
           />
+          <DialogContent>
+            <AccountNotice installation={installation.status} emails={emails.result} />
+          </DialogContent>
         </>
       );
     /*
@@ -969,13 +1191,116 @@ export function PreferencesPageBody(props: IPreferencesPageBodyProps): ReactNode
             - **外面这层 `DialogContent` 不是装饰**:我们的控件是手写的,不像上游页面
               自带那一层,少了它就会贴着页签栏的竖线(原「仓库」页的实测读数 1px vs 21px,
               `docs/probes/preferences-rhythm-probe.mjs`)。它与上游 `Appearance` 自己的
-              `DialogContent` 是**兄弟**,各带各的内边距 —— 与账号页有四个 `.dialog-content`
-              是同一形态。**不要**改成手写 `padding`(那是第二份真源)。
+              `DialogContent` 是**兄弟**,各带各的内边距 —— 与账号页那三个 `.dialog-content`
+              (设备码面板 / 上游 `Accounts` / `AccountNotice`)是同一形态。**不要**改成手写 `padding`(那是第二份真源)。
           */}
           <DialogContent>
             <FontScaleSection value={props.fontScale} onChange={props.onFontScale} />
           </DialogContent>
+          {/*
+            ⭐ **这里曾经有两块「上游控件搬来外观页」的手写内容 —— 2026-10 都已迁走**。
+
+            ## 1. 「显示提交摘要长度提示」(功能点 **12.13**)—— 已删(上一轮)
+
+            上游这个复选框住在 **Preferences ▸ Prompts ▸ `Commit Length`**
+            (`ui/preferences/prompts.tsx:326-337`),我们当时整页删除了 Prompts
+            ⇒ 上一轮把它放到「外观」页是**自造入口**(用户原话:「上游明明没有」),
+            按裁决删除。
+
+            ## 2. 三条「确认提示」开关(功能点 **12.16**)—— **本轮迁到 Prompts 页**
+
+            它们**本来就是**上游 Prompts 页上的控件
+            (`ui/preferences/prompts.tsx:236-303` 的 `show-confirm-dialog-heading` 那一组),
+            放在「外观」页是同一个自造入口的另一处。2026-10 用户裁决「可以加 Prompts 页」
+            之后,上一轮写下的两条**回收条件**都已满足:
+
+              · 12.13 的:「若将来 Prompts 页真的落地(整页加回来 / 加第六个页签),
+                把复选框接在**那一页**的 `Commit Length` 一节里」;
+              · 12.16 的:同一个裁决下的另一处(上一轮只登记了「留给下一轮裁决」)。
+
+            ⇒ 12.13 的复选框 + 12.16 的三条复选框**现在都在 Prompts 页上**
+            (`case 'prompts'`,页面本体是镜像,不是手写的),本节连
+            `CommitLengthWarningSection` / `ConfirmationPromptsSection` /
+            `ConfirmPromptRow` 一起删除(删干净,不留「定义了但没人用」)。
+            判据:`changes-summary-length-pref-probe`(S1/S2 按设计变更改写)与
+            `changes-confirm-pref-probe`(S1/S4 改成渲染 **prompts** 页)。
+          */}
         </>
+      );
+    /*
+     * ========================================================================
+     * **提示与确认(Prompts)—— 2026-10 用户裁决后加回来的整页**
+     * ========================================================================
+     *
+     * 与 `git` / `appearance` / `accessibility` 同一形态:**页面本体是逐字节镜像**,
+     * 本模块只喂 prop。`Prompts`(`ui/preferences/prompts.tsx`)自己渲染
+     * `<DialogContent>`,所以这里**不再**包一层(包两层 = 双份内边距,
+     * `preferences-rhythm-probe` 会当场量出来)。
+     *
+     * ## 上游这一页有 12 个控件,我们**发车 6 个、其余 7 个由适配层删除**
+     *
+     * 镜像一字不改 ⇒ 上游那 10 个复选框 / 1 组三选一**都会渲染**。凡是「动作在本插件里
+     * 真的存在」的都接了线;**没有落点的那几个由 `scss/preferences.scss` 适配块第 12 条
+     * 用 `display:none !important` 删除**(与外观页那条 worktree 同一手法、同一条纪律:
+     * 删除落在渲染层,因为镜像不能删单个 `<Checkbox>`)。
+     *
+     * ⇒ 「可见的控件全都真能兑现」+「隐藏的控件各有具名理由」,没有第三种。
+     * 逐条理由 / 消费方 `file:line` / 判据见 `preferences-dialog.tsx` 文件头的 Prompts 表。
+     *
+     * ## 为什么这条链必须在**本模块**里(而不是各外壳各写一份)
+     *
+     * `usePromptsWiring` 与 `useAppearanceWiring` 同源同形:读偏好 + 写偏好 + 通知外壳。
+     * 两个渲染面(模态 / 宿主设置卡片)共用本函数,所以「Prompts 页接线了几条」只有
+     * 一个答案。
+     */
+    case 'prompts':
+      return (
+        <Prompts
+          /* ---------- 发车的 5 条(每一条都有真消费方)---------- */
+          confirmDiscardChanges={prompts.confirmDiscardChanges}
+          onConfirmDiscardChangesChanged={prompts.onConfirmDiscardChangesChanged}
+          confirmDiscardStash={prompts.confirmDiscardStash}
+          onConfirmDiscardStashChanged={prompts.onConfirmDiscardStashChanged}
+          confirmUndoCommit={prompts.confirmUndoCommit}
+          onConfirmUndoCommitChanged={prompts.onConfirmUndoCommitChanged}
+          askForConfirmationOnCommitFilteredChanges={
+            prompts.askForConfirmationOnCommitFilteredChanges
+          }
+          onAskForConfirmationOnCommitFilteredChanges={
+            prompts.onAskForConfirmationOnCommitFilteredChanges
+          }
+          showCommitLengthWarning={prompts.showCommitLengthWarning}
+          onShowCommitLengthWarningChanged={prompts.onShowCommitLengthWarningChanged}
+          /*
+           * ---------- 删除的那 7 个:值取上游默认,回调取**具名**空实现 ----------
+           *
+           * ⚠️ 这六对「恒 `false` + 空回调」(外加三选一那一组)**不是**「点了没反应的开关」
+           * ——它们是**看不见**的控件:适配层 `display:none !important`,逐条 0×0 由
+           * `docs/probes/preferences-prompts-probe.mjs` 的 `H1`/`H3` 在真 Chrome 里断言
+           * (`H2` 是同帧阳性对照:发车的那 4 行仍然可见)。给**具名**空实现而不是内联
+           * `() => {}`,是为了让「这里为什么没有行为」在调用点一眼可见(与
+           * `onAlwaysShowWorktreeListChanged` 同一条纪律)。
+           */
+          confirmRepositoryRemoval={false}
+          onConfirmRepositoryRemovalChanged={noopOmittedPrompt}
+          confirmDiscardChangesPermanently={false}
+          onConfirmDiscardChangesPermanentlyChanged={noopOmittedPrompt}
+          confirmCheckoutCommit={false}
+          onConfirmCheckoutCommitChanged={noopOmittedPrompt}
+          confirmForcePush={false}
+          onConfirmForcePushChanged={noopOmittedPrompt}
+          confirmCommitMessageOverride={false}
+          onConfirmCommitMessageOverrideChanged={noopOmittedPrompt}
+          confirmWorktreeRemoval={false}
+          onConfirmWorktreeRemovalChanged={noopOmittedPrompt}
+          /*
+           * 三选一那一组(切分支时未提交改动的去向)—— 产品里**没有切分支动作**
+           * (分支面板只读),策略类型与 `app-store` 的策略都在 §1.3 排除面里。
+           * 值取上游声明默认 `AskForConfirmation`(`models/uncommitted-changes-strategy.ts:7`)。
+           */
+          uncommittedChangesStrategy={UncommittedChangesStrategy.AskForConfirmation}
+          onUncommittedChangesStrategyChanged={noopUncommittedChangesStrategy}
+        />
       );
     case 'notifications':
       /*
@@ -1026,7 +1351,7 @@ export function PreferencesPageBody(props: IPreferencesPageBodyProps): ReactNode
  * `ui/preferences/appearance.tsx` 是**逐字节镜像**(`verify-mirror` 要求),
  * 给它的 prop 面加一个 `fontScale` 会同时改镜像与它的 prop 类型 ——
  * 本项目最贵的一条纪律就是「镜像一字不改,适配放我们这层」。
- * ⇒ 以**兄弟节点**渲染:与账号页有四个 `.dialog-content` 是同一形态。
+ * ⇒ 以**兄弟节点**渲染:与账号页那三个 `.dialog-content` 是同一形态。
  *
  * ## 输入语义(与旧实现逐字相同)
  *
@@ -1066,6 +1391,180 @@ function FontScaleSection(props: {
       </div>
     </div>
   );
+}
+
+/**
+ * **一个布尔偏好的「读 + 写 + 订阅」** —— Prompts 页 5 条开关共用的那一格。
+ *
+ * ## 为什么是 `useState` + `subscribePreference` 而不是 `useSyncExternalStore`
+ *
+ * 与 `src/client/prefs.ts` 里那几个键的 JSDoc 同一条,**实测过的**渲染路径约束:
+ * 渲染本页的 jsdom 探针(`changes-confirm-pref-probe` / `changes-summary-length-pref-probe`)
+ * 跑的是 **React 17.0.2**,而 `useSyncExternalStore` 是 18 才有的导出 ——
+ * 用它会炸成 `TypeError: … is not a function`,整棵树被卸载,判据直接失真。
+ * 存储、键名、广播机制一个字没换:读用 `prefs.ts` 的 getter,订阅用同一个
+ * `subscribePreference`,`setValue` 也是同一个写函数。
+ *
+ * ## 「写偏好 + 通知外壳」两件事一件都不能少
+ *
+ * 只写不通知 = 「设置看着改了、要刷新才变」,那是本仓反复点名的假接线
+ * (同 {@link useAppearanceWiring} / {@link useAccessibilityWiring})。
+ * `onPreferencesChanged` 用 ref 取最新值:调用点每次渲染都会新建那个闭包,
+ * 把它列进依赖表等于每帧换一个新回调。
+ *
+ * @param storageKey - 键名(喂 `subscribePreference`;`prefs.ts` 导出的 `*_KEY`)。
+ * @param getValue - 读函数(**模块级稳定引用**,列在 `useEffect` 依赖里)。
+ * @param setValue - 写函数(同上)。
+ * @param onPreferencesChanged - 外壳的「请重渲染」回调。
+ * @returns `[当前值, 写回调]`。
+ */
+function useBooleanPreference(
+  storageKey: string,
+  getValue: () => boolean,
+  setValue: (value: boolean) => void,
+  onPreferencesChanged: () => void,
+): readonly [boolean, (value: boolean) => void] {
+  const latest = useRef(onPreferencesChanged);
+  latest.current = onPreferencesChanged;
+
+  const [enabled, setEnabled] = useState(getValue);
+  useEffect(
+    () => subscribePreference(storageKey, () => { setEnabled(getValue()); }),
+    [storageKey, getValue],
+  );
+
+  const onEnabledChanged = useCallback((value: boolean) => {
+    setValue(value);
+    latest.current();
+  }, [setValue]);
+
+  return [enabled, onEnabledChanged];
+}
+
+/**
+ * **「提示与确认」页(上游 Prompts)发车的那 5 条偏好** —— 读 / 写 / 订阅。
+ *
+ * ## 为什么只有 5 条(逐条判据,不是「还没接」)
+ *
+ * 上游这一页有 12 个控件;本插件**只有当被守卫的动作真的存在、且读侧真的读这个键**时才发车:
+ *
+ * | 上游控件 | 键 | 我们的落点 |
+ * |---|---|---|
+ * | Discarding changes | `confirmDiscardChanges` | `changes-view.tsx` 的丢弃闸门(`gateOf`) |
+ * | Discarding stash | `confirmDiscardStash` | 同文件 stash 面板那颗「丢弃」 |
+ * | Undo commit | `confirmUndoCommit` | 同文件 `requestUndo`(工作区脏时) |
+ * | Committing changes hidden by filter | `confirmCommitFilteredChangesKey` | 同文件 `showPromptForCommittingFileHiddenByFilter` ⇒ 镜像 `ConfirmCommitFilteredChanges` 弹窗 |
+ * | Show commit length warning | `showCommitLengthWarning` | 同文件 `CommitBox` 的 `showCommitLengthWarning && form.summary.length > 50` |
+ *
+ * 其余 7 个**没有落点**(仓库移除确认框在 `repo-bar.tsx` 里恒弹、无偏好键;永久丢弃 /
+ * checkout commit / force push / 生成信息覆盖 / worktree 移除 / 切分支策略在本插件里
+ * 没有对应动作或没有偏好键)⇒ 由 `scss/preferences.scss` 适配块第 12 条
+ * `display:none !important` 删除。**逐条理由与上游 `file:line` 在
+ * `preferences-dialog.tsx` 文件头的 Prompts 表里**,这里不重复第二份。
+ *
+ * ## ⚠️ 12.16 那三条不改变默认行为
+ *
+ * 上游声明默认都是 `true`(`app-store.ts:490/492/495`)且**无迁移垫片**;
+ * `confirmCommitFilteredChangesKey` 上游默认也是 `true`;只有 `showCommitLengthWarning`
+ * 的**观测**默认是 `true`(声明 `false` + 迁移垫片,见 `prefs.ts` 那段 JSDoc)。
+ *
+ * ## ⚠️ 一条**与上游同形**的诚实边界:镜像页是 class 组件,props 只在挂载时快照一次
+ *
+ * `ui/preferences/prompts.tsx` 的 `constructor`(`:55-73`)把 props 抄进内部 state,之后
+ * **只由它自己的 `onChange` 回写**。所以:
+ *  · **模态外壳**(本仓的弹窗)每次切到这一页都会**重新挂载**(`PreferencesPageBody` 的
+ *    `switch` 换掉子树)⇒ 复选框读到的是**当时**的偏好,与用户预期一致;
+ *  · **宿主设置卡片**那一侧**所有面板同时挂载**、用 `hidden` 控偏好,于是这一页只在卡片
+ *    首次渲染时读一次 —— 之后从**别处**改这 5 个键(另一个渲染面 / 直接写 `localStorage`)
+ *    不会回显。
+ *  这一档**与上游同形**(Desktop 的 `preferences.tsx` 也是把 app-store 的值快照进
+ *  `state.selectedXxx`),所以本轮**刻意不**给镜像件加订阅:那要改镜像;要做就得在**我们这层**
+ *  包一个受控包装(把 `Prompts` 用 `key` 重挂,或加一层 `useSyncExternalStore` 驱动的包装)。
+ *  今天没有任何用户路径会踩到它(这一页的 5 个键**只有这一页**能写),所以登记而不实现。
+ *  判据侧的写法(切走再切回再量)与理由写在 `changes-confirm-pref-probe` 的 `S1` 那一段。
+ *
+ * @param onPreferencesChanged - 外壳的「请重渲染」回调。
+ * @returns 上游 `Prompts` 需要的 5 组 prop(值 + 写回调)。
+ */
+export function usePromptsWiring(onPreferencesChanged: () => void): {
+  readonly confirmDiscardChanges: boolean;
+  readonly onConfirmDiscardChangesChanged: (value: boolean) => void;
+  readonly confirmDiscardStash: boolean;
+  readonly onConfirmDiscardStashChanged: (value: boolean) => void;
+  readonly confirmUndoCommit: boolean;
+  readonly onConfirmUndoCommitChanged: (value: boolean) => void;
+  readonly askForConfirmationOnCommitFilteredChanges: boolean;
+  readonly onAskForConfirmationOnCommitFilteredChanges: (value: boolean) => void;
+  readonly showCommitLengthWarning: boolean;
+  readonly onShowCommitLengthWarningChanged: (value: boolean) => void;
+} {
+  const [confirmDiscardChanges, onConfirmDiscardChangesChanged] = useBooleanPreference(
+    CONFIRM_DISCARD_CHANGES_KEY, getConfirmDiscardChanges, setConfirmDiscardChanges, onPreferencesChanged);
+  const [confirmDiscardStash, onConfirmDiscardStashChanged] = useBooleanPreference(
+    CONFIRM_DISCARD_STASH_KEY, getConfirmDiscardStash, setConfirmDiscardStash, onPreferencesChanged);
+  const [confirmUndoCommit, onConfirmUndoCommitChanged] = useBooleanPreference(
+    CONFIRM_UNDO_COMMIT_KEY, getConfirmUndoCommit, setConfirmUndoCommit, onPreferencesChanged);
+  const [askForConfirmationOnCommitFilteredChanges, onAskForConfirmationOnCommitFilteredChanges] =
+    useBooleanPreference(
+      CONFIRM_COMMIT_FILTERED_CHANGES_KEY, getConfirmCommitFilteredChanges,
+      setConfirmCommitFilteredChanges, onPreferencesChanged);
+  const [showCommitLengthWarning, onShowCommitLengthWarningChanged] = useBooleanPreference(
+    SHOW_COMMIT_LENGTH_WARNING_KEY, getShowCommitLengthWarning, setShowCommitLengthWarning,
+    onPreferencesChanged);
+
+  return {
+    confirmDiscardChanges,
+    onConfirmDiscardChangesChanged,
+    confirmDiscardStash,
+    onConfirmDiscardStashChanged,
+    confirmUndoCommit,
+    onConfirmUndoCommitChanged,
+    askForConfirmationOnCommitFilteredChanges,
+    onAskForConfirmationOnCommitFilteredChanges,
+    showCommitLengthWarning,
+    onShowCommitLengthWarningChanged,
+  };
+}
+
+/*
+ * ==========================================================================
+ * 被删除的那 7 个控件的**具名**回调占位
+ * ==========================================================================
+ *
+ * 镜像 `ui/preferences/prompts.tsx` 一字不改 ⇒ 那 7 个 `<Checkbox>` / `<RadioGroup>`
+ * 照样渲染,prop 面必须给齐。它们**没有可兑现的语义**(每一条的理由见
+ * `preferences-dialog.tsx` 文件头的 Prompts 表),所以:
+ *
+ *  1. 控件本体由 `scss/preferences.scss` 适配块第 12 条 `display:none !important` 删除
+ *     ⇒ **不是**「点了没反应」的可见控件,而是**看不见**的控件(探针 geometry 的
+ *     removed 组断言它们 `0×0`);
+ *  2. 回调写成**模块级具名函数**(不是 JSX 里的内联 `() => {}`,也不是每帧新建的闭包)
+ *     —— 于是「这里为什么没有行为」在调用点一眼可见,且身份恒定。
+ *
+ * 为什么必须**删得掉**:留着它们就是本仓反复点名的「可见但无作用的控件」那一类静默缺陷。
+ */
+
+/**
+ * 被删除的 6 个复选框(仓库移除 / 永久丢弃 / checkout commit / force push /
+ * 生成信息覆盖 / worktree 移除)的 `onChange` 占位。
+ *
+ * 它们**永远不会被调用**(控件是 `display:none`,不在命中区、也不在无障碍树里);
+ * 参数以下划线开头,免得 lint 以为写漏了。
+ * @param _checked - 上游 `Checkbox.onChange` 的载荷(我们不用)。
+ */
+function noopOmittedPrompt(_checked: boolean): void {
+  // 故意为空:对应的动作在本插件里没有落点,控件已由适配层删除。
+}
+
+/**
+ * 被删除的「If I have changes and I switch branches…」三选一的 `onSelectionChanged` 占位。
+ *
+ * 产品里**没有切分支动作**(分支面板只读),上游那个 `UncommittedChangesStrategy`
+ * 也只有 `models/uncommitted-changes-strategy.ts` 的声明 + 镜像页渲染者,没有消费方。
+ * @param _value - 上游 `RadioGroup.onSelectionChanged` 的载荷(我们不用)。
+ */
+function noopUncommittedChangesStrategy(_value: UncommittedChangesStrategy): void {
+  // 故意为空:同上,控件已由适配层删除。
 }
 
 /**
