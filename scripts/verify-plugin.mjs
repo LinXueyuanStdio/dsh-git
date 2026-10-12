@@ -96,6 +96,21 @@ function packageOf(specifier) {
 /** 合法的 npm 包名(含 scope 与子路径)。用来把注释/字符串里的巧合命中挡掉。 */
 const SPECIFIER_RE = /^(?:@[A-Za-z0-9][A-Za-z0-9._~-]*\/)?[A-Za-z0-9][A-Za-z0-9._~-]*(?:\/[A-Za-z0-9._~-]+)*$/;
 
+/**
+ * 「声明在 `dependencies` 里、却**没有**被产物当外部依赖引用」的**已登记例外**。
+ *
+ * 键 = 包名,值 = **为什么它可以这样**(没有理由的条目等于把闸门关掉,别加)。
+ * 今天为空:唯一的 `dependencies`(`dugite`)真的被 `lib/index.js` 外部 `import`。
+ *
+ * 什么时候才该往这里加:那个包**确实**要在运行期被加载(所以不能进 devDependencies),
+ * 但它的引用方式让静态扫描看不到 —— 例如本仓代码按**字符串**在运行期解析包名
+ * (静态扫描只认 `import` / `require` / `import()` 里的字面量)。判据与背景见
+ * `THIRD-PARTY-NOTICES.md` §2/§3。
+ *
+ * @type {Map<string, string>}
+ */
+const DECLARED_BUT_NOT_EXTERNAL_OK = new Map([]);
+
 /** 扫描一个产物里出现的所有外部模块说明符。 */
 async function externalsOf(file) {
 	const raw = await readFile(file, 'utf8');
@@ -188,12 +203,42 @@ async function main() {
 		...Object.keys(pkg.peerDependencies ?? {}),
 	]);
 	const undeclared = new Set();
+	/** 产物里真的被外部引用的包名(两个 bundle 的并集)—— 下面第二向判据要用它。 */
+	/** @type {Set<string>} */
+	const externallyReferenced = new Set();
 	for (const bundle of [hostBundle, clientBundle]) {
 		for (const name of await externalsOf(bundle)) {
+			externallyReferenced.add(name);
 			if (!declaredRuntime.has(name)) undeclared.add(`${name}(被 ${bundle.slice(REPO.length + 1)} 引用)`);
 		}
 	}
 	for (const item of undeclared) fail(`产物引用了未声明的外部依赖 ${item} —— 用户机器上会加载失败`);
+
+	/*
+	 * ---------- 3b. 反向:声明了 dependencies 却没被产物外部引用 ----------
+	 *
+	 * 这条是上一条的**镜像**,2026-10-12 加(那次偏移的现场:4 个**已经被 esbuild 内联**的包
+	 * 因为「反正要装」被留在 `dependencies` 里 —— 后果有两层:①每个用户的 profile 白装一遍
+	 * 那 4 个包(它们的代码就在 `lib/*.js` 里,运行期一个都不 import);②`THIRD-PARTY-NOTICES.md`
+	 * 的清单口径当时是「根包的 `dependencies` 闭包」⇒ 它们**静默离开**了署名表,其中
+	 * `dompurify` 还是 Apache-2.0。判据与修法写在 `THIRD-PARTY-NOTICES.md` §2/§3)。
+	 *
+	 * 判据不是「惯例」,而是**产物本身**:`dependencies` / `optionalDependencies` 里的每一项
+	 * 都必须真的出现在某个产物的外部 `import`/`require` 里 —— 否则它就是内联包,该回
+	 * `devDependencies`(想让它在运行期可用,就得像 `dugite` 那样**标成 external**,
+	 * 那时这条自然通过)。
+	 */
+	for (const bucket of ['dependencies', 'optionalDependencies']) {
+		for (const name of Object.keys(pkg[bucket] ?? {})) {
+			if (externallyReferenced.has(name) || DECLARED_BUT_NOT_EXTERNAL_OK.has(name)) continue;
+			fail(
+				`${bucket} 里的 ${name} 没有被任何产物当外部依赖引用 —— 它的代码其实是被 esbuild **内联**的,` +
+				`留在 ${bucket} 只会让每个用户的 profile 白装一遍(运行期一个都不 import);` +
+				'按 THIRD-PARTY-NOTICES.md §2/§3 的判据移到 devDependencies;' +
+				'若它真的在运行期被 import,就把它标成 external,并在本脚本的 DECLARED_BUT_NOT_EXTERNAL_OK 里登记理由',
+			);
+		}
+	}
 
 	// ---------- 4. 发出去的内容 ----------
 	let packInfo = null;
