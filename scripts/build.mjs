@@ -143,7 +143,14 @@ const clientExternal = ['react', 'react-dom', 'react-dom/*', 'react/jsx-runtime'
  * 上游 `lib/**` 的 4 个文件(`lib/file-system.ts`、`lib/progress/from-process.ts`、
  * `lib/git/{rebase,cherry-pick}.ts`)写的是 `import byline from 'byline'`。
  * 用户裁决(逐字):「**可以,使用 `@github/alive-client`、`byline`**」⇒
- * `byline@^5.0.0` 进了 `dependencies`(与上游 `app/yarn.lock:399-402` 同区间)。
+ * `byline@^5.0.0` 进树(与上游 `app/yarn.lock:399-402` 同区间)。
+ *
+ * ⚠️ **桶是 `devDependencies`(2026-10-12 更正)**:byline 的代码是经下面那条 alias
+ * **内联**进 `lib/index.js` 的(`grep -c LineStream lib/index.js` = 14),运行期不再
+ * `import` 它 —— 按 `THIRD-PARTY-NOTICES.md` §2 的判据(产物里真的会外部 `import` 的
+ * 才进 `dependencies`),它属于构建期依赖。留在 `dependencies` 只会让每个用户的 profile
+ * 白装一遍(同族的还有 `marked` / `dompurify` / `@github/alive-client`;`dugite` 是唯一
+ * 真外部的那一个)。这条判据现在由 `scripts/verify-plugin.mjs` 双向把守。
  *
  * ⚠️ **装真包不会自动正确,实测**:byline 5.0.0 的 `LineStream._reencode`
  * (`node_modules/byline/lib/byline.js:144-155`)在**输出流自己没有 encoding** 时
