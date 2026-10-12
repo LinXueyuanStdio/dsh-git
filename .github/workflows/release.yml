@@ -80,6 +80,26 @@ jobs:
           npm install -g npm@^11.5.1
           npm --version
 
+      # **Trusted Publisher 的比对依据**。registry 拒绝时不告诉你是哪一项不匹配,只会回一句
+      # `403 OIDC permission denied for this action`(2026-10-12 实测两次:tag ref 与 main ref
+      # 都一样),所以把 registry 真正会比的声明打出来 —— npm 包 Settings → Trusted Publisher
+      # 那三个字段就是与 `repository` / `workflow_ref` 的文件名部分 / `environment` 对表。
+      # ⚠️ 只打印**声明**,不打印令牌本身(令牌在有效期内仍可被兑换)。
+      - name: 记下 OIDC 声明(Trusted Publisher 的比对依据)
+        run: |
+          set -euo pipefail
+          node -e '
+            (async () => {
+              const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL + "&audience=npm:registry.npmjs.org";
+              const res = await fetch(url, { headers: { authorization: "bearer " + process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN } });
+              const { value } = await res.json();
+              const claims = JSON.parse(Buffer.from(value.split(".")[1], "base64url").toString("utf8"));
+              for (const key of ["sub", "repository", "repository_owner", "repository_id", "workflow_ref", "job_workflow_ref", "environment", "ref", "event_name", "aud"]) {
+                console.log(`${key} = ${claims[key] ?? "(缺席)"}`);
+              }
+            })()
+          '
+
       # `--provenance` 需要上面的 id-token: write 与**公开**仓库(本仓库已公开)。
       #
       # 两条凭据路径,优先级与改前**逐字相同**:配了 `NPM_TOKEN` 就用它;没配就走
