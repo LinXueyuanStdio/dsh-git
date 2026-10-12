@@ -479,6 +479,105 @@ if (!workspaceYaml.includes('autoInstallPeers: false')) {
 writeFileSync(workspaceYamlPath, workspaceYaml.replace('autoInstallPeers: false', 'autoInstallPeers: true'));
 ok('pnpm-workspace.yaml 打开 autoInstallPeers(补齐 peer,否则平台子进程包会崩)');
 
+/**
+ * 把若干包名并进 profile 的 `allowBuilds` 表(pnpm 自己的 build script 批准表)。
+ *
+ * ## 为什么写的是 `pnpm-workspace.yaml` 的 `allowBuilds`
+ *
+ * pnpm 11 把「未批准的 build script」从**警告**升成**致命错误**
+ * (`ERR_PNPM_IGNORED_BUILDS`,`strictDepBuilds` 默认开),而这张批准表**只认**
+ * workspace 清单里的 `allowBuilds`(键名是 pnpm 自己写的形状:`allowBuilds:` 下
+ * 每条两空格缩进的 `名字: true`)。本机用 CI 同版本(pnpm 11.28.5)实测过三条,
+ * 只有这一条**既让它过、又真的把脚本跑掉**:
+ *   · `allowBuilds: {dugite: true}` ⇒ `pnpm add <tarball>` exit 0,且 `dugite` 的
+ *     `postinstall` 真跑了(`node_modules/.pnpm/dugite@3.2.3/…/git/bin/{git,scalar}` 在);
+ *   · 只写 `strictDepBuilds: false` ⇒ exit 0 但**脚本没跑**
+ *     (`.modules.yaml` 里 `ignoredBuilds: [dugite@3.2.3]`、`git/bin` 空)⇒ **假绿**:
+ *     profile 里的 dugite 没有 git,后面每一条 git 断言都会以别的原因失败;
+ *   · 写进 `.npmrc`(`strict-dep-builds` 与 `strictDepBuilds` 两种拼法都试过)⇒ 不生效。
+ * 另外实测:`pnpm approve-builds --all` 与这张表**合并**而不是覆盖(先前写进去的名字
+ * 还在,新批准的追加在后面)⇒ 先写我们的、再让上面那三步批它自己的,互不影响。
+ *
+ * ## 形状断言
+ *
+ * 表是 pnpm 写的,所以这里按**它的**形状追加;找不到 `allowBuilds:` 就新起一段。
+ * 一旦 pnpm 改了键名/缩进(那时这段会静默失效),下面的 `ok/warn` 与失败时的重试
+ * (见 `dsh plugin add` 那一段)会把现场留下来。
+ *
+ * @param {string[]} names - 要批准(允许其 install/postinstall 脚本运行)的包名。
+ * @returns {string[]} 这次**新写进去**的名字(已经在表里的不算)。
+ */
+function approveBuildScripts(names) {
+  const lines = readFileSync(workspaceYamlPath, 'utf8').split('\n');
+  const keyAt = lines.findIndex((line) => /^allowBuilds:\s*$/.test(line));
+  if (keyAt === -1) {
+    lines.push('allowBuilds:', ...names.map((name) => `  ${name}: true`));
+    writeFileSync(workspaceYamlPath, `${lines.join('\n')}\n`);
+    return names;
+  }
+  /** 该段的末尾(段内条目都是两空格缩进)。 */
+  let end = keyAt + 1;
+  while (end < lines.length && /^ {2}\S/.test(lines[end])) {
+    end += 1;
+  }
+  const present = new Set(lines.slice(keyAt + 1, end).map((line) => line.trim().split(':')[0]));
+  const missing = names.filter((name) => !present.has(name));
+  if (missing.length > 0) {
+    lines.splice(end, 0, ...missing.map((name) => `  ${name}: true`));
+    writeFileSync(workspaceYamlPath, lines.join('\n'));
+  }
+  return missing;
+}
+
+/**
+ * ⭐ **本插件自己的依赖里带 install 脚本的那些**(2026-10-12 加,修 CI 的 e2e)。
+ *
+ * ## 为什么上面那套两阶段批准**盖不住**它
+ *
+ * 上面三步批准的是 **profile 模板自己的依赖树**(dsh 的 `node-pty` / `koffi` /
+ * `protobufjs`…),而 `dsh plugin add <tarball>` 在那之后 —— **dugite 是那一刻才进图的**
+ * (它是**我们的** dependencies 之一,`postinstall: node ./script/download-git.js`
+ * 下载内嵌 git 二进制)。pnpm 11 的 `strictDepBuilds` 默认开 ⇒ 这一遍以
+ * `ERR_PNPM_IGNORED_BUILDS: dugite@3.2.3` 失败,而失败发生在 dsh 写 bundles **之前**,
+ * 所以插件根本没装上。CI 实测(pnpm 11.28.5,run 38193048245)就是这个样:上面 5 个批得
+ * 好好的,第 4 步倒在这里 —— 而这一倒从 2026-10-10 起就没再绿过。
+ *
+ * ## 名单**不是**手写的
+ *
+ * 「哪些依赖带 install 脚本」由**我们自己的 `package.json` + `node_modules` 里各自的
+ * manifest** 现算(与上面「不写白名单」同一条纪律):新增一个带 `postinstall` 的依赖,
+ * 这里自动跟上;哪天 dugite 去掉 `postinstall`,这里也自动不再写它。没装/子路径依赖
+ * 交给 pnpm 自己的发现式批准,不在这里猜。
+ *
+ * @returns {string[]} 我们自己的 dependencies ∪ optionalDependencies 里带 install 脚本的包名。
+ */
+function pluginBuildScriptDeps() {
+  const manifest = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8'));
+  const names = Object.keys({
+    ...(manifest.dependencies ?? {}),
+    ...(manifest.optionalDependencies ?? {}),
+  });
+  const withScripts = [];
+  for (const name of names) {
+    try {
+      const dep = JSON.parse(readFileSync(join(REPO, 'node_modules', name, 'package.json'), 'utf8'));
+      const scripts = dep.scripts ?? {};
+      if (scripts.preinstall || scripts.install || scripts.postinstall) {
+        withScripts.push(name);
+      }
+    } catch {
+      // 没装(或子路径):交给 pnpm 自己的发现式批准,见下面的重试。
+    }
+  }
+  return withScripts;
+}
+
+const pluginBuildDeps = pluginBuildScriptDeps();
+if (pluginBuildDeps.length > 0) {
+  const added = approveBuildScripts(pluginBuildDeps);
+  ok(`build script 预批准(我们的依赖):${pluginBuildDeps.join(', ')}${added.length === 0 ? '(已在表里)' : ''}`);
+}
+
 // ---------------------------------------------------------------------------
 // 4. 安装插件 —— 用打包出来的 tarball,不是 link
 // ---------------------------------------------------------------------------
@@ -543,7 +642,47 @@ if (pending.length === 0) {
  */
 echo('dsh', ['plugin', '--profile', PROFILE, 'add', tarball]);
 info('装 400+ 个包并跑原生构建,CI 上要几分钟…');
-const addOut = run('dsh', ['plugin', '--profile', PROFILE, 'add', tarball], { stdio: 'pipe' });
+
+/**
+ * 跑一遍 `dsh plugin add`,**不抛**(失败时要能从输出里学东西)。
+ * @returns {{ status: number | null, output: string }} 退出码与合并后的 stdout+stderr。
+ */
+function addPlugin() {
+  const attempt = spawnSync('dsh', ['plugin', '--profile', PROFILE, 'add', tarball], { cwd: REPO, encoding: 'utf8' });
+  return { status: attempt.status, output: `${attempt.stdout ?? ''}${attempt.stderr ?? ''}` };
+}
+
+let add = addPlugin();
+let addOut = add.output;
+if (add.status !== 0) {
+  /*
+   * ⭐ **兜底:从这一次失败里学**(与上面那三步同一条纪律 —— 让 pnpm 自己报)。
+   *
+   * 预批准只覆盖**我们的直接依赖**;万一哪天某个**传递**依赖也带 install 脚本
+   * (或者 pnpm 改了批准表的形状),这里就把 pnpm 点名的那些补进表里、跑一遍 install、
+   * 清掉失败留下的锁,再 add 一次。**只重试一次**:第二次仍失败就把完整输出抛出来,
+   * 并附上「bundles 有没有已经写进去」——那决定了现场还能不能手工救。
+   */
+  const late = [...new Set([...addOut.matchAll(/Ignored build scripts: (.+)/g)]
+    .flatMap((match) => match[1].split(',').map((name) => name.trim())))];
+  if (late.length === 0) {
+    throw new Error(`dsh plugin add 失败:\n${addOut.slice(-2000)}`);
+  }
+  warn(`dsh plugin add 被 build script 挡住,补批准后重试一次:${late.join(', ')}`);
+  approveBuildScripts(late);
+  const repair = spawnSync(pnpm.executable, ['install'], { cwd: PROFILE_DIR, encoding: 'utf8' });
+  if (repair.status !== 0) {
+    throw new Error(`补批准之后的 pnpm install 失败:\n${`${repair.stdout ?? ''}${repair.stderr ?? ''}`.slice(-2000)}`);
+  }
+  clearStaleLock(PROFILE_DIR);
+  add = addPlugin();
+  addOut = add.output;
+  if (add.status !== 0) {
+    const bundlesNow = JSON.parse(readFileSync(profileManifestPath, 'utf8')).dsh?.profile?.bundles ?? [];
+    throw new Error(`重试 dsh plugin add 仍然失败(bundles 里已经有 ${pkg.name}:${bundlesNow.includes(pkg.name) ? '是' : '否'}):\n${addOut.slice(-2000)}`);
+  }
+  ok('补批准之后 dsh plugin add 通过');
+}
 info(addOut.trim().split('\n').slice(-4).join('\n  '));
 clearStaleLock(PROFILE_DIR);
 
