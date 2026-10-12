@@ -127,8 +127,19 @@ git tag v<x.y.z> && git push origin v<x.y.z>
 
 workflow 会跑**与 CI 相同的发布物检查**（构建 + 产物语法 + `verify-plugin`），
 再硬校验「tag 与 package.json 版本一致」，然后 `npm publish --provenance` 并建 GitHub Release
-（自动 release notes）。它需要仓库里配好 `secrets.NPM_TOKEN`；改用 npm 的 Trusted Publishing
-则不需要 token。
+（自动 release notes）。**凭据有两条路，配了 `secrets.NPM_TOKEN` 就用它，没配就走 OIDC**：
+
+- **`secrets.NPM_TOKEN`** —— npm 的 Granular Access Token（对本包有 read/write），
+  存进仓库 Settings → Secrets and variables → Actions。
+- **npm Trusted Publishing（推荐，不需要任何长期令牌）** —— 在 npm 的
+  *包 → Settings → Trusted Publisher → GitHub Actions* 里登记：组织/用户 `LinXueyuanStdio`、
+  仓库 `dsh-git`、workflow 文件名 `release.yml`、environment 留空。workflow 里的
+  `id-token: write` 与 `--provenance` 已经就位。
+
+⚠️ Trusted Publishing 要求 **npm ≥ 11.5.1**，而 runner 上 `node-version: 22` 自带的是
+**npm 10.9.9** —— 所以 workflow 在发布前多了一步 `npm install -g npm@^11.5.1`，别删它。
+同理别把 `NODE_AUTH_TOKEN` 无条件导出成**空串**：npm 会把「已设置」当真、不再尝试 OIDC，
+于是必然 `ENEEDAUTH`（2026-10-11 的一次真实失败就是这两条各踩了一次）。
 
 ⚠️ **如果 npm 把发布转成了「暂存发布」**（账号侧要求 proof-of-presence 时会发生），
 workflow 那一步会成功，但版本**不会立刻对外可见** —— 需要本机用 npm 12 批准：
