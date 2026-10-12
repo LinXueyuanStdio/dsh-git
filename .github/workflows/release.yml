@@ -103,7 +103,10 @@ jobs:
       # `--provenance` 需要上面的 id-token: write 与**公开**仓库(本仓库已公开)。
       #
       # 两条凭据路径,优先级与改前**逐字相同**:配了 `NPM_TOKEN` 就用它;没配就走
-      # OIDC(npm 包的 Settings → Trusted Publisher 里登记本仓库 + 本 workflow 文件名)。
+      # OIDC(npm 包的 Settings → Trusted Publisher 里登记本仓库 + 本 workflow 文件名,
+      # 并在 `Allowed actions` 里**显式勾上直接 `npm publish`** —— 2026-09-03 之后新建的
+      # binding 默认只允许 `npm stage publish`,不勾就是 `403 OIDC permission denied
+      # for this action`,registry 不告诉你是哪一项;2026-10-12 实测踩过)。
       # ⚠️ **不能让 `NODE_AUTH_TOKEN` 以空串的形式存在**:npm 会把"已设置"当真、不再尝试
       # OIDC ⇒ 又回到 ENEEDAUTH(这正是 2026-10-11 那次运行失败的样子:仓库里没有任何
       # secret,而 workflow 无条件导出了一个空 token)。所以这里只在**非空**时导出。

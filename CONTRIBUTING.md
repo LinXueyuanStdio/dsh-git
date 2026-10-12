@@ -135,6 +135,12 @@ workflow 会跑**与 CI 相同的发布物检查**（构建 + 产物语法 + `ve
   *包 → Settings → Trusted Publisher → GitHub Actions* 里登记：组织/用户 `LinXueyuanStdio`、
   仓库 `dsh-git`、workflow 文件名 `release.yml`、environment 留空。workflow 里的
   `id-token: write` 与 `--provenance` 已经就位。
+  ⚠️ **还要勾上 `Allowed actions` 里的直接 `npm publish`**：`npm stage publish` 总是被允许，
+  而 **2026-09-03 之后新建的 binding 默认只允许暂存发布** —— 不勾就直接 `npm publish`，
+  registry 只会回一句 `403 OIDC permission denied for this action`（不说是哪一项；
+  2026-10-12 实测踩过，tag ref 与 main ref 报的一样）。身份三项是**大小写敏感、要精确**的：
+  只填 workflow **文件名**（不带 `.github/workflows/` 前缀、要有 `.yml`）、environment 必须留空。
+  对表用的 OIDC 声明由 release workflow 的「记下 OIDC 声明」那一步打进日志。
 
 ⚠️ Trusted Publishing 要求 **npm ≥ 11.5.1**，而 runner 上 `node-version: 22` 自带的是
 **npm 10.9.9** —— 所以 workflow 在发布前多了一步 `npm install -g npm@^11.5.1`，别删它。
