@@ -5,6 +5,24 @@
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-10-12
+
+### 修复
+
+- **装插件时不再多装 6 个用不到的包**。`dependencies` 现在只有 `dugite`（它必须留在运行期：
+  宿主半把它标成 `external`，因为 dugite 自带的 git 是按**包内相对路径**找的）。`byline` /
+  `marked` / `dompurify` / `@github/alive-client`（连它的 `@github/multimap` /
+  `@github/stable-socket`）的代码**早就被 esbuild 内联**进 `lib/*.js` 了 —— 它们是**构建期**
+  依赖，却被从 2026-10-09 起留在 `dependencies`，于是每次安装都会在用户机器上装一遍、
+  运行期一个都不加载。**本版的发布物与 1.1.0 逐字节相同**（构建不读这两个桶，包里也没有
+  `node_modules`）—— 改的是元数据，不是代码。
+- **第三方声明补齐 6 行，并补上 Apache-2.0 全文**。`THIRD-PARTY-NOTICES.md` 的表从 96 行到
+  **102 行**（MIT ×99 / BSD-3-Clause ×1 / ISC ×1 / Apache-2.0 ×1）。改前那张表的复现口径是
+  「根包的 `dependencies` 闭包」，于是上面那 6 个包**代码在产物里、名字却不在表里**（其中
+  `dompurify` 的许可是 `MPL-2.0 OR Apache-2.0`）。现在口径改成「**产物实际内联的集合**，
+  与它声明在哪个桶无关」，并按 dompurify 包内 `LICENSE` 的 Apache-2.0 那一支署名与附全文
+  （不选 MPL-2.0，所以「没有 copyleft」这句仍然成立）。
+
 ## [1.1.0] - 2026-10-12
 
 ### 新增
@@ -118,6 +136,7 @@
 - 远端页签以 GitHub 为准；本地**未推送**的提交在 Code 树里看不到对应文件。
 - 暂存是**文件级**的（M1），没有 hunk 级暂存。
 
-[Unreleased]: https://github.com/LinXueyuanStdio/dsh-git/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/LinXueyuanStdio/dsh-git/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/LinXueyuanStdio/dsh-git/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/LinXueyuanStdio/dsh-git/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/LinXueyuanStdio/dsh-git/releases/tag/v1.0.0
