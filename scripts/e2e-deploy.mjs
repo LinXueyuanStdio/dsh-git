@@ -1456,8 +1456,22 @@ if (included !== 'all') {
 ok('e2e-marker.txt 已纳入提交');
 await shot('file-included');
 
-/** ⑤ 填提交信息(标题输入框是 `input.gw-input`;筛选框是另一个类名,不会撞)。 */
-await page.locator('input.gw-input').first().fill(message);
+/**
+ * ⑤ 填提交信息。
+ *
+ * ⚠️ **2026-10-12 更正选择器**(CI run 38196896196 就卡在这一行):
+ * 功能点 7.16 把两个输入框换成镜像 `AutocompletingInput` / `AutocompletingTextArea`
+ * 之后,`gw-input` 这个配方类落在**镜像件自己的容器 div** 上
+ * (`ui/autocompletion/autocompleting-text-input.tsx:560-570` 的 `render()` 把
+ * `props.className` 放进最外层容器,`changes-view.tsx:4435-4436` 传的正是 `gw-input`),
+ * 真 `<input>` 是它的**子元素** ⇒ 老的 `input.gw-input` **一个都匹配不到**,
+ * Playwright 只能等满 30s 再抛 `locator.fill: Timeout`。
+ *
+ * 判据本身没变(还是「把标题填进去」),只是按当前 DOM 找它:摘要行
+ * `.gw-cm-summary`(`changes-view.tsx:4429`,本仓自己的适配类)里那个 `<input>`;
+ * 描述框是 `<textarea>`,不会撞。
+ */
+await page.locator('.gw-cm-summary input').first().fill(message);
 ok(`提交信息已填:${message}`);
 await shot('commit-message');
 
