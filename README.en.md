@@ -65,13 +65,11 @@ After installing, restart DSH and hard-refresh the page (the host half is a Node
 
 ## GitHub sign-in and tokens
 
-Two ways to sign in: **device flow** (works out of the box) and a **Personal Access Token** (always works; a
-fine-grained token needs Contents R / Issues RW / Pull requests RW / Actions RW, a classic token needs `repo`).
+Two ways to sign in: click **Sign in to GitHub.com** for device flow (works out of the box — the app ships with the package), or paste a **Personal Access Token** (a fine-grained token needs Contents R / Issues RW / Pull requests RW / Actions RW; a classic token needs `repo`).
 
-The package ships a GitHub App Client ID, so "Sign in to GitHub.com" via device flow works right after
-installing — you do not have to register an app yourself. To bring your own app, set `clientId` in the
-profile's `cordis.patch.yml` (or provide the `DSH_GIT_CLIENT_ID` environment variable; `off` disables device
-flow and leaves PATs only):
+> ⚠️ The built-in app is a **GitHub App**: [install it](https://github.com/apps/dsh-git-local/installations/new) on your account / organization first — without an installation you sign in successfully but see no repositories. Its user tokens expire after 8 hours; the plugin refreshes them automatically.
+
+To bring your own app, set `clientId` in the profile's `cordis.patch.yml`, or provide the `DSH_GIT_CLIENT_ID` environment variable (`off` disables device flow).
 
 ```yaml
 - id: dsh-git
@@ -80,43 +78,12 @@ flow and leaves PATs only):
     clientId: 'Ov23li…'   # Client ID of your own app
 ```
 
-On macOS, environment variables are awkward to set when launching from the `.app` — `config.clientId` is the
-easy route.
-
-> ⚠️ **The built-in app is a GitHub App, so install it on your account / organization first** (authorizing and
-> installing are two different things). Without an installation you sign in successfully but see **an empty
-> repository list**, and tabs fail with `Resource not accessible by integration` — the account page detects
-> this and shows the install entry point:
-> **<https://github.com/apps/dsh-git-local/installations/new>** (public page: <https://github.com/apps/dsh-git-local>).
->
-> ⚠️ **GitHub App user tokens expire after 8 hours by default** — the plugin **refreshes them automatically**:
-> five minutes before expiry it swaps in a new pair via the refresh token (and after a restart the
-> "401 → refresh → retry once" path covers it). The host log shows `令牌已自动续期(新令牌 N 分钟后到期)`;
-> on a successful device-flow sign-in it also logs the token shape (`前缀 ghu_,令牌 …秒后过期;
-> refresh_token 有/没有`, shape only). If GitHub rejects the refresh (`incorrect_client_credentials` in the
-> log), there are two ways out: (1) turn off "User-to-server token expiration" under the app's
-> **Optional Features** (tokens then never expire), or (2) provide a client secret to the deployment via
-> the `DSH_GIT_CLIENT_SECRET` environment variable (deployment-side only, never committed).
-
-Creating your own app is free and needs no Copilot — tick **Enable Device Flow**: create an OAuth App at
-<https://github.com/settings/developers> (the plugin requests `scope=repo`), or a GitHub App with
-Contents RW / Issues RW / Pull requests RW / Actions RW / Checks R / Commit statuses R / Metadata R
-(mandatory) / Account ▸ Email addresses R (for the author-email dropdown). The device flow needs **no client
-secret**. Another reason to bring your own: device-flow limits are **per application** and shared by every
-installation (50 device-code submissions and 2,000 token issuances per hour), and some organizations restrict
-third-party apps.
-
-Where the token lives and what protects it:
-
-- **It lives in the host only; the browser never sees the full value.** It hangs off the host credential seam `ctx.credentials` as `GITHUB_TOKEN` (`$DSH_HOME/.credentials.yaml`), and the UI only shows the last 4 digits. git receives it through the environment — never through argv or `.git/config`.
-- **It is not in the plugin's general storage domain.** Reading, writing, exporting and backing up that whole domain would carry it along — so the token stays out of it.
-- **`GITHUB_TOKEN=… dsh` is a read-only override** (writing it is rejected), so rotating a token needs no code change.
-- **At rest it is plaintext plus file permissions (`0600` file / `0700` directory); there is no encryption.** There is no `safeStorage` / `keytar` anywhere in this repository; the host's own `credentials-local` README says its OS keychain providers are "deferred" and that "none is shipped", and its own account token sits in plaintext in that same `$DSH_HOME/.credentials.yaml`. `0600` keeps other users out; it does not keep out processes running as you, backup tools, or cloud sync.
+The token lives in the host only, the browser sees just its last 4 digits, and at rest it is **plaintext with `0600` permissions** — no encryption.
 
 ## Known limits (M1)
 
 - Remote tabs are GitHub-only. And the Code tree is the remote's view: local commits that have not been pushed do not show up there as files.
-- **The built-in app is a GitHub App, which brings two limits**: (1) repository access requires installing it first (without an installation you sign in successfully but see an empty list — install at <https://github.com/apps/dsh-git-local/installations/new>); (2) user tokens expire after 8 hours by default, and the plugin refreshes them automatically (see above; if GitHub rejects the refresh, opt the app out of token expiration or supply `DSH_GIT_CLIENT_SECRET`). Bringing your own OAuth App avoids (1).
+- **The built-in app is a GitHub App**, so its repository access requires installing it first, and its user tokens expire after 8 hours (the plugin refreshes them automatically). Bringing your own OAuth App avoids the install step.
 
 ## Development
 

@@ -1,38 +1,33 @@
 # 贡献指南
 
-感谢你愿意花时间。这个仓库的几个约定比较特别（尤其是**产物不提交**和**闸门退出码**两节），
+感谢你愿意花时间。本仓库有两条比较特别的约定（`lib/` 不提交、闸门的退出码），
 先扫一遍能省下不少来回。
 
 ## 环境
 
-- **Node**：`engines` 要求 `^22.19.0 || >=24.0.0`（与宿主 DSH 自己的声明一致）。
-- **npm**：任何 10+ 都可以；只有发布相关的事才需要更新版本。
-- `npm install` 之后即可开发。运行期的第三方库（zod、react-virtualized、lodash…）都在
-  `devDependencies` 里 —— 它们会被 esbuild **打进产物**，所以不是运行时依赖，
-  详见 [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md) 里「为什么 package.json 里没有 dependencies」。
+- **Node**：`^22.19.0 || >=24.0.0`。
+- **npm**：10 以上即可。
+- `npm install` 之后就能开始开发。为什么第三方库大多在 `devDependencies` 里，
+  见 [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md)。
 
 ## 常用命令
 
-```bash
-npm run build                    # 两个半边一起构建 → lib/index.js + lib/client.js
-npm run check                    # 产物语法检查（node --check）
-npm run lint                     # ESLint
-npm run typecheck                # 客户端类型闸门
-npm run check:static             # 一条命令跑齐所有静态闸门
-npm run check:generated:rebuild  # 重跑构建，逐字节比对生成物（改过生成物来源时用）
-```
+| 命令 | 作用 |
+|---|---|
+| `npm run build` | 构建两个半边 → `lib/index.js` + `lib/client.js` |
+| `npm run check` | 产物语法检查（`node --check`） |
+| `npm run lint` | ESLint |
+| `npm run typecheck` | 客户端类型闸门 |
+| `npm run check:static` | 一条命令跑齐所有源码卫生闸门 |
 
 ## 两条容易踩的约定
 
-### 1. `lib/` 不提交，产物靠构建
+### 1. 克隆下来先构建
 
-`lib/` 在 `.gitignore` 里（连同 `docs/`、`design/`、`references/`、`screenshots/` 等）。
-所以：
 
-- **克隆下来先 `npm run build`**，否则 `npm run check` 会因为产物不存在而失败；
-- 提交前**不要**用 `git add -A`（工作区里可能同时有别的 lane 的改动），
-  **不要**用 `git add -f` 强行提交被忽略的目录；
-- 发布前必须重新构建：`npm publish` 没有 `prepublish` 钩子，装进包里的就是你磁盘上那一刻的 `lib/`。
+- **克隆下来先跑 `npm run build`**，否则 `npm run check` 会因为产物不存在而失败；
+- 提交时**不要**用 `git add -A`（工作区里可能同时有别的改动），
+  **不要**用 `git add -f` 强行提交被忽略的目录。
 
 ### 2. 闸门的退出码是契约
 
@@ -42,14 +37,10 @@ npm run check:generated:rebuild  # 重跑构建，逐字节比对生成物（改
 | `1` | 有**未登记**缺陷 |
 | `2` | 跳过（例如检测到并发构建） |
 
-棘轮基线在 `scripts/*-baseline.json`，生成物清单在 `scripts/generated-manifest.json`。
+**你引入的未登记缺陷必须修，不要往基线里塞。** 基线记录的是「已知且已接受」的既有
+缺口（其中一部分同时兼作进度条），确属可接受时，要在条目里写清理由。
 
-**新增的未登记缺陷必须修，不要往基线里塞。** 基线的用途是记录「已知且已接受」的既有缺口，
-其中一部分（如 `check-unreachable-ancestors` 里的接线进度）是**进度条**：把「还没接」登记成
-「已接受」会让这条进度条失效。确属可接受时，必须**在基线条目里写清理由**。
-
-> 当前状态：`check-base-recipes` / `check-scripts-types` / `check-unreachable-ancestors`
-> 是红的（已登记的遗留债）。这不影响你先提 PR，但**你引入的新条目**会被拦下。
+仓库里有一些长期红着的棘轮债，这**不该拦住你的 PR** —— 只要不是你引入的新条目。
 
 ## 代码在哪
 
@@ -70,15 +61,13 @@ npm run check:generated:rebuild  # 重跑构建，逐字节比对生成物（改
 ## 几个不要改坏的东西
 
 - **插件实例 id 保持 `dsh-git`**：它是 profile 里 cordis 行的 `id`，也是右侧栏
-  **布局记录的键**。改它会让所有用户已保存的布局孤儿化。显示名是另一回事 ——
-  界面上的名字来自 `src/client/index.ts` 的 `TAB_TITLE`（当前是 `git`）。
+  **布局记录的键**。改它会让所有用户已保存的布局孤儿化。界面上的显示名是另一回事
+  （来自 `src/client/index.ts` 的 `TAB_TITLE`）。
 - **页签标题走「标题席位」**：布局记录会在**打开时**捕获一次标题并写进 `localStorage`，
-  所以标题改由 `sidebar.right.pane.tab.title` 席位实时渲染，别改回「定义里给死标题」的写法。
+  所以标题由 `sidebar.right.pane.tab.title` 席位实时渲染，别改回「定义里给死标题」的写法。
 - **README 的 SVG 是确定性的**：系统字体、1200 宽 viewBox、字号有下限（正文 ≥18、
-  次要 ≥16，在 900px 渲染宽度下可读），配色是**亮色**且与实机截图一致。改图请重新渲染确认
+  次要 ≥16，在 900px 渲染宽度下可读），配色是**亮色**且与实机截图一致。改图请重新渲染
   （`rsvg-convert -w 1200 hero.svg -o /tmp/x.png`）再看一眼对比度。
-- **产物里带 sourcemap**（`lib/*.js.map`，供 DSH 宿主喂给浏览器 devtools），
-  但 `files` 是显式清单，**map 不进 npm 包**。这两件事不要弄反。
 
 ## 加第三方代码时
 
@@ -86,8 +75,8 @@ npm run check:generated:rebuild  # 重跑构建，逐字节比对生成物（改
 - 宿主提供的（`@deepseek-ai/*`、`react`、`react-dom`）→ 进 `peerDependencies`，
   客户端那几个标 `optional`；
 - 两者都要同步更新 [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md)（该文件里写了清单怎么复现）；
-- 改过 `package.json` 的依赖后，跑一次 `npm install --package-lock-only` 让锁同步，
-  并确认 diff 里**没有第三方版本漂移**。
+- 动过依赖后跑一次 `npm install --package-lock-only` 让锁同步，并确认 diff 里
+  **没有第三方版本漂移**。
 
 ## 提交与 PR
 
@@ -100,62 +89,14 @@ npm run check:generated:rebuild  # 重跑构建，逐字节比对生成物（改
   ```
 
   这三步就是 CI 的全部（判的是发布物：构建、产物语法、包可用性）。**源码卫生闸门
-  `npm run check:static` 不在 CI 里** —— 它盯的是这个仓库自己怎么写的，其中一部分是
-  长期棘轮债，红着也不该拦下 PR；你想跑就跑，跑红了且不是你引入的，在描述里点名即可。
+  `npm run check:static` 不在 CI 里**：你想跑就跑，跑红了且不是你引入的，在 PR 描述里
+  点名即可。
 - 不要提交任何令牌、`.credentials.yaml`、个人路径；`GITHUB_TOKEN` 只作为环境变量出现。
 
 ## 发布
 
-发布是**手动**的（`.github/workflows/release.yml` 只挂 `workflow_dispatch`）：打 tag 是**标记**，
-发布是**动作**，两件事分开，才不会出现「给已发布的版本补个 tag，结果触发一次必然失败的发布」，
-也才可能在失败后重试。
-
-```bash
-# 1. 对齐版本号（package.json 与 package-lock.json 两处，锁用下面这条同步）
-npm version <x.y.z> --no-git-tag-version
-npm install --package-lock-only
-
-# 2. 提交并推 main
-git add package.json package-lock.json && git commit -m "chore(release): x.y.z"
-git push origin main
-
-# 3. 打 tag 并推（这一步**不会**发布任何东西）
-git tag v<x.y.z> && git push origin v<x.y.z>
-
-# 4. 去 Actions → Release → Run workflow，"Use workflow from" 选那个 tag
-```
-
-workflow 会跑**与 CI 相同的发布物检查**（构建 + 产物语法 + `verify-plugin`），
-再硬校验「tag 与 package.json 版本一致」，然后 `npm publish --provenance` 并建 GitHub Release
-（自动 release notes）。**凭据有两条路，配了 `secrets.NPM_TOKEN` 就用它，没配就走 OIDC**：
-
-- **`secrets.NPM_TOKEN`** —— npm 的 Granular Access Token（对本包有 read/write），
-  存进仓库 Settings → Secrets and variables → Actions。
-- **npm Trusted Publishing（推荐，不需要任何长期令牌）** —— 在 npm 的
-  *包 → Settings → Trusted Publisher → GitHub Actions* 里登记：组织/用户 `LinXueyuanStdio`、
-  仓库 `dsh-git`、workflow 文件名 `release.yml`、environment 留空。workflow 里的
-  `id-token: write` 与 `--provenance` 已经就位。
-  ⚠️ **还要勾上 `Allowed actions` 里的直接 `npm publish`**：`npm stage publish` 总是被允许，
-  而 **2026-09-03 之后新建的 binding 默认只允许暂存发布** —— 不勾就直接 `npm publish`，
-  registry 只会回一句 `403 OIDC permission denied for this action`（不说是哪一项；
-  2026-10-12 实测踩过，tag ref 与 main ref 报的一样）。身份三项是**大小写敏感、要精确**的：
-  只填 workflow **文件名**（不带 `.github/workflows/` 前缀、要有 `.yml`）、environment 必须留空。
-  对表用的 OIDC 声明由 release workflow 的「记下 OIDC 声明」那一步打进日志。
-
-⚠️ Trusted Publishing 要求 **npm ≥ 11.5.1**，而 runner 上 `node-version: 22` 自带的是
-**npm 10.9.9** —— 所以 workflow 在发布前多了一步 `npm install -g npm@^11.5.1`，别删它。
-同理别把 `NODE_AUTH_TOKEN` 无条件导出成**空串**：npm 会把「已设置」当真、不再尝试 OIDC，
-于是必然 `ENEEDAUTH`（2026-10-11 的一次真实失败就是这两条各踩了一次）。
-
-⚠️ **如果 npm 把发布转成了「暂存发布」**（账号侧要求 proof-of-presence 时会发生），
-workflow 那一步会成功，但版本**不会立刻对外可见** —— 需要本机用 npm 12 批准：
-
-```bash
-npm stage list @linxueyuan/dsh-git
-npm stage approve <stage-id>     # 会提示 2FA
-```
-
-发完之后，记得把 `CHANGELOG.md` 里的 `[Unreleased]` 段落整理成新版本一节（并补上版本链接）。
+发布由维护者手动触发 `.github/workflows/release.yml`；触发方式与注意事项写在 workflow
+自己的注释里。发布后把 `CHANGELOG.md` 的 `[Unreleased]` 段落整理成新版本一节。
 
 ## 报告问题
 

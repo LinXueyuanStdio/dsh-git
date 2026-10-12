@@ -65,12 +65,11 @@ dsh plugin --profile <profile> add /path/to/dsh-git
 
 ## GitHub 登录与令牌
 
-登录有两条路：**设备码登录**（开箱可用）与 **Personal Access Token**（任何情况下都可用；细粒度 Token 需要
-Contents R / Issues RW / Pull requests RW / Actions RW，经典 Token 用 `repo`）。
+两种登录方式：点「登录 GitHub.com」走**设备码**（开箱可用，包内已带 App），或填 **Personal Access Token**（细粒度 Token 要 Contents R / Issues RW / Pull requests RW / Actions RW；经典 Token 用 `repo`）。
 
-包内已内置一个 GitHub App 的 Client ID ⇒ 装好即可点「登录 GitHub.com」走设备码，不必自己注册 App。
-想换成自己的 App，在 profile 的 `cordis.patch.yml` 里填 `clientId`（也可以给 `DSH_GIT_CLIENT_ID`
-环境变量；写 `off` 则关掉设备码登录、只用 PAT）：
+> ⚠️ 内置的是 **GitHub App**，要先把它[安装](https://github.com/apps/dsh-git-local/installations/new)到你的账号 / 组织 —— 没装的表现是登录成功但看不到任何仓库。它的用户令牌 8 小时后过期，插件会自动续期。
+
+想换成自己的 App：在 profile 的 `cordis.patch.yml` 里填 `clientId`，或给 `DSH_GIT_CLIENT_ID` 环境变量（写 `off` 关掉设备码登录）。
 
 ```yaml
 - id: dsh-git
@@ -79,34 +78,7 @@ Contents R / Issues RW / Pull requests RW / Actions RW，经典 Token 用 `repo`
     clientId: 'Ov23li…'   # 自己建的 App 的 Client ID
 ```
 
-macOS 上从 `.app` 启动时环境变量不好给，用 `config.clientId` 最省事。
-
-> ⚠️ **内置的是 GitHub App，用之前要先把它安装到你的账号 / 组织**（「授权」与「安装」是两件事）。
-> 没安装的表现是**登录成功但看不到任何仓库**，各页签报 `Resource not accessible by integration` ——
-> 账号页会检测到并直接给出安装入口：
-> **<https://github.com/apps/dsh-git-local/installations/new>**（公开页 <https://github.com/apps/dsh-git-local>）。
->
-> ⚠️ **GitHub App 的用户令牌默认 8 小时后过期** —— 插件会**自动续期**：提前 5 分钟用 refresh token
-> 换一对新令牌（重启后靠「401 → 续期 → 重试一次」兜底）。host 日志里能看到
-> `令牌已自动续期(新令牌 N 分钟后到期)`；设备码登录成功时还会记一行令牌形态
-> `前缀 ghu_,令牌 …秒后过期;refresh_token 有/没有`（只报形状，不报值）。
-> 若续期被 GitHub 拒（日志里是 `incorrect_client_credentials`），两条出路：①在 App 的
-> **Optional Features** 里关掉 “User-to-server token expiration”（令牌不再过期，也就不需要续期）；
-> ②给部署侧一个 client secret（环境变量 `DSH_GIT_CLIENT_SECRET`，只在部署侧给，不进仓库）。
-
-自己建 App（免费，不需要 Copilot）时勾 **Enable Device Flow**：OAuth App 在
-<https://github.com/settings/developers> 建（插件会请求 `scope=repo`）；GitHub App 需要的权限是
-Contents RW / Issues RW / Pull requests RW / Actions RW / Checks R / Commit statuses R /
-Metadata R（必选）/ Account ▸ Email addresses R（作者邮箱下拉）。设备码流程**不需要 client secret**。
-自带 App 的另一个理由：device flow 的限额是**按应用**算、所有安装共享的（验证码提交 50 次/小时、
-签发令牌 2,000 次/小时），部分组织也会限制第三方 App。
-
-令牌存在哪、被什么保护：
-
-- **它只存在 host，浏览器拿不到完整值**：挂在宿主凭据接缝 `ctx.credentials` 的 `GITHUB_TOKEN` 上（`$DSH_HOME/.credentials.yaml`），界面只显示尾 4 位；git 通过环境变量拿凭据，不进 argv、不进 `.git/config`。
-- **它不在插件的通用状态域里**：整域读 / 写 / 导出 / 备份都会带上它 —— 令牌不进去。
-- **`GITHUB_TOKEN=… dsh` 是只读覆盖**（写它会被拒），轮换令牌不需要改代码。
-- **静止保护是明文 + 文件权限（文件 `0600` / 目录 `0700`），没有加密。** 全仓没有 `safeStorage` / `keytar`；宿主 `credentials-local` 自己的 README 就写着 OS 钥匙串 provider「deferred」「none is shipped」，而它自己的账号令牌也是明文放在同一个 `$DSH_HOME/.credentials.yaml` 里。`0600` 挡得住其他用户，挡不住同用户进程、备份工具和云同步。
+令牌只在 host 侧，浏览器只看得到尾 4 位；静止时是**明文 + `0600` 权限**，没有加密。
 
 ## 已知边界（M1）
 
