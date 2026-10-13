@@ -145,6 +145,33 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
   /** portal 到 `document.body` 的瞬时顶部横幅:滑入 → 停留 → 淡出 → `onDone`。 */
   export const Toast: (props: IToastProps) => ReactNode;
 
+  /**
+   * 两态开关(`Switch.tsx`)—— 设置页里每一行布尔偏好的控件。
+   *
+   * 逐字对应上游 `packages/client/ui-primitives/src/Switch.tsx:18-25`:
+   * `label` 是**必填**的(上游注释原话:「so a render site cannot ship the control
+   * without an accessible name」),它落在 `aria-label` 上 —— 所以行里的可见文案
+   * 与这里传的名字是**同一份字典键**,不会一处改了另一处没改。
+   *
+   * ⚠️ 它是 `role="switch"` 的 `<button>`,**不是**原生 checkbox:探针要按
+   * `[role="switch"]` 找它,不能按 `input[type=checkbox]`。
+   */
+  interface ISwitchProps {
+    /** 当前状态;控件是**完全受控**的。 */
+    readonly checked: boolean;
+    /** 点击后请求的新状态。 */
+    readonly onChange: (next: boolean) => void;
+    /** 无障碍名(必填)。 */
+    readonly label: string;
+    /** 是否拒绝输入。 */
+    readonly disabled?: boolean;
+    /** 悬停说明(通常是「为什么锁着」)。 */
+    readonly title?: string | undefined;
+    /** 额外的布局类名。 */
+    readonly className?: string | undefined;
+  }
+  export const Switch: (props: ISwitchProps) => ReactNode;
+
   /** 宿主图标组件的 prop 面(`icons/props.ts:2-8`)。 */
   interface IIconProps {
     /** 方形边长(px);省略时用字形自己的绘制尺寸。 */

@@ -7,6 +7,7 @@
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
+    "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "author": {
@@ -28,6 +29,7 @@
     "client": {
       "inject": [
         "slots",
+        "@deepseek-ai/dsh-client-locale",
         "sidebarRightTabs",
         "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-plugin-manager"
@@ -40,6 +42,7 @@
     "lib/client.js",
     "cordis.patch.yml",
     "icon.svg",
+    "locale/*.json",
     "THIRD-PARTY-NOTICES.md",
     "CHANGELOG.md"
   ],

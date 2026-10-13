@@ -35,8 +35,8 @@
  *
  * ## ⭐ 2026-10-06:页面的**正文**已搬到 `./preferences-pages.tsx`(当时是三页,今天是六页)
  *
- * 同样的正文现在**也**渲染在**宿主设置 ▸ 内置插件 ▸ dsh-git**的卡片里(`TABS` 逐页),而当时只有三页
- * (`./host-settings-card.tsx`,席位 `settings.plugins.tab`)—— 那是用户这次的要求,
+ * 同样的正文现在**也**渲染在**宿主插件页 ▸ `@linxueyuan/dsh-git` 详情页**的卡片里(`TABS` 逐页),
+ * 而当时只有三页(席位 `plugins.bundle.config`)—— 那是用户这次的要求,
  * 逐页的搬迁记录见 `docs/host-settings-card.md` §4.0。
  *
  * 本文件从此只剩**模态专有**的那一半:
@@ -190,7 +190,7 @@ import { isHostThemeAvailable } from './host-theme.ts';
 // 只给文件末尾那个 `currentDiffTabSize` 转出用(见那一段的注释)。
 import { getDiffTabSize } from './prefs.ts';
 import {
-  PAGE_PANEL_ID,
+  PAGE_BODY_ID,
   PreferencesPageBody,
   TAB_DOM_ID,
   TABS,
@@ -206,8 +206,10 @@ import {
  * ⚠️ 2026-10:页面的**正文本身**已搬到(当时是账号 / 仓库 / 无障碍三页;仓库后来移除、
  * 提示与确认后来加回 —— 今天的清单以 `TABS` 为准)
  * `./preferences-pages.tsx` —— 因为同样的页面现在**也**渲染在
- * **宿主设置 ▸ 内置插件 ▸ dsh-git** 的卡片里(`./host-settings-card.tsx`,
- * 席位 `settings.plugins.tab`)。留在本文件里的只有**模态专有**的那一半:
+ * **宿主插件页 ▸ `@linxueyuan/dsh-git` 详情页**的卡片里(席位 `plugins.bundle.config`)。
+ * ⚠️ **2026-10-13 起那一页不再复用本模块的正文**(用户裁决:设置页要 DSH 宿主风格),
+ * 所以这些页面今天**只有弹窗一个渲染面**。
+ * 留在本文件里的只有**模态专有**的那一半:
  * 本文件现在只剩**模态外壳**:`PluginDialog` + 上游竖向 `TabBar` + 页脚 `<form>`。
  *
  * 为什么必须拆而不是复制一份:「两份拷贝一定漂移」是本仓反复踩过的形态
@@ -484,7 +486,7 @@ export function PreferencesDialog(props: IPreferencesDialogProps): ReactNode {
         **要求 `#preferences` 是 `.gw-prefs` 的后代**、且**不能同元素**
         (同元素时 `.gw-prefs #preferences X` 恒不匹配 —— 真 Chrome 用 `Element.matches`
         实测过,见 `docs/host-settings-card.md` §4.0.1)。所以它落在卡片内部这一层 wrapper 上,
-        与设置卡片那一侧(`host-settings-card.tsx` 的 `<div id="preferences">`)扮演同一角色。
+        与 `styles.ts` 的 `.gw-prefs-body` 一起扮演「上游 `<dialog id="preferences">`」这一角色。
 
         它同时是 `.gw-prefs-body`(我们那层竖向布局),`usePluginDialog` 的焦点 trap
         与「Tab 首尾环绕」都在卡片这一层工作。
@@ -510,15 +512,16 @@ export function PreferencesDialog(props: IPreferencesDialogProps): ReactNode {
             `ui/_preferences.scss:17` 的 `.preferences-container .tab-container`
             给它 `border-left: var(--base-border)` 与 `flex:1`。
 
-            ⚠️ 这一层**故意**带 `id={PAGE_PANEL_ID[selected]}`:宿主 `SegmentedTabs` 会把
-            `items[].panelId` 原样写进页签的 `aria-controls`,卡片那一侧因此必须让这个 id
-            真的存在(否则 `aria-controls` 指向不存在的节点,是可达性缺陷)。模态这一侧
-            顺带受益:两个外壳的面板 id 逐字相同,`aria-labelledby` 也同一个真源。
+            ⚠️ `id={PAGE_BODY_ID[selected]}` 是**与卡片共用同一张表**的结果:两个外壳对
+            「哪一页的正文装在哪」只有一个真源。模态这一侧真正吃它的是下面那句
+            `aria-labelledby={TAB_DOM_ID[selected]}`(点页签 ⇒ 读屏读出页签名)。
+            ⚠️ 卡片那一侧**不再**需要它做 `aria-controls` 的目标了(2026-10-13 打平,
+            卡片没有页签);这个 id 现在两边都只是「页面正文容器的锚点」。
           */}
           <div
             className="tab-container"
             role="tabpanel"
-            id={PAGE_PANEL_ID[selected]}
+            id={PAGE_BODY_ID[selected]}
             aria-labelledby={TAB_DOM_ID[selected]}
           >
             {pageBody}

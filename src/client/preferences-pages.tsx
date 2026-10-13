@@ -8,28 +8,34 @@
  * ## 为什么要从 `preferences-dialog.tsx` 里拆出来
  *
  * 这些页面原来只在一个渲染面里出现:我们自己那个模态(`PreferencesDialog`)。
- * 2026-10 用户要求把它们**也**搬进**宿主设置 ▸ 内置插件 ▸ dsh-git**的页签
- * (`settings.plugins.tab` 席位,卡片见 `./host-settings-card.tsx`)。两个渲染面的
- * 页签外壳必须**不同**(模态里是上游竖向 `TabBar`,卡片里是宿主 `SegmentedTabs`
- * 横向页签 —— 后者是「别再手写一套页签控件」的裁决),但**正文、状态机与偏好接线
- * 只能有一份真源**:两份拷贝一定会漂移,而这正是本仓反复点名的静默缺陷类。
  *
- * 所以本模块只拥有**与外壳无关**的那一半:
+ * ## ⚠️ 2026-10-13:宿主插件页上那一页设置**已经不再渲染这些页面**
+ *
+ * 用户裁决:「设置页不应该复用 `PreferencesPageBody`,而是为设置页重新写一遍 UI,
+ * 来保持和 DSH 宿主的 UI 风格统一」。⇒ 宿主插件页详情里的那一页是
+ * `./settings-page.tsx`(DSH 宿主风格的行列表,**只放插件自己的偏好**),
+ * 与这里的六个 GitHub Desktop 复刻页**没有任何渲染关系**。
+ *
+ * 本模块今天只有**一个渲染面**:`preferences-dialog.tsx`(齿轮打开的偏好弹窗)。
+ * 它仍然拥有**与外壳无关的那一半**:
  *
  * | 谁拥有 | 什么 |
  * |---|---|
- * | 本模块 | `TABS`(页面表)、`TAB_DOM_ID` / `PAGE_PANEL_ID`、各页面的正文(含各页的读写接线)、**设备码轮询状态机**、真偏好的读写回调 |
- * | 外壳(`preferences-dialog.tsx` / `host-settings-card.tsx`) | 「当前选中哪一页」的 state、页签控件本体、`role=tabpanel` 容器、**登录怎么起**(设备码那一半) |
+ * | 本模块 | `TABS`(页面表)、`TAB_DOM_ID` / `PAGE_BODY_ID`、各页面的正文(含各页的读写接线)、**各页面的偏好接线钩子**(`useAccessibilityWiring` / `useAppearanceWiring` / `usePromptsWiring`,设置页**共用**它们)、**设备码轮询状态机**、真偏好的读写回调 |
+ * | 弹窗外壳(`preferences-dialog.tsx`) | 「当前选中哪一页」的 state、上游竖向 `TabBar`、`role=tabpanel` 容器、**登录怎么起**(设备码那一半) |
+ *
+ * ⚠️ **共用的是接线,不是 UI**:`settings-page.tsx` 从这里 import 两个 wiring 钩子
+ * (勾选标记 / 下划线链接 / 5 个确认开关),所以那几条偏好只有一份读写 + 订阅。
  *
  * ## 依赖方向(不许成环)
  *
  * ```
  * preferences-dialog.tsx ─┐
  *                         ├─> preferences-pages.ts ─> core/desktop/ui/preferences/** + prefs.ts + diff-mode.ts
- * host-settings-card.tsx ─┘
+ * settings-page.tsx ──────┘   (只借两个 wiring 钩子,不借页面正文)
  * ```
  *
- * 本模块**不认识**任何一个外壳(不 import 弹窗、不 import 卡片),所以两个外壳都能
+ * 本模块**不认识**任何一个外壳(不 import 弹窗、不 import 设置页),所以两边都能
  * 在不动对方的前提下各自演进。
  *
  * ## 三条不许越的线(与卡片同源)
@@ -41,8 +47,8 @@
  *    这里只是把「写 + 通知」包成具名回调;
  * 3. **不回写 props 的镜像 state**:`onPreferencesChanged` 只被调用,不产生本地副本。
  *
- * @see src/client/preferences-dialog.tsx —— 模态外壳(回退入口)
- * @see src/client/host-settings-card.tsx —— 宿主设置卡片外壳(新入口)
+ * @see src/client/preferences-dialog.tsx —— 唯一的页面外壳(齿轮打开的偏好弹窗)
+ * @see src/client/settings-page.tsx —— 宿主插件页那一页设置(宿主风格,**不渲染这些页面**)
  * @module dsh-git/client/preferences-pages
  */
 
@@ -230,8 +236,7 @@ export type PreferencesTabId =
  * 1. **作用域根自带**:这些页面的样式全部住在 `src/client/scss/preferences.scss`
  *    这一面里,而那一面的作用域根是 `.gw-prefs`(`scripts/styles.mjs` 的
  *    `PORT_SURFACES`)。所以**每个外壳都必须让 `.gw-prefs` 成为正文的祖先** ——
- *    模态那边它由 `host-modal.tsx` 的 `PluginDialog` 加在**卡片自己**身上;卡片那边由
- *    `host-settings-card.tsx` 自己包一层 `<div className="gw-prefs">`。
+ *    今天只有模态那一个渲染面:它由 `host-modal.tsx` 的 `PluginDialog` 加在**卡片自己**身上。
  *    **不允许**把 `.gw-prefs` 与某个目标类加在同一个元素上(那会产出永不匹配的
  *    后代选择器,见 `scss/preferences.scss` 头注释)。
  * 2. **「Underline links」那一半由外壳挂类**:`useAccessibilityWiring` 只负责**写**偏好,
@@ -239,8 +244,9 @@ export type PreferencesTabId =
  *    (规则在 `scss/preferences.scss` 第 6 条:`&.gw-underline-links a …`)。
  *    所以外壳要读 {@link useUnderlineLinks}(本模块转出)并条件挂类 ——
  *    `PluginDialog` 的 `className` 与卡片那层 `<div>` 各挂各的。
- * 3. **正文放进 `role=tabpanel`**:`id` 用 {@link PAGE_PANEL_ID} 那一族,模态那边
- *    额外给 `aria-labelledby={TAB_DOM_ID[tab]}`。
+ * 3. **正文的容器由外壳决定**:卡片那边是**打平的小节**(每个页面一个 `<section>`,
+ *    `id` 用 {@link PAGE_BODY_ID} 那一族,标题 `<h3>` 用页面的 `label`);模态那边是
+ *    `role=tabpanel` 的面板,额外给 `aria-labelledby={TAB_DOM_ID[tab]}`。
  */
 
 export const TABS: ReadonlyArray<{
@@ -330,20 +336,27 @@ export const TAB_DOM_ID: Readonly<Record<PreferencesTabId, string>> = {
 };
 
 /**
- * 每个页面的 `role=tabpanel` 容器 id —— 给宿主 `SegmentedTabs` 的 `items[].panelId` 用。
+ * 每一页**正文容器**的 id —— 今天只有模态一个消费方
+ * (`preferences-dialog.tsx` 把它当 `role=tabpanel` 的容器,另有
+ * `aria-labelledby={TAB_DOM_ID[selected]}`)。
  *
- * 模态外壳不用它(`TabBar` 的 `aria-labelledby` 读的是 {@link TAB_DOM_ID});
- * 卡片外壳用它把宿主页签的 `aria-controls` 指向**真的存在**的那个面板(宿主
- * `SegmentedTabs` 把 `panelId` 原样放进 `aria-controls`,见
- * `packages/client/ui-primitives/src/SegmentedTabs.tsx:31` 附近的 `SegmentedTab` 契约)。
+ * ⚠️ 2026-10-13:宿主插件页那一页设置**不再**用它 —— 那一页是
+ * `settings-page.tsx` 的宿主风格行列表,与这六个复刻页没有渲染关系
+ * (它只借本模块的两个 wiring 钩子)。
+ *
+ * ⚠️ 2026-10-13 之前这里叫 `PAGE_PANEL_ID`,值是 `…-panel-<tab>`:那个名字来自**卡片曾经
+ * 抄了一份宿主 `SegmentedTabs`**,而 `items[].panelId` 会被原样写进页签的 `aria-controls`。
+ * 打平之后卡片既没有页签也没有 `aria-controls`,模态那边的 `TabBar` 也从来不设
+ * `aria-controls` ⇒ 这个名字对**两边**都不再准确,改成中性的 `PAGE_BODY_ID`。
+ * 值同时去掉 `-panel-`(它现在在卡片里是一个 `<section>`)。
  */
-export const PAGE_PANEL_ID: Readonly<Record<PreferencesTabId, string>> = {
-  accounts: 'dsh-git-preferences-panel-accounts',
-  git: 'dsh-git-preferences-panel-git',
-  appearance: 'dsh-git-preferences-panel-appearance',
-  notifications: 'dsh-git-preferences-panel-notifications',
-  prompts: 'dsh-git-preferences-panel-prompts',
-  accessibility: 'dsh-git-preferences-panel-accessibility',
+export const PAGE_BODY_ID: Readonly<Record<PreferencesTabId, string>> = {
+  accounts: 'dsh-git-preferences-accounts',
+  git: 'dsh-git-preferences-git',
+  appearance: 'dsh-git-preferences-appearance',
+  notifications: 'dsh-git-preferences-notifications',
+  prompts: 'dsh-git-preferences-prompts',
+  accessibility: 'dsh-git-preferences-accessibility',
 };
 
 /**
@@ -1611,7 +1624,7 @@ function accountCandidatesFor(
 
 /*
  * `useUnderlineLinks` —— 为了让「Underline links」的**读点**与**写点**同源,这里把它
- * 转出给两个外壳(`preferences-dialog.tsx` / `host-settings-card.tsx`)。
+ * 转出给弹窗外壳(`preferences-dialog.tsx`)。
  *
  * 本模块**不自己消费**它:类的落点是作用域根(`.gw-prefs`),而那个元素由外壳拥有
  * (模态是宿主卡片的 `className`,卡片是它自己包的那层 `<div>`)。

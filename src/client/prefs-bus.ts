@@ -6,9 +6,9 @@
  *
  * `preferences-dialog.tsx` 时代,三个页面的宿主是 `WorkbenchApp`:
  * `fontScale` 是它的 `useState`、`onPreferencesChanged` 是它的 `setPrefsRevision`,
- * 一路当 prop 传进弹窗即可。搬进**宿主设置卡片**之后,渲染卡片的
- * `src/client/host-settings-card.tsx` 与 `WorkbenchApp` 是**两棵互不相邻的树**
- * (卡片 portal 到宿主自己的设置弹窗里),更关键的是:`index.ts` 里
+ * 一路当 prop 传进弹窗即可。搬进**宿主插件页那一页设置**之后,渲染它的
+ * `src/client/settings-page.tsx` 与 `WorkbenchApp` 是**两棵互不相邻的树**
+ * (设置页落在宿主自己的插件详情页里),更关键的是:`index.ts` 里
  * **拿不到** `WorkbenchApp` 的任何 state(它在另一个组件的闭包里)。
  *
  * ⇒ 「字号」与「偏好变更通知」这两件事需要一份**两边都能看见**的真源。

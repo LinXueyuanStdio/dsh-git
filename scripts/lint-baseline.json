@@ -46,6 +46,9 @@
     "scripts/check-unreachable-ancestors.mjs": {
       "curly": 17
     },
+    "scripts/e2e-deploy.mjs": {
+      "@typescript-eslint/no-unused-vars": 1
+    },
     "scripts/gates-lib.mjs": {
       "curly": 21
     },
@@ -69,6 +72,10 @@
     },
     "scripts/verify-mirror.mjs": {
       "curly": 7
+    },
+    "scripts/verify-plugin.mjs": {
+      "curly": 15,
+      "prefer-const": 1
     },
     "src/client/actions-view.tsx": {
       "curly": 5,

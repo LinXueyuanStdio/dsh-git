@@ -9,6 +9,8 @@
  *  1. **清单自洽**:`package.json` 里的 `dsh.bundle.patch`、`exports` 指向的文件真的存在;
  *  2. **能被宿主加载**:`lib/client.js` 的 ModuleLoader banner 里 `id` 必须等于包名
  *     (Desktop 侧就是这么校验的,不一致 = 装上也加载不了);`lib/index.js` 是 ESM;
+ *     设置卡片的席位 key(`plugins.bundle.config`)必须**等于包名** —— 宿主按包名派发,
+ *     不相等时卡片整段静默不渲染;
  *  3. **运行时依赖都声明了**:两个产物里出现的**外部 import/require** 必须落在
  *     `dependencies` / `peerDependencies` 里(子路径归到包名,如 `react/jsx-runtime` → `react`)。
  *     这条抓的是「包 import 了一个没声明、也没随包打进去的东西」—— 那会让插件在用户机器上
@@ -27,7 +29,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { readFile, access } from 'node:fs/promises';
+import { readFile, access, readdir } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -174,6 +176,28 @@ async function main() {
 		pkg.dsh?.bundle?.patch,
 	].filter(Boolean);
 	for (const rel of declared) {
+		/*
+		 * ⚠️ **通配导出**(`"./locale/*.json"`)不是一条路径:直接 `access()` 它必然 ENOENT,
+		 * 于是这条本来防「清单指向不存在的文件」的判据会**误报**一个不存在的缺陷。
+		 * 对通配条目改成它真正要问的问题:那个目录在不在、里面**至少有一个**文件匹配。
+		 * (2026-10-13 加 `locale/*.json` 时踩到;形状照 dsh-context 的 package.json。)
+		 */
+		if (rel.includes('*')) {
+			const dir = join(REPO, rel.slice(0, rel.indexOf('*')).replace(/\/$/, ''));
+			const suffix = rel.slice(rel.indexOf('*') + 1);
+			let entries = [];
+			try {
+				entries = await readdir(dir);
+			} catch {
+				fail(`package.json 的通配导出 ${rel} 指向的目录不存在(装上去会缺文件)`);
+				continue;
+			}
+			const hit = entries.filter((name) => suffix === '' || name.endsWith(suffix));
+			if (hit.length === 0) {
+				fail(`package.json 的通配导出 ${rel} 在 ${dir.slice(REPO.length + 1)}/ 里一个文件都匹配不到`);
+			}
+			continue;
+		}
 		try {
 			await access(join(REPO, rel), constants.R_OK);
 		} catch {
@@ -195,6 +219,62 @@ async function main() {
 	const patchText = await readFile(patchPath, 'utf8');
 	if (!patchText.includes(pkg.name)) {
 		fail(`${pkg.dsh.bundle.patch} 里没有出现包名 ${pkg.name} —— patch 指向的会是别的包`);
+	}
+
+	/*
+	 * ---------- 2b. 设置卡片的席位 key 必须**等于包名**(2026-10-13 加) ----------
+	 *
+	 * `plugins.bundle.config` 是 keyed 席位,宿主按 **bundle 的包名**派发
+	 * (`PluginManagerPage.tsx:735` 的 `{ entryKey: pkg.name }`),是否渲染又由
+	 * `configured={ledger.bundles.has(openPkg.name)}` 决定(`:1571`)—— 而 `ledger.bundles`
+	 * 就是这个席位 key 的集合(`config-ledger.ts:40,66`)。
+	 *
+	 * ⇒ 把 key 写成配置命名空间(`'dsh-git'`)而不是包名,后果是
+	 * **`section[data-plugin-config]` 整个节点不出现,且不报错、不警告**。
+	 * 这条判据把那个静默失败变成一个退出码。
+	 *
+	 * 判据取**产物本身**(不是源码惯例):先读源码里的常量(它是人写 key 的唯一入口),
+	 * 再从 `lib/client.js` 的注册对象里**解出**真正生效的 key —— 两者都必须 === `pkg.name`。
+	 * 三样都查,是因为它们各自会单独漂移:常量改了没重构建、构建产物被手改、
+	 * 或者有人绕开常量直接写了一个字符串字面量。
+	 */
+	const srcText = await readFile(join(REPO, 'src/client/index.ts'), 'utf8');
+	const constantMatch = srcText.match(/export const DSH_GIT_BUNDLE_NAME\s*=\s*["']([^"']+)["']/);
+	if (!constantMatch) {
+		fail('src/client/index.ts 里找不到 `export const DSH_GIT_BUNDLE_NAME = \'…\'` —— 席位 key 的单一真源没了');
+	} else if (constantMatch[1] !== pkg.name) {
+		fail(
+			`DSH_GIT_BUNDLE_NAME(${constantMatch[1]})≠ package.json 的 name(${pkg.name})`
+			+ ' —— plugins.bundle.config 的 key 必须是包名,否则设置卡片整段不渲染(且不报错)',
+		);
+	}
+	const seatIndex = clientText.indexOf('name: "plugins.bundle.config"');
+	if (seatIndex < 0) {
+		fail('lib/client.js 里没有注册 `plugins.bundle.config` —— 设置卡片在「插件」页上不会出现');
+	} else {
+		const keyMatch = clientText.slice(seatIndex, seatIndex + 400).match(/key:\s*([^,\n]+)/);
+		if (!keyMatch) {
+			fail('lib/client.js 的 `plugins.bundle.config` 注册里找不到 `key` —— keyed 席位没有 key 会抛异常');
+		} else {
+			const expr = keyMatch[1].trim();
+			let resolved = expr;
+			if (!/^["']/.test(expr)) {
+				// 标识符形式(构建保留了常量引用):回到产物里解它的值。
+				const ident = expr.match(/^[A-Za-z_$][\w$]*$/);
+				const decl = ident === null ? null : clientText.match(new RegExp(`var ${ident[0]} = ["']([^"']+)["']`));
+				resolved = decl === null ? `<未能从产物解出 ${expr}>` : decl[1];
+			} else {
+				resolved = expr.replace(/^["']|["']$/g, '');
+			}
+			if (resolved !== pkg.name) {
+				fail(
+					`lib/client.js 里 plugins.bundle.config 的 key 解出来是 ${resolved},不是包名 ${pkg.name}`
+					+ ' —— 宿主按包名派发,key 不符时 section[data-plugin-config] 整段不出现(静默失败)',
+				);
+			} else {
+				notes.push(`设置卡片席位:plugins.bundle.config key = ${resolved}(= 包名)`);
+			}
+		}
 	}
 
 	// ---------- 3. 运行时依赖都声明了吗 ----------

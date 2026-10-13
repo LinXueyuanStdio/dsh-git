@@ -22,11 +22,12 @@
  * 「**给 `api` 的四条同步路由套一层**」:
  *
  * ```
- * index.ts → host-settings-card.tsx → preferences-pages.tsx → notifications-panel.tsx → 本文件
+ * index.ts → settings-page.tsx → notify.ts → 本文件
  * ```
  *
- * `index.ts:31` 静态 import 了卡片外壳,卡片外壳静态 import 了页面正文,页面正文
- * (阶段 2 起)import 本面板 ⇒ **本模块在插件注册时就加载**,`ensureSyncNotificationBridge()`
+ * `index.ts` 静态 import 了设置页,设置页静态 import 了 `notify.ts`
+ * (启用通知那一行),`notify.ts` 静态 import 本模块 ⇒ **本模块在插件注册时就加载**,
+ * `ensureSyncNotificationBridge()`
  * 在那一刻装好包装。于是「用户在设置里打开开关」与「拦截器在不在」互不依赖 ——
  * 开关一开,**当场生效**,不必等谁再去接一根线。
  *

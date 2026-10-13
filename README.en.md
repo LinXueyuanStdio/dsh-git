@@ -33,7 +33,7 @@ These are shared by every tab:
 - **Sync and branches** — fetch / pull / push. A force push is only ever `--force-with-lease` (there is no bare `--force` anywhere). Switch, create and rename branches; check out a commit (detached HEAD) or cherry-pick it.
 - **Usable without a remote** — on a local-only repository the Code tab degrades to a local working-tree view rather than an empty page; Issues / PR / Actions need a remote and say so in plain language instead of erroring.
 - **Commit messages come from the model** — the host half reads the diff and goes through `ctx.llm`, so it uses whichever provider you already configured in DSH.
-- **Findable in settings** — there are cards both in the sidebar's Plugins page and under Settings ▸ Built-in plugins.
+- **Findable in settings** — sidebar Plugins page ▸ Installed ▸ `@linxueyuan/dsh-git` ▸ the configuration section on its detail page: interface scale, diff check marks, notifications and a few confirmation prompts, plus the plugin's own config document (Pulls auto-refresh interval). The ported GitHub Desktop preference pages stay behind the gear in the right sidebar.
 
 ## How it works
 

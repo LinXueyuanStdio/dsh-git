@@ -16,6 +16,7 @@
 import './polyfills.ts';
 
 import { createElement, Fragment, type ReactElement } from 'react';
+import { DICT_EN, DICT_ZH, LOCALE_NS, type Translate } from './i18n.ts';
 import type { ClientCtx, SidebarRightTabsLike } from './types.ts';
 import { ensureStyles } from './styles.ts';
 import { ensureBaseStyles } from './styles-base.ts';
@@ -25,13 +26,12 @@ import { FrameToasts, registerToastSource } from './bits.tsx';
 import { ErrorBoundary } from './error-boundary.tsx';
 import { GitStore } from './store.ts';
 import {
-  bootstrapCardStore, cardAuthOf,
   DSH_GIT_NS, DshGitSettingsCardController,
-  type IConfigFormsLike, type IDshGitCardPagesFace, type IDshGitSettings,
+  type IConfigFormsLike, type IDshGitSettings,
 } from './host-settings-card.ts';
 import { bumpPreferencesRevision } from './prefs-bus.ts';
 import { bindAutoRefreshFromHost, type IHostSettingsSlice } from './host-settings.ts';
-import { DshGitCard } from './host-settings-card.tsx';
+import { DshGitSettingsPage } from './settings-page.tsx';
 import { attachHostTheme } from './host-theme.ts';
 import { attachHostSettingsOpener } from './host-settings-open.ts';
 
@@ -46,6 +46,28 @@ const BUILD_STAMP: string = typeof __BUILD_STAMP__ === 'string' ? __BUILD_STAMP_
 
 /** 本插件在右侧栏里的 tab 类型 id(全局唯一)。 */
 export const TAB_ID = 'dsh-git';
+
+/**
+ * 本插件在 profile 里的 **bundle 包名** —— `plugins.bundle.config` 席位的 `key`。
+ *
+ * ⚠️ **必须与 `package.json` 的 `name` 逐字相同**,而且它**不是**另外两个同名概念:
+ *
+ * | 名字 | 值 | 谁在用 |
+ * |---|---|---|
+ * | 包名(**本常量**) | `@linxueyuan/dsh-git` | profile 的 `dsh.profile.bundles`;`plugins.bundle.config` 的 key |
+ * | 配置命名空间 / profile 行 id | `dsh-git`({@link DSH_GIT_NS}) | `ctx.configForms.get(...)` / `whileServed([...])` |
+ * | 右侧栏 tab id | `dsh-git`({@link TAB_ID}) | sidebar 布局记录 |
+ *
+ * 判据(2026-10 实测):席位由 `PluginManagerPage.tsx:735` 的
+ * `renderSlot('plugins.bundle.config', …, { entryKey: pkg.name })` 派发,而是否渲染由
+ * `configured={ledger.bundles.has(openPkg.name)}` 决定 —— `ledger.bundles` 就是本席位的
+ * **key 集合**(`config-ledger.ts:40` 的 `SLOTS` + `:66` 的 `keysOf(...)`)。
+ * 所以写成 `'dsh-git'` 的后果是 **`section[data-plugin-config]` 整个节点不出现,且不报错**
+ * —— 正是 `docs/host-settings-card.md` §2 记的那类静默形态。
+ *
+ * `scripts/verify-plugin.mjs` 有一条反向判据钉住「本常量 === `package.json` 的 `name`」。
+ */
+export const DSH_GIT_BUNDLE_NAME = '@linxueyuan/dsh-git';
 
 /**
  * chip 上**显示**的 tab 名(不带 `dsh-` 前缀;用户 2026-10 裁决)。
@@ -72,8 +94,17 @@ const TAB_TITLE = 'git';
  *
  * 所以它走**动态 `ctx.inject`**:等到位再注册、服务不来就什么都不做,
  * 两种语义都要(见 `apply` 里那段注册代码)。
+ *
+ * ## `locale` 为什么**写进**数组(dsh-context 的形状)
+ *
+ * 与 `uiWorkspace` / `theme` 那几条可选服务不同:`dsh-client-locale` 是**web 组合的
+ * 常驻行**(`references/deepseek-harness/packages/bundle/web-app/cordis.patch.yml:253`
+ * 一条 `name: '@deepseek-ai/dsh-client-locale'`),不是「某些 profile 才装」的能力。
+ * 参考实现 `references/dsh-context/src/client/index.ts` 也硬注入它
+ * (`inject: ['slots', 'locale']`)—— 字典注册与 `t` 的绑定点都在 `apply` 里,
+ * 拿不到服务就没有语言可言,那时候「整个插件不激活」比「界面全是中文」更诚实。
  */
-export const inject = ['slots'];
+export const inject = ['slots', 'locale'];
 
 /** 每个会话共享一个 store(跨视图状态)。 */
 const stores = new Map<string, GitStore>();
@@ -122,6 +153,25 @@ export function apply(ctx: ClientCtx): void {
   // 于是容易出现「界面是新的、host 是旧的」。把构建时间打进控制台便于对照。
   console.info(`[dsh-git] client build ${BUILD_STAMP} UTC`);
 
+  /*
+   * ---------- 语言:注册本插件的字典,并绑一个 `t` ----------
+   *
+   * 形状逐字照 `references/dsh-context/src/client/index.ts:57-62`:
+   * `ctx.effect(() => ctx.locale.register(NS, { zh, en }))` + `ctx.locale.bind(NS)`。
+   * `bind()` 返回的函数**在调用时**读当前语言(`ui-slots/src/renderer.ts:24`),
+   * 所以同一个 `t` 引用在语言切换后照样给出新文案 —— 不需要重新注册席位。
+   *
+   * ⚠️ 只覆盖**我们自己写的**文案(`./i18nZh.ts` 的文件头写了边界):
+   * `src/core/desktop/**` 那棵 GitHub Desktop 镜像树不在这条链路上。
+   */
+  const t: Translate = ctx.locale?.bind(LOCALE_NS)
+    ?? ((key: string) => key);
+  try {
+    ctx.effect(() => ctx.locale?.register(LOCALE_NS, { zh: DICT_ZH, en: DICT_EN }), 'dsh-git: dictionaries');
+  } catch (error) {
+    console.warn(`[dsh-git] 语言字典注册失败(界面回落到键名):${String(error)}`);
+  }
+
   // 接上客户端的原生目录选择。
   // 用 ctx.inject(等待服务出现)而不是 ctx.get(可能还没挂载),并且不写进 inject:
   // 硬依赖会让本插件在没有该服务的 profile 里整个不激活。
@@ -138,7 +188,7 @@ export function apply(ctx: ClientCtx): void {
     console.warn(`[dsh-git] 无法接入 uiWorkspace.pickDirectory,将只用 host 侧目录选择:${String(error)}`);
   }
 
-  registerHostSettingsCard(ctx);
+  registerHostSettingsCard(ctx, t);
 
   /*
    * 接上**宿主的主题服务**(Preferences ▸ 外观 的那个色板)。
@@ -321,8 +371,14 @@ function registerToastSeat(ctx: ClientCtx): void {
       console.warn('[dsh-git] shell.overlay 席位没被声明 ⇒ 通知不会出现(宿主 ui-layout 未激活?)');
     }, 3000);
     /*
-     * 设置卡片那棵树用的是**全局 store**(`storeFor('')`,与卡片同一个实例),它也可能报
-     * 通知 ⇒ 一并登记成帧级通知来源。
+     * 帧级通知来源。挂的是**全局 store**(`storeFor('')`)。
+     *
+     * ⚠️ 2026-10-13:它原先的驱动者是设置卡片那一棵树(卡片有账号页 / 仓库页,会跑动作、
+     * 会报通知);卡片改成宿主风格的设置页之后**不再碰 store** ⇒ 这个来源今天没有生产者。
+     * 保留它是因为「谁往全局 store 写通知谁就能上帧」这条**通道**本身与设置页无关
+     * (侧栏那条走的是按 session 键的另一颗 store)。**没有顺手删**:删它要连带决定
+     * 全局那颗 store 是否还需要存在,那是另一条泳道的边界,已登记在
+     * `docs/host-settings-card.md` §14.4。
      */
     const unregisterSource = registerToastSource(storeFor(''));
     return () => {
@@ -350,30 +406,37 @@ function noteSettingsCardOnce(key: string, message: string): void {
 }
 
 /**
- * 把 dsh-git 的设置页面挂进**宿主自己的两个插件界面**。
+ * 把 dsh-git 的设置页面挂进**宿主自己的插件页**(那次二次迁移见下)。
  *
  * 这是 DSH 插件设置机制的 client 半(host 半是 `src/index.ts` 的 `export const Config`)。
- * 形状对齐 `packages/client/ui-settings-agent-loop/src/client/index.ts:40-49`:
+ * 形状对齐 `packages/client/ui-settings-agent-loop/src/client/index.ts:40-49`,并逐字参考
+ * `references/dsh-context/src/client/index.ts:141-158`:
  * `ctx.configForms.get(ns)` 拿表单 → `whileServed([ns], …)` 只看宿主真的服务该命名空间时
  * 才注册 → `ctx.slots.inject(<seat>, () => ctx.slots.register(…))` 注册页面。
  *
- * ## 2026-10 修正:**席位选错了,卡片进不了设置弹窗**(用户报的「设置里没有 dsh-git 卡片」)
+ * ## 2026-10 第 1 次修正:席位选错,卡片进不了设置弹窗
  *
- * 上一轮只注册了 `plugins.item`,并在 `docs/plugin-settings.md` §3.5 断言
+ * 当时只注册了 `plugins.item`,并在 `docs/plugin-settings.md` §3.5 断言
  * 「注册 `plugins.item` ⇒ 设置 ▸ 插件里自动出现一张卡片」。**那条断言是错的**:
+ * `plugins.item` 由 `ui-plugin-manager` 渲染在**侧栏的「插件」页**(主列面板
+ * `PANEL_ID='plugins'`),而设置 ▸ 内置插件读的是另一个席位 `settings.plugins.tab`。
+ * 当时的处置是**两个席位都注册**。
  *
- * | 席位 | 谁声明 / 谁渲染 | 出现在哪 |
- * |---|---|---|
- * | `plugins.item` | `ui-plugin-manager`(`slot-contract.ts:91-96` + `PluginManagerPage.tsx:1399`) | **侧栏的「插件」页** —— 它是主列面板(`PANEL_ID='plugins'`),**不在设置弹窗里** |
- * | `settings.plugins.tab` | `ui-settings-plugins`(`src/client/index.ts:76-84`) | **设置 ▸ 内置插件**里的一个页签(`PluginsSettingsSection.tsx:56-70` 渲染) |
+ * ## 2026-10 第 2 次修正(本次):两个旧席位都退役,改挂 `plugins.bundle.config`
  *
- * 设置弹窗里那一节(`settings.section` id `plugins`,「内置插件」)只读
- * `settings.plugins.tab`(`ui-settings-plugins/src/client/index.ts:46-70`),所以
- * `plugins.item` 里注册的东西**在任何情况下都不会出现在设置里** —— 不是「某一步掉了」,
- * 而是**注册到了另一个界面**。现在两个席位都注册(它们本来就是两个不同界面),
- * 于是设置 ▸ 内置插件里也会出现一张 dsh-git 页。
+ * 用户指令:「现在 dsh 插件使用的是 config form。但是这个其实不太建议使用。我们有新的位置,
+ * 参考 `references/dsh-context` 的插件设置的位置」。参考实现用的是官方为「**bundle 自己的配置**」
+ * 留的 keyed 席位 **`plugins.bundle.config`**(`ui-plugin-manager/src/client/slot-contract.ts:103-107`):
  *
- * 完整证据链与「宿主还不能表达什么」见 `docs/host-settings-card.md`。
+ * | 席位 | 谁声明 / 谁渲染 | 出现在哪 | 现在 |
+ * |---|---|---|---|
+ * | `plugins.item` | `ui-plugin-manager`(`slot-contract.ts:92-101`;`PluginManagerPage.tsx:1461`) | **侧栏「插件」页**的**官方**组(契约逐字写它被 official settings pages *occupied*) | **退役** |
+ * | `settings.plugins.tab` | `ui-settings-plugins`(`src/client/index.ts:76-83`;`PluginsSettingsSection.tsx:58,111`) | **设置 ▸ 内置插件**的一个页签(该分区的定位是「内置插件」清单) | **退役** |
+ * | **`plugins.bundle.config`** | `ui-plugin-manager`(`slot-contract.ts:103-107`;`PluginManagerPage.tsx:735`) | 该 bundle 在**「插件」页**的**详情页**上,描述与行列表之间 | **现在的位置** |
+ *
+ * ⚠️ **本席位的 key 是包名({@link DSH_GIT_BUNDLE_NAME}),不是命名空间**:见那个常量的注释。
+ * 两个旧席位都撤掉而不是并存 —— 同一个配置面出现两个入口比少一个入口更坏。
+ * 完整方案与验收判据见 `docs/plugin-settings-seat-migration-plan.md`。
  *
  * ## 为什么是 `ctx.inject` 而不是把 `configForms` 写进 `inject` 数组(与 §7.3 第 8 步不同)
  *
@@ -389,7 +452,7 @@ function noteSettingsCardOnce(key: string, message: string): void {
  *
  * @param ctx - 浏览器插件上下文。
  */
-function registerHostSettingsCard(ctx: ClientCtx): void {
+function registerHostSettingsCard(ctx: ClientCtx, t: Translate): void {
   if (typeof ctx.inject !== 'function') {
     noteSettingsCardOnce('no-inject', 'ctx.inject 不可用 ⇒ 卡片链路整条不执行');
     return;
@@ -423,106 +486,68 @@ function registerHostSettingsCard(ctx: ClientCtx): void {
           return () => { /* 没有席位系统:同上 */ };
         }
         /*
-         * ⭐ **三个页面(账号 / 仓库 / 无障碍)现在也在这张卡片里。**
-         *
-         * 它们要的那几样东西全部来自**这里**能拿到的对象,没有编造的值:
-         *  - `store`:`storeFor('')` 就是本插件的**全局** store(与
-         *    `host-settings.ts` 那条 `bindAutoRefreshFromHost` 的消费方同一颗)。
-         *    ⚠️ 为什么不是「当前 session 那一颗」:`settings.plugins.tab` 这个席位
-         *    **不带 sessionId**(`sidebar.right.pane.tab` 才有,见下面 165-172 行),
-         *    而 `storeFor()` 是按 session 记忆化的(`:72-82`)⇒ 卡片只能用全局那一个。
-         *    这是本轮的已知边界,报告里如实登记。
-         *  - `auth` / `snap`:从**同一颗 store** 的快照里读,所以「仓库」页列的就是
-         *    侧栏那一份清单(全局 store 时两侧一致);
-         *  - `onPreferencesChanged`:`prefs-bus.ts` 的计数器(卡片与 `WorkbenchApp`
-         *    是两棵树,拿不到后者的 revision state)。
+         * ⚠️ 2026-10-13 起这里**不再**构造仓库清单 / 登录态那份数据面:
+         * 设置页已改成 DSH 宿主风格的行列表(`./settings-page.tsx`),只呈现插件自己的偏好;
+         * 账号与 Git 身份仍在齿轮打开的偏好弹窗里,而弹窗自己拿 store。
+         * ⇒ `storeFor('')` / `bootstrapCardStore` / `pages` 三样一起从这条链路上消失。
          */
-        const globalStore = storeFor('');
-        const pages: IDshGitCardPagesFace = {
-          snap: globalStore.snapshot(),
-          auth: cardAuthOf(globalStore.snapshot().auth),
-          store: globalStore,
-          /*
-           * ⭐ **live**:卡片订阅的**真 store**。
-           *
-           * 没有这一条时,上面那两行(`snap` / `auth`)是**注册那一瞬间**的快照,而
-           * 注册发生在 `apply()` 里(`WorkbenchApp` 还没挂载)⇒ 它们是空的、而且永不更新:
-           * 仓库页永远「还没有仓库」、账号页永远未登录、添加/切换/移除点了界面不动。
-           * 实测读数(改前)见 `docs/probes/host-settings-card-live-probe.mjs`。
-           */
-          live: globalStore,
-        };
-        /*
-         * ⭐ **装载**:`settings.plugins.tab` 不带 sessionId,所以卡片用的是
-         * `storeFor('')` 这颗**全局** store,而它**没有任何别的启动点**
-         * (右侧栏那颗是按 session 键的另一颗,由 `workbench.tsx:163` 启动)。
-         * 不装载 ⇒ 上面那个 live 订阅永远等不到数据。
-         */
-        void bootstrapCardStore(globalStore);
         const card = new DshGitSettingsCardController(
           configForms.get<IDshGitSettings>(DSH_GIT_NS),
-          pages,
           bumpPreferencesRevision,
+          t,
         );
         // 只读投影:同一个命名空间的另一个消费方(`pulls-view.tsx` 的自动刷新定时器)
         // 从这里拿值。绑定与卡片同生共死 —— 宿主停止服务该命名空间时,
         // 退订会把周期复位成 0(关闭),旧周期不会带着继续跑。
         const unbindAutoRefresh = bindAutoRefreshFromHost(configForms.get<IHostSettingsSlice>(DSH_GIT_NS));
         /*
-         * ⭐ **两个席位,两个界面**,它们由**不同的宿主包**渲染,一个都不能少:
+         * ⭐ **一个席位**:bundle 自己的配置官方席位 `plugins.bundle.config`
+         * (`ui-plugin-manager/src/client/slot-contract.ts:103-107`)。
          *
-         * | 席位 | 谁声明 / 谁渲染 | 出现在哪 |
-         * |---|---|---|
-         * | `plugins.item` | `ui-plugin-manager`(`slot-contract.ts:91-96`;`PluginManagerPage.tsx:1399`) | **侧栏的「插件」页**(`PANEL_ID='plugins'`,主列面板) |
-         * | `settings.plugins.tab` | `ui-settings-plugins`(`src/client/index.ts:76-84`) | **设置 ▸ 内置插件**里的一个页签(`PluginsSettingsSection.tsx:56-70`) |
+         * 它渲染在**「插件」页 ▸ 该 bundle 的详情页**上(描述与行列表之间,`PluginManagerPage.tsx:735`),
+         * 由 `configured={ledger.bundles.has(openPkg.name)}` 决定整段是否存在 ——
+         * 所以 **key 必须是包名**(`ledger.bundles` 是本席位 key 的集合),见
+         * {@link DSH_GIT_BUNDLE_NAME} 的注释。写错 = 整段静默消失。
          *
-         * 2026-10 用户报「设置里没有 dsh-git 卡片」的**根因**就是这里:原先只注册了
-         * `plugins.item`,而那个席位**只在侧栏的「插件」页渲染**,永远进不了设置弹窗。
-         * 证据与判据见 `docs/host-settings-card.md` §2。两个席位都注册,是因为它们
-         * 本来就是两个不同的界面(不是重复注册)。
+         * 两个旧席位(`plugins.item` / `settings.plugins.tab`)已退役:前者是**官方设置页专用席**
+         * (契约逐字说它被 official settings pages *occupied*,且第三方卡片会在「插件」页的
+         * **官方**组里露出来);后者是「设置 ▸ 内置插件」的**清单**分区。迁移理由与判据见
+         * `docs/plugin-settings-seat-migration-plan.md`。
+         *
+         * **传 `locale`**:本卡片的文案全部走本插件的字典(`./i18nZh.ts` / `./i18nEn.ts`),
+         * 席位声明命名空间后,宿主的语言切换会立刻反映到这一页(dsh-context 同形)。
+         * **不传 `label` / `order` / `id`**:那是 list 席位的形状,keyed 席位只要 `key`。
          */
-        const seats = { pluginsItem: false, pluginsTab: false };
-        const disposeEntry = slots.inject('plugins.item', () => {
-          seats.pluginsItem = true;
+        let seatRegistered = false;
+        const disposeConfig = slots.inject('plugins.bundle.config', () => {
+          seatRegistered = true;
           return slots.register({
-            name: 'plugins.item',
-            id: 'dsh-git',
-            // 官方的几个是 shell 10 / agent-loop 20 / subagent 30 / web-search 40;
-            // 60 让第三方插件稳定排在它们之后。
-            order: 60,
-            label: () => 'dsh-git',
+            name: 'plugins.bundle.config',
+            key: DSH_GIT_BUNDLE_NAME,
+            // 声明本席位用哪个命名空间的文案(宿主渲染层据此注入 `t` 席位);
+            // 卡片自己用的是 `apply` 里 bind 出来的那个 `t`(同一个命名空间,活值)。
+            locale: LOCALE_NS,
             inject: () => card.inject(),
-          }, DshGitCard);
-        });
-        const disposeTab = slots.inject('settings.plugins.tab', () => {
-          seats.pluginsTab = true;
-          return slots.register({
-            name: 'settings.plugins.tab',
-            id: 'dsh-git',
-            order: 60,
-            label: () => 'dsh-git',
-            inject: () => card.inject(),
-          }, DshGitCard);
+          }, DshGitSettingsPage);
         });
         /*
          * 席位**没被声明**时 `slots.inject` 什么都不做(不抛、不报),这正是
-         * 「静默 no-op」。有界(3s)查一次「两个席位是不是都没落地」,只打一次。
+         * 「静默 no-op」。有界(3s)查一次席位是不是没落地,只打一次。
          * 计时器与卡片同生共死,不会在插件卸载后还活着。
          */
         const timer = setTimeout(() => {
-          if (seats.pluginsItem || seats.pluginsTab) {
+          if (seatRegistered) {
             return;
           }
           noteSettingsCardOnce(
             'no-seat',
-            'plugins.item 与 settings.plugins.tab 都没被声明(ui-plugin-manager / ui-settings-plugins 未激活?)'
+            'plugins.bundle.config 没有被声明(ui-plugin-manager 未激活?宿主版本过旧?)'
             + ' ⇒ 卡片注册为静默 no-op',
           );
         }, 3000);
         return () => {
           clearTimeout(timer);
-          disposeTab();
-          disposeEntry();
+          disposeConfig();
           unbindAutoRefresh();
           card.dispose();
         };

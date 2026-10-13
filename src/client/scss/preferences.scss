@@ -157,10 +157,14 @@ $gray-500: var(--text-secondary-color);
   // 详见文件头「本面不再补 dialog 的基底配方」。
   //
   // ⚠️ **不要**在这里写布局宿主规则:`.gw-prefs` 只是**作用域根**,它里面还有一层
-  // `#preferences`(见 `host-settings-card.tsx` 的注释 —— 上游 `_preferences.scss`
+  // `#preferences`(见 `preferences-dialog.tsx` 的注释 —— 上游 `_preferences.scss`
   // 整份以 `#preferences` 为根,那 40 条三段选择器要求它是作用域根的**后代**)。
-  // 卡片的三层布局(页签 / 页面 / 配置表单)因此挂在 `#preferences` 那一层上,
-  // 见下面 `.gw-prefs-preferences`。
+  // 三层布局(页签 / 页面 / 页脚)因此挂在 `#preferences` 那一层上,由
+  // `styles.ts` 的 `.gw-prefs-body` 承担。
+  //
+  // ⚠️ 2026-10-13 起**只有模态**落在这个作用域根下:宿主插件页的那一页设置已经改成
+  // DSH 宿主风格(`src/client/settings-page.tsx` + `styles.ts` 的 `.gw-settings*`),
+  // 不再渲染任何 `.gw-prefs` 子树。
   //
 
   /*
@@ -295,94 +299,6 @@ $gray-500: var(--text-secondary-color);
    */
   .advanced-section:has(#switch-branch-heading) { display: none !important; }
 
-  //
-  // ---------- 卡片形态:三个页面的横向页签 + 面板 ----------
-  //
-  // ⚠️ 2026-10 新增。它们**只**服务宿主设置里的那张卡片
-  // (`src/client/host-settings-card.tsx`):弹窗那一侧用的是上游**竖向** `TabBar`,
-  // 而卡片用的是宿主原语 `SegmentedTabs`(裁决:不要再手写一套页签控件)。
-  //
-  // 为什么必须写在这里而不是 `styles.ts`:这两个类名的作用域根就是 `.gw-prefs`,
-  // 而 `scripts/styles.mjs` 的 `findLeakedRules` 只允许注册过的顶层作用域根出现
-  // ⇒ 写进产物是**唯一**合法落点(同 `scss/pop-width.scss` 那条 `.gw-pop`)。
-  //
-  // 为什么不必给 `SegmentedTabs` 的 CSS Module 类名兜底:宿主自己的样式表
-  // (`dsh-web-frontend` 的 `index-*.css`)里已经有那三个哈希类
-  // (`.tabs` / `.indicator` / `.tab` 各自一行,见 `SegmentedTabs.module.css`),
-  // 而我们的用法是**同一个包、同一个类名的原生用法**(不覆盖、不换皮)。
-  //
-  //
-  // 卡片那层 `#preferences`(上游 `<dialog id="preferences">` 的角色)。它是页签 /
-  // 页面 / 配置表单三层的**直接父节点**,所以竖向 flex 挂在这里:
-  // `.gw-prefs` 自己只做作用域根与「Underline links」的落点,不再兼布局。
-  //
-  // ⚠️ 弹窗那一侧**没有**这个类(它用的是 `host-modal.tsx` 的 `.gw-prefs-body`),
-  // 所以这条规则不会影响它 —— 两边的布局各自独立,这正是把宿主卡片与自建模态的
-  // 样式分开的既有做法(`styles.ts` 的 `.gw-prefs-card` / `.gw-prefs-body`)。
-  .gw-prefs-preferences {
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    /*
-     * 卡片高度由宿主设置面板决定,而我们**不能**假设它无限高:
-     * `max-height` 交给外层(宿主 `PluginsSettingsSection` 的 `.panel` 与设置弹窗
-     * 自己的滚动容器),这里只需要「中间那层可滚、上下两层不缩」。
-     */
-    flex: 1 1 auto;
-  }
-
-  .gw-prefs-tabs {
-    /*
-     * 32px ≈ 宿主给它的 34px,减掉本插件竖向节奏里的那 2px。
-     * 这一条是**布局覆盖**(不是上游配方):卡片里页签与内容区上下相接,
-     * 少这 2px 会让页签与第一行文字挤在一起。
-     */
-    --gw-prefs-tab-height: 32px;
-
-    flex: none;
-  }
-  .gw-prefs-tabs .tab {
-    height: var(--gw-prefs-tab-height);
-    padding: 0 var(--spacing);
-    border-radius: var(--border-radius);
-    font-family: var(--font-family-sans-serif);
-    font-size: var(--font-size);
-  }
-  .gw-prefs-tabs .indicator {
-    border-radius: var(--border-radius);
-  }
-
-  /*
-   * 页面本体。`tab-container` 这个类**不是**装饰:上游
-   * `ui/_preferences.scss:17` 的 `.preferences-container .tab-container` 给它
-   * `border-left` + `flex:1` + `min-width:0`,而我们是它的**后代**(作用域根在更外层),
-   * 所以那条规则照旧生效 —— 卡片里那句 `border-left` 正好把页签区与内容区分开。
-   */
-  .gw-prefs-page {
-    flex: 1 1 auto;
-    min-width: 0;
-    min-height: 0;
-    overflow-y: auto;
-    padding: var(--spacing) 0 0 var(--spacing);
-  }
-
-  /*
-   * 已有的宿主配置表单(`SettingsForm` 那一块)。它是**宿主配置文档**的一段,
-   * 与三个「当场生效」的页面不是同一类东西 ⇒ 视觉上也要分开(一条分隔线 + 间距)。
-   */
-  .gw-prefs-host-config {
-    flex: none;
-    margin-top: var(--spacing);
-    padding-top: var(--spacing);
-    border-top: var(--base-border);
-
-    > h3 {
-      margin: 0;
-      font-size: var(--font-size);
-      font-weight: var(--font-weight-semibold);
-      color: var(--text-secondary-color);
-    }
-  }
 
   /*
    * 7. 设备码登录面板(`preferences-dialog.tsx` 的 `DeviceFlowPanel`)—— **我们新增的 UI**,
@@ -421,7 +337,7 @@ $gray-500: var(--text-secondary-color);
   // 上游 `ui/_dialog.scss:241-289`(顶层是 `dialog`,见文件末尾「刻意不 import」那段)。
   // **唯一改动**:把祖先从 `dialog` 收敛到 `#preferences` —— 因为上游那条 min-height
   // 就是按 `#preferences` 限定的(`:413-418` 的 `&#preferences`),而两个渲染面
-  // (模态 `host-modal.tsx:166`、宿主卡片 `host-settings-card.tsx:158`)**都有**
+  // (`host-modal.tsx` 与 `styles.ts` 的 `.gw-prefs-body`)**都有**
   // `.gw-prefs > #preferences` 两层 ⇒ 正好覆盖这两处,不多不少。
   //
   // 改前实测(`preferences-geometry-probe.mjs` 的 `layoutAudit`):`.dialog-content` 的
@@ -489,8 +405,8 @@ $gray-500: var(--text-secondary-color);
   // ## 为什么落点是 `.gw-prefs-body` 而不是上游的 `.dialog-content`(搬移后仍然成立)
   //
   // 1. **只作用于弹窗**:`gw-prefs-body` 这个类**只有**模态那一层有
-  //    (`host-modal.tsx:166`);宿主卡片那一层是 `gw-prefs-preferences`
-  //    (`host-settings-card.tsx:158`),高度由宿主设置面板自己决定 ⇒ 不碰卡片。
+  //    (`host-modal.tsx:166`)。宿主插件页那一页设置走的是另一套类
+  //    (`.gw-settings`,在 `styles.ts` 里),两边互不影响。
   // 2. **必须写在外层**:我们的「对话框」角色由 `.gw-prefs-body` 扮演,而
   //    `.tab-container` 是它下面那个 `overflow-y:auto` 的滚动容器;把 min-height 写在内层
   //    内容上,只会让它在矮框里滚,窗口本身不会长高。
