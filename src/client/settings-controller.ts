@@ -18,7 +18,11 @@
  * (`./settings-page.tsx`)。⇒ 本控制器随之瘦身:它**不再**提供仓库清单 / 登录态那份
  * 数据面(`pages` / `hooks.dshGitSnapshot` / `bootstrapCardStore` 全部删除)——
  * 那些数据今天只有弹窗(账号页 / Git 页)在读,而弹窗自己拿 store。
- * {@link cardAuthOf} 留着,因为它是**两个外壳共用的那个收窄点**(`workbench.tsx` 也在用)。
+ *
+ * ⚠️ 2026-10-13 同日改名:`host-settings-card.ts` → **`settings-controller.ts`**
+ * (那一页已经不是「card」),符号里的 `Card` 一并去掉;原先住在这里的
+ * 「宿主 `auth/state` → 外壳登录态形状」那个收窄点搬到了消费方一侧
+ * (`preferences-pages.tsx` 的 `hostAuthOf()`,与 `PreferencesAuth` 同一文件)。
  *
  * ## 三条不许越的线(上游 `packages/client/AGENTS.md` 与客户端纯度闸门)
  *
@@ -28,7 +32,7 @@
  * 3. **业务组件不自己造订阅**:`SettingsFormModel.bind()` 产出的裸快照走 slot 的
  *    `hooks` 隔间,由渲染层绑成 `useDshGitSettings` —— 组件里没有 `useSyncExternalStore`。
  *
- * @module dsh-git/client/host-settings-card
+ * @module dsh-git/client/settings-controller
  */
 
 import {
@@ -37,7 +41,6 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives';
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store';
 import type { Translate } from './i18n.ts';
-import type { AuthStatePayload } from './api.ts';
 import { fontScaleStore, setFontScale, type IPreferenceSource } from './prefs-bus.ts';
 
 /**
@@ -96,23 +99,9 @@ export interface IDshGitSettings {
 }
 
 /** 这一页渲染的宿主表单状态。 */
-export interface IDshGitCardState extends SettingsFormShell {
+export interface IDshGitSettingsState extends SettingsFormShell {
   /** Pulls 自动刷新周期(秒)。 */
   readonly autoSec: SettingsFieldState;
-}
-
-/**
- * 「谁登录了」的最小形状。
- *
- * ⚠️ 2026-10-13 起**设置页不再渲染账号**,但这份形状仍然是**两个外壳共用的那个收窄点**:
- * `preferences-dialog.tsx`(弹窗的账号页)与 `workbench.tsx` 都经 {@link cardAuthOf} 拿它。
- * 与 `preferences-pages.tsx` 的 `PreferencesAuth` 结构兼容(多了可缺省的 `endpoint`)。
- */
-export interface IDshGitCardAuth {
-  readonly login: string;
-  readonly tokenTail: string;
-  /** 该账号的 GitHub API 基址;缺省 = 未知(老 host / 静态回退面)。 */
-  readonly endpoint?: string;
 }
 
 /**
@@ -121,9 +110,9 @@ export interface IDshGitCardAuth {
  * 为什么非要具名:带泛型的**函数类型签名**写在 `.tsx` 里会被
  * `scripts/build.mjs` 的 `checkJsxIdentifiers` 当成一个 JSX 标签(它的判据是
  * 「`<` 前面不是标识符字符」),于是构建失败。`.ts` 里的类型签名不受那条扫描影响
- * (它只扫 `.tsx`),所以这种签名一律住在 `.ts`(`DshGitCardProps` 头注释记的是同一条)。
+ * (它只扫 `.tsx`),所以这种签名一律住在 `.ts`(`DshGitSettingsProps` 头注释记的是同一条)。
  */
-export type DshGitCardSelector = <S>(selector: (state: IDshGitCardState) => S) => S;
+export type DshGitSettingsSelector = <S>(selector: (state: IDshGitSettingsState) => S) => S;
 
 /**
  * `hooks.fontScaleValue` 由渲染层绑成的选择器钩子。
@@ -136,7 +125,7 @@ export type DshGitCardSelector = <S>(selector: (state: IDshGitCardState) => S) =
 export type DshGitFontScaleSelector = <S>(selector: (value: number) => S) => S;
 
 /** 席位注入给设置页的那一面(宿主表单动作 + 偏好写动作 + 文案)。 */
-export interface IDshGitCardFace extends SettingsFormActions {
+export interface IDshGitSettingsFace extends SettingsFormActions {
   /**
    * **本插件的文案函数**(命名空间 `dsh-git`,见 `./i18n.ts` 的 {@link Translate})。
    *
@@ -167,7 +156,7 @@ export interface IDshGitCardFace extends SettingsFormActions {
   readonly onPreferencesChanged: () => void;
   readonly hooks: {
     /** 渲染层绑成 `useDshGitSettings` 的宿主表单快照。 */
-    readonly dshGitSettings: SnapshotStore<IDshGitCardState>;
+    readonly dshGitSettings: SnapshotStore<IDshGitSettingsState>;
     /**
      * 渲染层绑成 `useFontScaleValue` 的字号 observable。
      *
@@ -186,7 +175,7 @@ export interface IDshGitCardFace extends SettingsFormActions {
  * `<S>(selector) => S` 在 `.tsx` 里会被 `scripts/build.mjs` 的 `checkJsxIdentifiers`
  * 当成一个 JSX 标签 `<S>`,于是构建失败。
  */
-export type DshGitCardProps = IDshGitCardFace & {
+export type DshGitSettingsProps = IDshGitSettingsFace & {
   /**
    * 页面要的是哪一种视图。
    *
@@ -195,26 +184,26 @@ export type DshGitCardProps = IDshGitCardFace & {
    */
   readonly view?: 'summary' | 'page';
   /** `hooks.dshGitSettings` 由渲染层绑成的选择器钩子。 */
-  readonly useDshGitSettings: DshGitCardSelector;
+  readonly useDshGitSettings: DshGitSettingsSelector;
   /** `hooks.fontScaleValue` 由渲染层绑成的选择器钩子。 */
   readonly useFontScaleValue: DshGitFontScaleSelector;
 };
 
 /** 把 `dsh-git` 命名空间的那块表单桥到本页面的暂存表单上。 */
-export class DshGitSettingsCardController {
+export class DshGitSettingsController {
   private readonly form: SettingsFormModel<IDshGitSettings>;
-  private readonly store: SnapshotStore<IDshGitCardState>;
+  private readonly store: SnapshotStore<IDshGitSettingsState>;
   /** 设置页那一侧的「偏好变了」;缺省时为 `undefined`(见构造函数)。 */
   private readonly onPreferencesChanged: (() => void) | undefined;
   /** 文案函数(命名空间 `dsh-git`)。 */
   private readonly t: Translate;
   /** 注入面的**唯一**实例(`inject()` 的返回值;见那里的注释)。 */
-  private face: IDshGitCardFace | undefined;
+  private face: IDshGitSettingsFace | undefined;
 
   /**
    * @param scope - `dsh-git` 命名空间绑定的设置表单面。
    * @param onPreferencesChanged - 设置页那一侧的「偏好变了」回调。
-   * @param t - 文案函数(命名空间 `dsh-git`);见 {@link IDshGitCardFace.t}。
+   * @param t - 文案函数(命名空间 `dsh-git`);见 {@link IDshGitSettingsFace.t}。
    */
   public constructor(
     scope: SettingsFormScope<IDshGitSettings>,
@@ -227,7 +216,7 @@ export class DshGitSettingsCardController {
     this.t = t;
   }
 
-  private projection(): IDshGitCardState {
+  private projection(): IDshGitSettingsState {
     return { ...this.form.shell(), autoSec: this.form.field('autoSec') };
   }
 
@@ -241,7 +230,7 @@ export class DshGitSettingsCardController {
    *
    * @returns 宿主表单快照、字号的 observable 与写动作。
    */
-  public inject(): IDshGitCardFace {
+  public inject(): IDshGitSettingsFace {
     if (this.face !== undefined) {
       return this.face;
     }
@@ -265,27 +254,3 @@ export class DshGitSettingsCardController {
   public dispose(): void { this.form.dispose(); }
 }
 
-/**
- * 把宿主 `auth/state` 的原始登录态**收窄**成弹窗账号页要的那一份。
- *
- * ⚠️ **必须判 `signedIn`**:`auth/state` 在未登录时也回一个**对象**
- * (`{signedIn:false, login:'', tokenTail:'', …}`,`src/host/auth.ts:263-280`),
- * 所以「`auth !== null`」**不等于**「登录了」。只看后者会让账号页渲染出一个
- * 登录名为空串的假账号(`accountsWithEmails` 无条件造 `Account`;
- * `src/client/preferences-pages.tsx:1143` 只判 `identity === null`)。
- *
- * ⚠️ **2026-11:弹窗那一半也改走本函数**(`workbench.tsx` 的 `auth={cardAuthOf(snap.auth)}`)。
- * 在那之前模态是手写等价物、且**漏了这条判定** ⇒ 登出(或令牌失效)后,弹窗里的账号页
- * 会渲染出上面说的那张假账号卡。顺带:端点面板「已登录时默认收起」也依赖这个 `null`,
- * 所以它不只是显示问题。
- * @param raw - 宿主登录态;`null` = 还没读到。
- * @returns 已登录时给外壳要的形状,否则 `null`。
- */
-export function cardAuthOf(raw: AuthStatePayload | null): IDshGitCardAuth | null {
-  if (raw === null || !raw.signedIn) {
-    return null;
-  }
-  return raw.endpoint === undefined
-    ? { login: raw.login, tokenTail: raw.tokenTail }
-    : { login: raw.login, tokenTail: raw.tokenTail, endpoint: raw.endpoint };
-}

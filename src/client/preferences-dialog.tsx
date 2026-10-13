@@ -279,7 +279,7 @@ export interface IPreferencesDialogProps {
    *
    * ⚠️ 宿主设置卡片那一侧的**语义等价物**在 `./prefs-bus.ts` 的
    * `bumpPreferencesRevision()`(那边没有 workbench 的 revision state 可加,
-   * 卡片与 `WorkbenchApp` 是两棵树)。见 `./host-settings-card.ts` 的 `onPreferencesChanged`。
+   * 卡片与 `WorkbenchApp` 是两棵树)。见 `./settings-controller.ts` 的 `onPreferencesChanged`。
    */
   readonly onPreferencesChanged: () => void;
   /**

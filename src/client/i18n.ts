@@ -11,7 +11,7 @@
 /**
  * 本插件的**文案命名空间**(`ctx.locale.register` / `bind` 的那个 `ns`)。
  *
- * ⚠️ 它与 `host-settings-card.ts` 的 `DSH_GIT_NS` **取值相同、含义不同**:那一个是宿主
+ * ⚠️ 它与 `settings-controller.ts` 的 `DSH_GIT_NS` **取值相同、含义不同**:那一个是宿主
  * Loader 条目的 `options.id`(设置文档的命名空间 / `cordis.patch.yml` 的行 id),
  * 这一个是语言服务的命名空间。两者恰好都叫 `dsh-git`,但分别注册在**两个不同的服务**里。
  */

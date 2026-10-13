@@ -46,7 +46,7 @@
  * ⚠️ `getSnapshot` 必须**返回同一个引用直到值真的变**(`useSyncExternalStore`
  * 的硬要求,否则无限重渲染)。两个值都是原始值,`Object.is` 天然满足。
  *
- * @see src/client/host-settings-card.ts —— 把这两个 observable 放进 `hooks` 隔间的地方
+ * @see src/client/settings-controller.ts —— 把这两个 observable 放进 `hooks` 隔间的地方
  * @module dsh-git/client/prefs-bus
  */
 

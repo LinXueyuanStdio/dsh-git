@@ -26,9 +26,9 @@ import { FrameToasts, registerToastSource } from './bits.tsx';
 import { ErrorBoundary } from './error-boundary.tsx';
 import { GitStore } from './store.ts';
 import {
-  DSH_GIT_NS, DshGitSettingsCardController,
+  DSH_GIT_NS, DshGitSettingsController,
   type IConfigFormsLike, type IDshGitSettings,
-} from './host-settings-card.ts';
+} from './settings-controller.ts';
 import { bumpPreferencesRevision } from './prefs-bus.ts';
 import { bindAutoRefreshFromHost, type IHostSettingsSlice } from './host-settings.ts';
 import { DshGitSettingsPage } from './settings-page.tsx';
@@ -491,7 +491,7 @@ function registerHostSettingsCard(ctx: ClientCtx, t: Translate): void {
          * 账号与 Git 身份仍在齿轮打开的偏好弹窗里,而弹窗自己拿 store。
          * ⇒ `storeFor('')` / `bootstrapCardStore` / `pages` 三样一起从这条链路上消失。
          */
-        const card = new DshGitSettingsCardController(
+        const card = new DshGitSettingsController(
           configForms.get<IDshGitSettings>(DSH_GIT_NS),
           bumpPreferencesRevision,
           t,

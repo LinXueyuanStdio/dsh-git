@@ -39,7 +39,7 @@ import { useCallback, useId, useState } from 'react';
 import type { ReactNode } from 'react';
 import { SettingsForm, SettingsValueField, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
 import type { SettingsFormLabels } from '@deepseek-ai/dsh-client-ui-primitives';
-import type { DshGitCardProps } from './host-settings-card.ts';
+import type { DshGitSettingsProps } from './settings-controller.ts';
 import { useAccessibilityWiring, usePromptsWiring } from './preferences-pages.tsx';
 import { FONT_SCALE_DEFAULT, FONT_SCALE_MAX } from './prefs-bus.ts';
 import { setNotificationsEnabled, useNotificationsEnabled } from './notify.ts';
@@ -49,7 +49,7 @@ import { setNotificationsEnabled, useNotificationsEnabled } from './notify.ts';
  * @param t - 命名空间 `dsh-git` 的翻译函数。
  * @returns 宿主 `SettingsFormLabels`。
  */
-function formLabels(t: DshGitCardProps['t']): SettingsFormLabels {
+function formLabels(t: DshGitSettingsProps['t']): SettingsFormLabels {
   return {
     unavailable: t('settings.form.unavailable'),
     readOnly: t('settings.form.readOnly'),
@@ -198,7 +198,7 @@ function Group(props: { readonly id: string; readonly title: string; readonly ch
  * @param props - 卡片注入面(`t` / 宿主表单状态与写动作 / 偏好写回调)。
  * @returns 设置页。
  */
-export function DshGitSettingsPage(props: DshGitCardProps): ReactNode {
+export function DshGitSettingsPage(props: DshGitSettingsProps): ReactNode {
   const { t } = props;
   const state = props.useDshGitSettings((snapshot) => snapshot);
   /**

@@ -3,7 +3,7 @@
  *
  * ## 为什么需要这个文件
  *
- * 设置卡片(`./host-settings-card.ts`)自己读写表单;但同一个值还有**别的消费方** ——
+ * 设置页(`./settings-controller.ts` + `./settings-page.tsx`)自己读写表单;但同一个值还有**别的消费方** ——
  * `src/client/pulls-view.tsx` 的自动刷新定时器要拿到 `autoSec`。而组件**不碰 ctx**
  * (上游 `packages/client/AGENTS.md` 的 ctx 纪律),`ctx` 只在 `apply` 世界里;
  * 把值一路当 prop 传下去要经过 `workbench.tsx`(另一条线持有),不做。
@@ -25,7 +25,7 @@
  * 3. **宿主没服务该命名空间(或首次 describe 还没到)时回落到 `0` = 关闭**
  *    —— 与 schema 默认值(`default(0)`)一致,于是**升级时没有人会突然开始轮询**。
  *
- * @see src/client/host-settings-card.ts —— 同一命名空间的卡片(读写那一侧)
+ * @see src/client/settings-controller.ts —— 同一命名空间的设置表单(读写那一侧)
  * @module dsh-git/client/host-settings
  */
 

@@ -103,11 +103,11 @@ import { UICtx, type ConfirmOptions } from './gh.ts';
 import * as ghApi from './gh-api.ts';
 import { parseRepoInput } from '../core/lib.ts';
 /*
- * `cardAuthOf` —— 「宿主 `auth/state` → 两个外壳共用的登录态形状」的**唯一**收窄点。
- * 卡片那一半一直用它(`host-settings-card.ts:433`),弹窗这一半在 2026-11 之前是
+ * `hostAuthOf` —— 「宿主 `auth/state` → 两个外壳共用的登录态形状」的**唯一**收窄点。
+ * 弹窗那一半一直用它(`hostAuthOf()` 的 JSDoc 记着这条来源),弹窗这一半在 2026-11 之前是
  * 手写等价物、且漏了 `signedIn` 判定(见下面 `auth={…}` 上方那段注释)。
  */
-import { cardAuthOf } from './host-settings-card.ts';
+import { hostAuthOf } from './preferences-pages.tsx';
 import type { RepoEntry } from '../core/types.ts';
 
 export interface WorkbenchAppProps {
@@ -773,14 +773,14 @@ export function WorkbenchApp(props: WorkbenchAppProps): ReactNode {
              * 可能不一致**(`account-emails.tsx` 的 `IAuthIdentity.endpoint` 文件头
              * 把这条点名记了很久)。
              *
-             * ⚠️ **2026-11 起改用 `cardAuthOf()`**:`auth/state` 在**未登录时也回一个对象**
+             * ⚠️ **2026-11 起改用 `hostAuthOf()`**:`auth/state` 在**未登录时也回一个对象**
              * (`{signedIn:false, login:'', …}`,`src/host/auth.ts`),所以这里原来的
              * 「`snap.auth === null` 才算未登录」是**错的** —— 登出(或令牌失效)之后,
              * 弹窗里照样会构造出一份 `login: ''` 的"登录态",账号页随之渲染一张
-             * **登录名为空串的假账号卡**。判据与消费侧写在同一处:`cardAuthOf()` 的 JSDoc
+             * **登录名为空串的假账号卡**。判据与消费侧写在同一处:`hostAuthOf()` 的 JSDoc
              * (卡片那一半早就走它,只有弹窗这条路径漏了)。
              */
-            auth={cardAuthOf(snap.auth)}
+            auth={hostAuthOf(snap.auth)}
             store={store}
             fontScale={fontScale}
             /* 直接给总线那个写入口(`prefs-bus.ts:99` 的 `setFontScale`):弹窗与卡片

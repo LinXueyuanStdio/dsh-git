@@ -398,6 +398,34 @@ export interface IPreferencesSnapshot {
   readonly repos: ReadonlyArray<IPreferencesRepoEntry>;
 }
 
+/**
+ * 把宿主 `auth/state` 的原始登录态**收窄**成 {@link PreferencesAuth}。
+ *
+ * ⚠️ **必须判 `signedIn`**:`auth/state` 在未登录时也回一个**对象**
+ * (`{signedIn:false, login:'', tokenTail:'', …}`,`src/host/auth.ts:263-280`),
+ * 所以「`auth !== null`」**不等于**「登录了」。只看后者会让账号页渲染出一个
+ * 登录名为空串的假账号(`accountsWithEmails` 无条件造 `Account`;
+ * `identity === null` 才是这一页认的「未登录」)。
+ *
+ * 2026-11 之前 `workbench.tsx` 手写了一份等价物、且**漏了这条判定** ⇒ 登出
+ * (或令牌失效)后弹窗里的账号页会渲染出上面说的那张假账号卡。现在两处都走这一个函数。
+ *
+ * ⚠️ 2026-10-13 从 `host-settings-card.ts` 搬到这里(那个文件同日改名成
+ * `settings-controller.ts`,只服务宿主插件页那一页设置):这个收窄点的消费方是
+ * **弹窗**(`workbench.tsx` 的 `auth={hostAuthOf(snap.auth)}`),所以它跟
+ * {@link PreferencesAuth} 住在一起 —— 一个概念一个文件。
+ * @param raw - 宿主登录态;`null` = 还没读到。
+ * @returns 已登录时给外壳要的形状,否则 `null`。
+ */
+export function hostAuthOf(raw: AuthStatePayload | null): PreferencesAuth {
+  if (raw === null || !raw.signedIn) {
+    return null;
+  }
+  return raw.endpoint === undefined
+    ? { login: raw.login, tokenTail: raw.tokenTail }
+    : { login: raw.login, tokenTail: raw.tokenTail, endpoint: raw.endpoint };
+}
+
 /** 登录态(账号页)。`null` = 未登录。 */
 export type PreferencesAuth =
   | {
