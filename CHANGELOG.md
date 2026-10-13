@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-13
+
 ### 变更
 
 - **插件设置换了入口:从「设置 ▸ 内置插件」的页签搬到「插件」页 ▸ `@linxueyuan/dsh-git` 详情页的配置区。**
@@ -178,7 +180,8 @@
 - 远端页签以 GitHub 为准；本地**未推送**的提交在 Code 树里看不到对应文件。
 - 暂存是**文件级**的（M1），没有 hunk 级暂存。
 
-[Unreleased]: https://github.com/LinXueyuanStdio/dsh-git/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/LinXueyuanStdio/dsh-git/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/LinXueyuanStdio/dsh-git/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/LinXueyuanStdio/dsh-git/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/LinXueyuanStdio/dsh-git/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/LinXueyuanStdio/dsh-git/releases/tag/v1.0.0
