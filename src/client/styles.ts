@@ -1430,8 +1430,10 @@ html[data-gw-toast-clamp] body > div[role="alert"]:has(> span > .gw-toast-mark){
 /* 警告提示行(账号邮箱读失败 / GitHub App 未安装)。 */
 .gw-plugin-settings-warn{margin:4px 0;font-size:12px;line-height:1.6;color:var(--dsw-alias-state-warn-primary)}
 .gw-plugin-settings-warn a{color:inherit;text-decoration:underline}
-/* 身份行里的两个按钮:同一行、不换行。 */
-.gw-plugin-settings-actions{display:flex;align-items:center;gap:8px;flex:none}
+/* 身份行里的两个按钮:同一行、不换行。
+ * ⚠️ 间距用 12px 而不是行内那个 8px —— 两个**胶囊按钮**并排时 8px 看起来是贴在一起的
+ * (2026-10-13 用户反馈「两个按钮之间要有间距」)。 */
+.gw-plugin-settings-actions{display:flex;align-items:center;gap:12px;flex:none;margin-left:4px}
 /* 枚举行:胶囊下拉(dsh-context 的 .lc-settings-select 同形)。 */
 .gw-plugin-settings-select{height:36px;padding:0 14px;border:none;border-radius:18px;background:var(--dsw-alias-bg-module-platform);
   color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;line-height:22px;cursor:pointer}
