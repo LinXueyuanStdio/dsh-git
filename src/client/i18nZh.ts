@@ -28,7 +28,6 @@ export const DICT_ZH = {
   'settings.group.diff': 'Diff 与无障碍',
   'settings.group.notifications': '通知',
   'settings.group.prompts': '提示与确认',
-  'settings.group.hostConfig': '插件配置(宿主设置文档)',
 
   /* ---------- 设置页:通用 ---------- */
   'settings.fontScale': '界面缩放',
@@ -58,13 +57,7 @@ export const DICT_ZH = {
   'settings.autoSec.invalid': '请填 0–600 之间的整数(秒)。',
 
   /* ---------- 设置页:宿主配置表单的外壳文案(宿主 `SettingsFormLabels`) ---------- */
-  'settings.form.unavailable': '宿主没有把 dsh-git 的设置暴露给这个页面,这里没有可编辑的内容。',
-  'settings.form.readOnly': '当前配置文档只读,保存不会生效。',
   'settings.form.saveFailed': '宿主没有接受这次保存,暂存的内容还在。',
-  'settings.form.save': '保存',
-  'settings.form.saving': '保存中…',
-  'settings.form.overridden': '已覆盖',
-  'settings.form.reset': '恢复默认',
 
   /* ---------- 设置页:账号 ---------- */
   'settings.group.account': '账号',
@@ -115,10 +108,14 @@ export const DICT_ZH = {
   'settings.notifications.test.action': '发送',
   'settings.notifications.sent': '本次会话已发出 {n} 条。',
   'settings.account.signInAction': '登录',
-  'settings.account.patToggle': '令牌登录',
-  'settings.account.patToggle.hint': '企业实例用访问令牌登录(设备码只支持 github.com)。',
   'settings.account.patShow': 'PAT 令牌登录',
   'settings.account.patHide': '收起令牌登录',
+  'settings.account.enterprise': 'GitHub Enterprise',
+  'settings.account.enterprise.hint': '如果你在工作中使用 GitHub Enterprise,登录它以访问你的仓库。',
+  'settings.account.emailsFailed': '读取账号邮箱失败:{message}',
+  'settings.account.appNotInstalled': '⚠️ 这个 GitHub App 还没有安装到你的账号 —— 仓库里的功能(Code / Issues / Pull Requests / Actions,以及推送)会报「Resource not accessible by integration」。GitHub App 的「授权」与「安装」是两件事,两步都要做:',
+  'settings.account.appInstall': '去安装页把它装到对应账号(记得把要用的仓库选进安装范围):',
+  'settings.account.appInstallNoUrl': '到 GitHub 上这个 App 的页面点 Install 即可。',
 } satisfies Record<string, string>;
 
 /** 本插件每一种语言都必须**完整**带上的键集(从 {@link DICT_ZH} 推导)。 */

@@ -16,6 +16,23 @@
  * 的可见性,以及 `onEnterpriseSignIn` 在非 github.com 上「不开设备码、改为展开令牌表单并
  * 说明原因」那条裁决,**都没有**。现在全部走共用状态机 ⇒ 两边行为逐条相同。
  *
+ * ## 信息面与弹窗那一页对齐(2026-10-13 用户反馈「还是缺了很多东西」)
+ *
+ * 弹窗账号页是**三段**(设备码面板 → 账号清单/两个 CTA → 安装与邮箱提示),本页逐条对齐:
+ *
+ * | 弹窗里的东西 | 本页的对应物 |
+ * |---|---|
+ * | 头像 + 账号名 + `@login` | 身份行(头像 40px + `@login`,已登录时右侧是**两个**按钮) |
+ * | 「退出登录」与「PAT 令牌登录」两个按钮 | 同一行两个按钮(已登录时也在 —— 换账号要用它) |
+ * | GitHub.com 的登录 CTA | 「登录 GitHub.com」行 → `device.start` |
+ * | 「GitHub Enterprise」小节 + 说明 + CTA | 「GitHub Enterprise」行 → `signIn.onEnterpriseSignIn` |
+ * | PAT 表单(端点 + 令牌) | 同一份状态机的表单(默认收起) |
+ * | `AccountNotice`:邮箱读失败 / App 未安装 | {@link WarnNote} 两条(信息与链接同源:`useAccountEmails` / `useAppInstallation`) |
+ *
+ * ⚠️ 两个提示读的是**同一份真源**(`account-emails.tsx` 的钩子),文案也照那两句的意思写;
+ * 但**渲染**是本页自己的宿主风格行,不复用 `AccountNotice`(它是 `.gw-prefs` 作用域里的
+ * 移植面组件 —— 那正是「不能复用别人的 CSS」那条约束)。
+ *
  * ## 登录面的「聪明」之处(与弹窗同一套规则)
  *
  *  - **已登录**:只有一行身份(头像 + `@login` + 非 dot-com 实例的端点),右边「退出登录」。
@@ -31,12 +48,14 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import type { ReactNode } from 'react';
 import { getDotComAPIEndpoint } from '../core/desktop/lib/api.ts';
-import { avatarUrlFor, useEnterpriseSignIn } from './account-emails.tsx';
+import {
+  avatarUrlFor, useAccountEmails, useAppInstallation, useEnterpriseSignIn,
+} from './account-emails.tsx';
 import type { Translate } from './i18n.ts';
 import { hostAuthOf, startDeviceSignIn, useDeviceSignIn } from './preferences-pages.tsx';
 import type { IDshGitSettingsStoreLike } from './settings-controller.ts';
 import {
-  ActionRow, LiveInputRow, NoteRow, SettingsGroup,
+  ActionRow, LiveInputRow, NoteRow, SettingsGroup, WarnNote,
 } from './settings-rows.tsx';
 
 /**
@@ -57,6 +76,17 @@ export function SettingsAccountGroup(props: {
   );
   const auth = hostAuthOf(rawAuth);
   const [loadFailed, setLoadFailed] = useState(false);
+  /**
+   * 账号邮箱与 GitHub App 安装状态 —— 与弹窗那一页**同一对钩子**。
+   *
+   * 只在已登录时发请求(`enabled`;未登录时 host 会回 `not-signed-in`,省掉一次往返)。
+   * 它们的失败/未安装就是用户截图里那句「读取账号邮箱失败:Token 已失效,请重新登录。」——
+   * 2026-10-13 之前设置页**完全没有**这块信息(用户反馈的「缺了很多东西」)。
+   */
+  const emails = useAccountEmails(auth !== null);
+  const installation = useAppInstallation(auth !== null);
+  const reloadEmails = emails.reload;
+  const reloadInstallation = installation.reload;
 
   /* 挂载后拉一次登录态;失败只记一条(不抛、不把整页带走)。 */
   useEffect(() => {
@@ -93,8 +123,11 @@ export function SettingsAccountGroup(props: {
     store.setAuth(state);
     void store.loadRemoteRepos(true);
     store.toast(t('settings.account.signedInAs', { login: state.login }));
+    // 换账号之后邮箱与安装状态都可能不同 ⇒ 两个都重拉(与弹窗的 `onEnterpriseSignedIn` 同四件事)。
+    reloadEmails();
+    reloadInstallation();
     onPreferencesChanged();
-  }, [store, t, onPreferencesChanged]);
+  }, [store, t, reloadEmails, reloadInstallation, onPreferencesChanged]);
   const signIn = useEnterpriseSignIn({ onSignedIn, onDeviceSignIn: device.start });
 
   /**
@@ -115,8 +148,11 @@ export function SettingsAccountGroup(props: {
       } catch {
         setLoadFailed(true);
       }
+      // 登出后邮箱与安装状态也要跟着重读(登出 ⇒ 两个钩子的 `enabled` 变 false,自然清空)。
+      reloadEmails();
+      reloadInstallation();
     })();
-  }, [store]);
+  }, [store, reloadEmails, reloadInstallation]);
 
   /** 设备码那条链路的失败(设备码状态机自己的 `error` 态)。 */
   const deviceFailure = device.state.kind === 'error'
@@ -149,83 +185,125 @@ export function SettingsAccountGroup(props: {
               ? null
               : <span className="gw-plugin-settings-rowhint">{auth.endpoint}</span>}
         </div>
-        {auth === null ? null : (
-          <button type="button" className="gw-plugin-settings-button" onClick={onLogout}>
-            {t('settings.account.signOut')}
+        {/*
+          两个按钮**同一行**(与弹窗那一行的信息量对齐):
+          「退出登录」只在已登录时有;「PAT 令牌登录」**两种状态都在** ——
+          它就是 `patOpen` 的唯一开关,已登录时用来**换账号**(弹窗里那两个按钮也是并排的)。
+        */}
+        <div className="gw-plugin-settings-actions">
+          {auth === null ? null : (
+            <button type="button" className="gw-plugin-settings-button" onClick={onLogout}>
+              {t('settings.account.signOut')}
+            </button>
+          )}
+          <button type="button" className="gw-plugin-settings-button" onClick={signIn.onTogglePat}>
+            {signIn.patOpen
+              ? t('settings.account.patHide')
+              : t('settings.account.patShow')}
           </button>
-        )}
+        </div>
       </div>
 
       {/*
         登录面**只在未登录时出现** —— 这就是「聪明一点」那一条:
         改前已登录也照样摆着端点输入框与令牌输入框,同屏自相矛盾。
+        「登录 GitHub.com」接的是 `device.start`(与弹窗的 `onDotComSignIn` 同一处接线)。
       */}
       {auth === null ? (
+        <ActionRow
+          label={t('settings.account.signIn')}
+          hint={t('settings.account.signIn.hint')}
+          actionLabel={t('settings.account.signInAction')}
+          disabled={device.state.kind === 'starting'}
+          onAction={device.start}
+        />
+      ) : null}
+
+      {/* 设备码进行中:用户码 + 授权链接(与弹窗的设备码面板同一份状态)。 */}
+      {deviceWaiting === null ? null : (
         <>
-          <ActionRow
-            label={t('settings.account.signIn')}
-            hint={t('settings.account.signIn.hint')}
-            actionLabel={t('settings.account.signInAction')}
-            disabled={device.state.kind === 'starting'}
-            onAction={signIn.onEnterpriseSignIn}
+          <NoteRow>
+            {t('settings.account.device.code')}: <b>{deviceWaiting.userCode}</b>
+          </NoteRow>
+          <NoteRow>
+            {t('settings.account.device.hint', { uri: deviceWaiting.verificationUri })}
+          </NoteRow>
+        </>
+      )}
+
+      {/*
+        GitHub Enterprise:弹窗那一页的小节标题 + 说明 + CTA,这里收成**一行**
+        (标题 = 行标签、说明 = 提示、CTA = 右侧按钮)。
+        ⚠️ 接的是 `signIn.onEnterpriseSignIn`(**不是** `device.start`):端点不是
+        github.com 时它会展开令牌表单并说明原因,而 `device.start` 只会静默登 github.com。
+      */}
+      <ActionRow
+        label={t('settings.account.enterprise')}
+        hint={t('settings.account.enterprise.hint')}
+        actionLabel={t('settings.account.enterpriseSignIn')}
+        onAction={signIn.onEnterpriseSignIn}
+      />
+
+      {signIn.patOpen ? (
+        /*
+         * 整块就是一个 `<form>`:提交处理器直接接状态机的 `onSubmit`
+         * (与弹窗的 `PatSignInForm` 同结构 —— 那里也是把块包在 form 里),
+         * 于是「按回车」与「点登录」走同一条路,两个输入框里回车都算提交。
+         */
+        <form className="gw-plugin-settings-form" onSubmit={signIn.onSubmit}>
+          <LiveInputRow
+            id="gw-plugin-settings-account-endpoint"
+            label={t('settings.account.endpoint')}
+            hint={t('settings.account.endpoint.hint')}
+            value={signIn.endpoint}
+            placeholder="github.example.com"
+            disabled={signIn.busy}
+            onChange={signIn.onEndpointInput}
           />
-          {deviceWaiting === null ? null : (
+          <LiveInputRow
+            id="gw-plugin-settings-account-token"
+            label={t('settings.account.token')}
+            hint={t('settings.account.token.hint')}
+            value={signIn.pat}
+            type="password"
+            disabled={signIn.busy}
+            inputRef={signIn.patInputRef}
+            onChange={signIn.onPatInput}
+          />
+          <ActionRow
+            label={t('settings.account.tokenSignIn')}
+            actionLabel={t('settings.account.signInAction')}
+            disabled={signIn.busy}
+            submit={true}
+          />
+        </form>
+      ) : null}
+
+      {/*
+        两条**提示行**(弹窗里由 `AccountNotice` 渲染的那两条),读的是同一对钩子:
+        ① 邮箱读失败(截图上那句就是它);② GitHub App 未安装(带安装链接)。
+        文案按同一意思写,但**渲染**是本页自己的宿主风格行 —— 不复用移植面的
+        `AccountNotice`(那会同时违«不复用别人的 CSS»与探针的阴性判据)。
+      */}
+      {emails.result !== null && emails.result.kind === 'error' ? (
+        <WarnNote alert={true}>
+          {t('settings.account.emailsFailed', { message: emails.result.message })}
+        </WarnNote>
+      ) : null}
+      {installation.status !== null && installation.status.kind === 'not-installed' ? (
+        <WarnNote alert={true}>
+          {t('settings.account.appNotInstalled')}
+          {installation.status.installUrl === '' ? (
+            <> {t('settings.account.appInstallNoUrl')}</>
+          ) : (
             <>
-              <NoteRow>
-                {t('settings.account.device.code')}: <b>{deviceWaiting.userCode}</b>
-              </NoteRow>
-              <NoteRow>
-                {t('settings.account.device.hint', { uri: deviceWaiting.verificationUri })}
-              </NoteRow>
+              {' '}{t('settings.account.appInstall')}{' '}
+              <a href={installation.status.installUrl} target="_blank" rel="noreferrer noopener">
+                {installation.status.installUrl}
+              </a>
             </>
           )}
-          {/*
-            令牌表单**默认收起**:可见性只有 `signIn.patOpen` 一个真源
-            (与弹窗的 `PatSignInAction` 是同一个布尔量 —— 用户点这里,或企业 CTA 顶开它)。
-          */}
-          <ActionRow
-            label={t('settings.account.patToggle')}
-            hint={t('settings.account.patToggle.hint')}
-            actionLabel={signIn.patOpen
-              ? t('settings.account.patHide')
-              : t('settings.account.patShow')}
-            onAction={signIn.onTogglePat}
-          />
-          {signIn.patOpen ? (
-            /*
-             * 整块就是一个 `<form>`:提交处理器直接接状态机的 `onSubmit`
-             * (与弹窗的 `PatSignInForm` 同结构 —— 那里也是把块包在 form 里),
-             * 于是「按回车」与「点登录」走同一条路,两个输入框里回车都算提交。
-             */
-            <form className="gw-plugin-settings-form" onSubmit={signIn.onSubmit}>
-              <LiveInputRow
-                id="gw-plugin-settings-account-endpoint"
-                label={t('settings.account.endpoint')}
-                hint={t('settings.account.endpoint.hint')}
-                value={signIn.endpoint}
-                placeholder="github.example.com"
-                disabled={signIn.busy}
-                onChange={signIn.onEndpointInput}
-              />
-              <LiveInputRow
-                id="gw-plugin-settings-account-token"
-                label={t('settings.account.token')}
-                hint={t('settings.account.token.hint')}
-                value={signIn.pat}
-                type="password"
-                disabled={signIn.busy}
-                inputRef={signIn.patInputRef}
-                onChange={signIn.onPatInput}
-              />
-              <ActionRow
-                label={t('settings.account.tokenSignIn')}
-                actionLabel={t('settings.account.signInAction')}
-                disabled={signIn.busy}
-                submit={true}
-              />
-            </form>
-          ) : null}
-        </>
+        </WarnNote>
       ) : null}
 
       {/* 结果行:端点 + 令牌那条链路自己给的文案与语气(与弹窗同一份)。 */}

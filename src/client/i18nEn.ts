@@ -15,7 +15,6 @@ export const DICT_EN = {
   'settings.group.diff': 'Diff & accessibility',
   'settings.group.notifications': 'Notifications',
   'settings.group.prompts': 'Prompts',
-  'settings.group.hostConfig': 'Plugin configuration (Host settings document)',
 
   /* ---------- settings page: general ---------- */
   'settings.fontScale': 'Interface scale',
@@ -45,13 +44,7 @@ export const DICT_EN = {
   'settings.autoSec.invalid': 'Enter a whole number of seconds between 0 and 600.',
 
   /* ---------- settings page: Host configuration form chrome (Host `SettingsFormLabels`) ---------- */
-  'settings.form.unavailable': 'The Host does not expose dsh-git settings on this page, so there is nothing to edit here.',
-  'settings.form.readOnly': 'The configuration document is read-only; saving has no effect.',
   'settings.form.saveFailed': 'The Host did not accept this save; your draft is still here.',
-  'settings.form.save': 'Save',
-  'settings.form.saving': 'Saving…',
-  'settings.form.overridden': 'Overridden',
-  'settings.form.reset': 'Reset',
 
   /* ---------- settings page: account ---------- */
   'settings.group.account': 'Account',
@@ -102,8 +95,12 @@ export const DICT_EN = {
   'settings.notifications.test.action': 'Send',
   'settings.notifications.sent': '{n} sent this session.',
   'settings.account.signInAction': 'Sign in',
-  'settings.account.patToggle': 'Token sign-in',
-  'settings.account.patToggle.hint': 'Enterprise hosts sign in with a token (the device flow only works on github.com).',
   'settings.account.patShow': 'Sign in with a PAT',
   'settings.account.patHide': 'Hide token form',
+  'settings.account.enterprise': 'GitHub Enterprise',
+  'settings.account.enterprise.hint': 'If your work uses GitHub Enterprise, sign in there to reach its repositories.',
+  'settings.account.emailsFailed': 'Could not read the account emails: {message}',
+  'settings.account.appNotInstalled': '⚠️ This GitHub App is not installed on your account yet — repository features (Code / Issues / Pull Requests / Actions, and pushing) will fail with "Resource not accessible by integration". Authorising a GitHub App and installing it are two separate steps; both are required:',
+  'settings.account.appInstall': 'Install it on the matching account from the install page (pick the repositories it should cover):',
+  'settings.account.appInstallNoUrl': 'Open this App on GitHub and click Install.',
 } satisfies Record<DictKey, string>;

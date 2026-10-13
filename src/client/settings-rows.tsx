@@ -352,6 +352,22 @@ export function NoteRow(props: { readonly children: ReactNode }): ReactNode {
 }
 
 /**
+ * 一行**警告提示**(12px / `--dsw-alias-state-warn-primary`)。
+ *
+ * 与 {@link NoteRow} 的区别是语气:账号邮箱读失败、GitHub App 未安装这类要**用户知道
+ * 且可能要动手**的信息走这一条(dsh-context 的设置卡里 `.lc-settings-warn` 也是这么分的)。
+ * @param props - 内容与是否用 `role="alert"`(默认 `status`)。
+ * @returns 那一行。
+ */
+export function WarnNote(props: { readonly children: ReactNode; readonly alert?: boolean }): ReactNode {
+  return (
+    <p className="gw-plugin-settings-warn" role={props.alert === true ? 'alert' : 'status'}>
+      {props.children}
+    </p>
+  );
+}
+
+/**
  * 一次性的「刚发生」提示:显示 `message` 若干毫秒后自己消失(用于登录失败、
  * 保存失败这类一次性反馈 —— dsh-context 的 `.lc-settings-note` 也这么用)。
  * @param props - 要显示的文案;`null` = 什么都不显示。

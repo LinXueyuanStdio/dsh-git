@@ -1426,7 +1426,12 @@ html[data-gw-toast-clamp] body > div[role="alert"]:has(> span > .gw-toast-mark){
 .gw-plugin-settings-input::placeholder{color:var(--dsw-alias-label-tertiary)}
 .gw-plugin-settings-input[aria-invalid=true]{border-color:var(--dsw-alias-state-error-primary)}
 /* 头像(账号行):与镜像 ui/lib/avatar.tsx 那 28px 的圆同尺寸。 */
-.gw-plugin-settings-avatar{width:28px;height:28px;border-radius:50%;flex:none;background:var(--dsw-alias-bg-module-platform)}
+.gw-plugin-settings-avatar{width:40px;height:40px;border-radius:50%;flex:none;background:var(--dsw-alias-bg-module-platform)}
+/* 警告提示行(账号邮箱读失败 / GitHub App 未安装)。 */
+.gw-plugin-settings-warn{margin:4px 0;font-size:12px;line-height:1.6;color:var(--dsw-alias-state-warn-primary)}
+.gw-plugin-settings-warn a{color:inherit;text-decoration:underline}
+/* 身份行里的两个按钮:同一行、不换行。 */
+.gw-plugin-settings-actions{display:flex;align-items:center;gap:8px;flex:none}
 /* 枚举行:胶囊下拉(dsh-context 的 .lc-settings-select 同形)。 */
 .gw-plugin-settings-select{height:36px;padding:0 14px;border:none;border-radius:18px;background:var(--dsw-alias-bg-module-platform);
   color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;line-height:22px;cursor:pointer}
