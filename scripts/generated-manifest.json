@@ -1,14 +1,14 @@
 {
   "note": "由 node scripts/check-generated.mjs --write-baseline 生成。artifacts 是**规范化构建时间戳之后**的 sha256;inputsDigest 是 src/** 等输入的摘要。",
-  "recordedAt": "2026-10-13T06:34:36.194Z",
-  "inputsDigest": "sha256:ccaa63a41c55bc32df6a0f57a0f69d81fc87a210c660d6937ba19a455a3050cb",
+  "recordedAt": "2026-10-13T06:43:14.620Z",
+  "inputsDigest": "sha256:27497d925a54d0489db585ad7f0054f1fe829a15c34a3c5bbffb4f14776def2b",
   "inputFiles": 979,
   "artifacts": {
     "src/client/desktop-diff-styles.generated.ts": "sha256:c4ab697ae734a1cfdc093bebf56f5a25c40b9028d1be2f11d1611a1878029323",
     "src/client/highlighter-worker.generated.ts": "sha256:5e70ff10e0aa3e51f991186c075747a489f1c51e3be8ec825676b96d5bd00d2f",
     "lib/index.js": "sha256:194d2ef6dc564459be75855d0930bd80a710f7d141e961c81b7b3995f37f63ba",
     "lib/index.js.map": "sha256:b6d59299257ffecbb25641b2d468ab37f3026d6e331f4e9a1366c798bfcefd15",
-    "lib/client.js": "sha256:c2a5006f98e5fcbcf30334c378fd096659a1903fad9b8e1b8e10a7748418dbb4",
-    "lib/client.js.map": "sha256:a2b0190a3bda23131119f0b5cb990ddb889e07843870eeab3b560c72a690fd88"
+    "lib/client.js": "sha256:dc08d49c41054a903980cd4c6c85b7dc785c7485c68feca3c9803b6febadbae9",
+    "lib/client.js.map": "sha256:e562a53e176d590b232328f77b6803a88bef0b0ead0657ba93ba1384f600fcc1"
   }
 }

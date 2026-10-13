@@ -115,6 +115,10 @@ export const DICT_ZH = {
   'settings.notifications.test.action': '发送',
   'settings.notifications.sent': '本次会话已发出 {n} 条。',
   'settings.account.signInAction': '登录',
+  'settings.account.patToggle': '令牌登录',
+  'settings.account.patToggle.hint': '企业实例用访问令牌登录(设备码只支持 github.com)。',
+  'settings.account.patShow': 'PAT 令牌登录',
+  'settings.account.patHide': '收起令牌登录',
 } satisfies Record<string, string>;
 
 /** 本插件每一种语言都必须**完整**带上的键集(从 {@link DICT_ZH} 推导)。 */

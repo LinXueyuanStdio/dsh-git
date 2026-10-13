@@ -121,7 +121,7 @@ export function DshGitSettingsPage(props: DshGitSettingsProps): ReactNode {
   }, []);
 
   return (
-    <div className="gw-settings">
+    <div className="gw-plugin-settings">
       <SettingsGroup id={id('general')} title={t('settings.group.general')}>
         <NumberRow
           id={id('font-scale')}
@@ -152,7 +152,7 @@ export function DshGitSettingsPage(props: DshGitSettingsProps): ReactNode {
           disabled={!state.writable}
           onCommit={onAutoSecCommit}
         />
-        {state.failed ? <p className="gw-settings-gerror" role="status">{t('settings.form.saveFailed')}</p> : null}
+        {state.failed ? <p className="gw-plugin-settings-gerror" role="status">{t('settings.form.saveFailed')}</p> : null}
       </SettingsGroup>
 
       <SettingsAccountGroup t={t} store={store} onPreferencesChanged={onPreferencesChanged} />

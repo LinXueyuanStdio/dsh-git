@@ -1,56 +1,46 @@
 /**
- * 设置页的【账号】分组 —— 登录态 / 退出登录 / 设备码登录 / 令牌(PAT)登录。
+ * 设置页的【账号】分组 —— 登录态 / 退出登录 / 设备码登录 / 令牌登录。
  *
- * ## 契约(由 `settings-page.tsx` 传入)
+ * ## 状态机与偏好弹窗**共用同一份**(不是「长得像」)
  *
- * | prop | 说明 |
- * |---|---|
- * | `t` | 命名空间 `dsh-git` 的文案函数(键见 `i18nZh.ts` 的 `settings.account.*`) |
- * | `store` | 本插件的**全局 store**(`IDshGitSettingsStoreLike`):`subscribe` / `snapshot` / `loadAuth` / `setAuth` / `loadRemoteRepos` / `toast` / `logout` |
- * | `onPreferencesChanged` | 让设置页重渲染 |
+ * 两个状态机都从 `./account-emails.tsx` / `./preferences-pages.tsx` 来,与本仓那条
+ * 「一个概念一个实现」的纪律一致:
  *
- * ⚠️ 登录态**必须从 store 的订阅里读**(不要只在挂载时 `store.snapshot()` 拍一张):
- * 同一条链路上别处也会改它(设备码轮询成功、弹窗里登录)。用
- * `useSyncExternalStore(store.subscribe, () => store.snapshot().auth)` —— 返回的是
- * store 快照里那个**字段**,引用稳定;然后再 `hostAuthOf(raw)` 收窄(每次调用会新建对象,
- * **不能**直接当 `getSnapshot` 的返回值,那会无限重渲染)。
+ * | 状态机 | 管什么 | 弹窗里的用法 | 这里的用法 |
+ * |---|---|---|---|
+ * | `useDeviceSignIn`(`preferences-pages.tsx`) | 设备码的 `idle → starting → waiting → done/error` 与轮询 | 账号页的设备码面板 | 同一份,`device.state` |
+ * | `useEnterpriseSignIn`(`account-emails.tsx`) | 端点文本 / 规范化、令牌表单的展开收起(`patOpen`)、令牌提交、结果行与语气 | `Accounts` 的企业 CTA + `PatSignInAction` / `PatSignInForm` 两个插槽 | 同一份,`signIn.*` |
  *
- * 读不到 auth 时(宿主半没起来 / 还没读过)在挂载后触发一次 `store.loadAuth()`,
- * 并且**兜住失败**(卡片是附加能力,不能因为一次路由失败把整页带走)。
+ * ⚠️ 2026-10-13 用户反馈「状态机没和 preference dialog 保持一致」—— 改前的这一组是**另写**
+ * 的一条简化链:端点与令牌两个输入框**无条件常驻**,而 `patOpen` 那套「默认收起、点了才展开」
+ * 的可见性,以及 `onEnterpriseSignIn` 在非 github.com 上「不开设备码、改为展开令牌表单并
+ * 说明原因」那条裁决,**都没有**。现在全部走共用状态机 ⇒ 两边行为逐条相同。
  *
- * ## 这一组有哪几行(顺序即上屏顺序)
+ * ## 登录面的「聪明」之处(与弹窗同一套规则)
  *
- * | 行 | 什么时候出现 | 动作落点 |
- * |---|---|---|
- * | 当前账号 | 总是 | 只读(已登录 `@login` / 未登录文案) |
- * | 退出登录 | 已登录 | `store.logout()` → `store.loadAuth()` |
- * | 登录 GitHub.com | 未登录 | 设备码状态机(`device.start`) |
- * | 设备码面板 | 状态机 `waiting` | 用户码 + 授权链接提示 |
- * | 企业实例地址 + 登录 GitHub Enterprise | 总是 | `api.setPat(token, endpoint)` |
- * | 个人访问令牌(PAT) + 用令牌登录 | 总是 | 同上 |
- *
- * 设备码那半**借的是弹窗那条链路**(`preferences-pages.tsx` 的 `useDeviceSignIn` /
- * `startDeviceSignIn`),这里不写第二份轮询;PAT 成功后的三件事与弹窗的
- * `onEnterpriseSignedIn`(`preferences-pages.tsx:1068-1074`)对齐。
- *
- * ⚠️ `api.authPat(...)` 在 `./api.ts` 里**不存在**:PAT 登录的真名是
- * `api.setPat(token, endpoint?)`(`api.ts:1262-1263`),本文件按真名调。
+ *  - **已登录**:只有一行身份(头像 + `@login` + 非 dot-com 实例的端点),右边「退出登录」。
+ *    登录表单整块**不出现** —— 改前同屏既有「已登录 @x」又摆着「请输入访问令牌」。
+ *  - **未登录**:一行主操作「登录 GitHub.com」(`onEnterpriseSignIn`:端点是 github.com 时
+ *    走设备码,否则**不静默登 github.com**,改为展开令牌表单并说明原因),
+ *    下面一行「令牌登录」(展开 / 收起),展开后才是端点 + 令牌 + 提交。
+ *  - 设备码进行中:多两行(用户码 + 授权链接提示);失败与结果由各自的提示行说话。
  *
  * @module dsh-git/client/settings-account
  */
 
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import type { ReactNode } from 'react';
-import { api } from './api.ts';
 import { getDotComAPIEndpoint } from '../core/desktop/lib/api.ts';
+import { avatarUrlFor, useEnterpriseSignIn } from './account-emails.tsx';
 import type { Translate } from './i18n.ts';
-import { avatarUrlFor } from './account-emails.tsx';
 import { hostAuthOf, startDeviceSignIn, useDeviceSignIn } from './preferences-pages.tsx';
 import type { IDshGitSettingsStoreLike } from './settings-controller.ts';
-import { ActionRow, FlashNote, NoteRow, SettingsGroup, TextRow } from './settings-rows.tsx';
+import {
+  ActionRow, LiveInputRow, NoteRow, SettingsGroup,
+} from './settings-rows.tsx';
 
 /**
- * 【账号】分组(登录态 / 退出登录 / 设备码 / 企业端点 + PAT)。
+ * 【账号】分组。
  * @param props - 文案、全局 store 与「偏好变了」回调。
  * @returns 那一组。
  */
@@ -67,14 +57,6 @@ export function SettingsAccountGroup(props: {
   );
   const auth = hostAuthOf(rawAuth);
   const [loadFailed, setLoadFailed] = useState(false);
-  /** 一次性的失败回声(设备码 / PAT;`null` = 不上屏)。 */
-  const [failure, setFailure] = useState<string | null>(null);
-  /** 企业实例端点的**原始输入**(规范化由 host 做:`api.ts:1254-1261`)。 */
-  const [endpoint, setEndpoint] = useState('');
-  /** PAT 输入框的内容;提交时才读(`TextRow` 失焦 / 回车才提交)。 */
-  const [token, setToken] = useState('');
-  /** 正在提交 PAT(同时禁掉两个输入与两个按钮,避免重复提交)。 */
-  const [busy, setBusy] = useState(false);
 
   /* 挂载后拉一次登录态;失败只记一条(不抛、不把整页带走)。 */
   useEffect(() => {
@@ -91,15 +73,29 @@ export function SettingsAccountGroup(props: {
     return () => { live = false; };
   }, [store]);
 
-  /*
+  /**
    * 设备码状态机从弹窗那条链路**借来**(`preferences-pages.tsx:623-719`),本页只喂 store。
    *
    * ⚠️ `useDeviceSignIn` 的形参是**窄的** `IDeviceSignInStore`(`setAuth` / `loadRemoteRepos` /
    * `toast`),本页拿到的 store 面正好有这三条 ⇒ 直接传,不需要任何断言。
-   * 那条窄接口是 2026-10-13 为了这一处**从 `IPreferencesStore` 收窄出来**的
-   * (第一版写的是 `store as unknown as IPreferencesStore`,而断言是「类型面在说谎」的开端)。
+   * 那条窄接口是 2026-10-13 为了这一处**从 `IPreferencesStore` 收窄出来**的。
    */
   const device = useDeviceSignIn(store, startDeviceSignIn);
+  /**
+   * 端点 + 令牌状态机(**与弹窗同一个钩子**)。
+   *
+   * `onSignedIn` 里的四件事与弹窗的 `onEnterpriseSignedIn`
+   * (`preferences-pages.tsx:1068-1074`)**逐条同形**:写登录态 → 刷新远端清单 → 轻提示
+   * (文案走字典的 `settings.account.signedInAs`)→ 让本页重渲染。
+   * `onDeviceSignIn` 就是上面那条设备码链路的起点。
+   */
+  const onSignedIn = useCallback((state: { readonly login: string } & Parameters<IDshGitSettingsStoreLike['setAuth']>[0]) => {
+    store.setAuth(state);
+    void store.loadRemoteRepos(true);
+    store.toast(t('settings.account.signedInAs', { login: state.login }));
+    onPreferencesChanged();
+  }, [store, t, onPreferencesChanged]);
+  const signIn = useEnterpriseSignIn({ onSignedIn, onDeviceSignIn: device.start });
 
   /**
    * 退出登录:host 删令牌,然后**重新读**登录态(登录态只有一个真源)。
@@ -122,154 +118,130 @@ export function SettingsAccountGroup(props: {
     })();
   }, [store]);
 
-  /**
-   * PAT 登录 —— **两个按钮共用这一条实现**(企业按钮只是把端点一起带上)。
-   *
-   * 端点为空 ⇒ 传 `undefined`(`api.setPat` 省略 `endpoint` = 沿用当前账号端点,
-   * `api.ts:1259-1260`);非空 ⇒ 原样交给 host 归一化。
-   *
-   * 成功后三件事与 `preferences-pages.tsx` 的 `onEnterpriseSignedIn`(`:1068-1074`)
-   * 逐字同形:`setAuth` → `loadRemoteRepos(true)` → `toast(signedInAs)`;设置页没有
-   * 邮箱 / 安装状态那两个面板,所以第四件换成「让本页重渲染」。
-   */
-  const signInWithToken = useCallback((): void => {
-    void (async () => {
-      const pat = token.trim();
-      if (pat === '') {
-        return;
-      }
-      const target = endpoint.trim();
-      setBusy(true);
-      setFailure(null);
-      try {
-        const result = await api.setPat(pat, target === '' ? undefined : target);
-        if (!result.ok) {
-          setFailure(t('settings.account.signInFailed', { message: result.error.message }));
-          return;
-        }
-        const state = result.value;
-        store.setAuth(state);
-        void store.loadRemoteRepos(true);
-        store.toast(t('settings.account.signedInAs', { login: state.login }));
-        setToken('');
-        onPreferencesChanged();
-      } catch (error) {
-        console.warn(`[dsh-git] 令牌登录失败:${String(error)}`);
-        setFailure(t('settings.account.signInFailed', { message: String(error) }));
-      } finally {
-        setBusy(false);
-      }
-    })();
-  }, [endpoint, onPreferencesChanged, store, t, token]);
-
-  /** 端点输入提交(只在提交时固化,与 `TextRow` 的失焦/回车语义一致)。 */
-  const onEndpointCommit = useCallback((value: string): void => { setEndpoint(value); }, []);
-  /** 令牌输入提交。 */
-  const onTokenCommit = useCallback((value: string): void => { setToken(value); }, []);
-
-  /** 设备码面板只在 `waiting` 有内容(码 + 授权链接;`starting` 一瞬而过)。 */
-  const deviceWaiting = device.state.kind === 'waiting' ? device.state : null;
-  /** 设备码失败态也走同一句 `signInFailed`。 */
+  /** 设备码那条链路的失败(设备码状态机自己的 `error` 态)。 */
   const deviceFailure = device.state.kind === 'error'
     ? t('settings.account.signInFailed', { message: device.state.message })
     : null;
+  /** 设备码进行中(要显示用户码与授权链接)。 */
+  const deviceWaiting = device.state.kind === 'waiting' ? device.state : null;
 
   return (
-    <SettingsGroup id="gw-settings-account" title={t('settings.group.account')}>
+    <SettingsGroup id="gw-plugin-settings-account" title={t('settings.group.account')}>
       {/*
-        只读的身份行:登录态的唯一真源是 store 快照,这一行不带控件。
-
-        ⭐ **头像**(2026-10-13 用户反馈「账户部分缺失了信息,应该有头像的」):
-        地址来自 `avatarUrlFor(login)`(`./account-emails.tsx`),与镜像 `Accounts` 页
-        (`ui/preferences/accounts.tsx:86-101` 的 `Avatar` + `Account.avatarURL`)用的是
-        **同一个函数** —— 两处显示的头像因此必然一致(企业实例尤其)。
+        身份行:登录态的唯一真源是 store 快照。
+        ⭐ 头像(2026-10-13 用户反馈「账户部分缺失了信息,应该有头像的」):地址来自
+        `avatarUrlFor(login)`,与镜像 `Accounts` 页(`ui/preferences/accounts.tsx:86-101`
+        的 `Avatar` + `Account.avatarURL`)用的是**同一个函数** ⇒ 两处头像必然一致。
         `alt=""`:登录名就在旁边,读屏再念一遍图片是噪音。
+        退出登录放在**同一行**的右侧(改前它单独占一行,与身份行之间空一大截)。
       */}
-      <div className="gw-settings-row">
+      <div className="gw-plugin-settings-row">
         {auth === null ? null : (
-          <img className="gw-settings-avatar" src={avatarUrlFor(auth.login)} alt="" />
+          <img className="gw-plugin-settings-avatar" src={avatarUrlFor(auth.login)} alt="" />
         )}
-        <div className="gw-settings-rowtext">
-          <span className="gw-settings-rowlabel">
+        <div className="gw-plugin-settings-rowtext">
+          <span className="gw-plugin-settings-rowlabel">
             {auth === null ? t('settings.account.signedOut') : `@${auth.login}`}
           </span>
-          {/*
-            未登录时说清这一行是什么(不然只剩「未登录」两个字);已登录时只在
-            **非 github.com** 的实例上补一句端点 —— dot-com 那种 `https://api.github.com`
-            对用户没有信息量。
-          */}
           {auth === null
-            ? <span className="gw-settings-rowhint">{t('settings.account.identity')}</span>
+            ? <span className="gw-plugin-settings-rowhint">{t('settings.account.identity')}</span>
             : auth.endpoint === undefined || auth.endpoint === getDotComAPIEndpoint()
               ? null
-              : <span className="gw-settings-rowhint">{auth.endpoint}</span>}
+              : <span className="gw-plugin-settings-rowhint">{auth.endpoint}</span>}
         </div>
+        {auth === null ? null : (
+          <button type="button" className="gw-plugin-settings-button" onClick={onLogout}>
+            {t('settings.account.signOut')}
+          </button>
+        )}
       </div>
 
       {/*
-        「登录 GitHub.com」直接接状态机的 `start`(成员表达式,`react/jsx-no-bind` 放行):
-        它内部就是 `startDeviceSignIn(accept, onError)`(`preferences-pages.tsx:648-658`),
-        所以 `start` → `accept(started)` 这条线不需要在本页重写。
+        登录面**只在未登录时出现** —— 这就是「聪明一点」那一条:
+        改前已登录也照样摆着端点输入框与令牌输入框,同屏自相矛盾。
       */}
       {auth === null ? (
-        <ActionRow
-          label={t('settings.account.signIn')}
-          hint={t('settings.account.signIn.hint')}
-          actionLabel={t('settings.account.signInAction')}
-          onAction={device.start}
-        />
-      ) : (
-        <ActionRow
-          label={t('settings.account.signOut')}
-          actionLabel={t('settings.account.signOut')}
-          onAction={onLogout}
-        />
-      )}
-
-      {deviceWaiting === null ? null : (
         <>
-          <NoteRow>
-            {t('settings.account.device.code')}: <b>{deviceWaiting.userCode}</b>
-          </NoteRow>
-          {/* 提示里带 `{uri}`(授权链接);浏览器弹窗被拦时它就指路。 */}
-          <NoteRow>{t('settings.account.device.hint', { uri: deviceWaiting.verificationUri })}</NoteRow>
+          <ActionRow
+            label={t('settings.account.signIn')}
+            hint={t('settings.account.signIn.hint')}
+            actionLabel={t('settings.account.signInAction')}
+            disabled={device.state.kind === 'starting'}
+            onAction={signIn.onEnterpriseSignIn}
+          />
+          {deviceWaiting === null ? null : (
+            <>
+              <NoteRow>
+                {t('settings.account.device.code')}: <b>{deviceWaiting.userCode}</b>
+              </NoteRow>
+              <NoteRow>
+                {t('settings.account.device.hint', { uri: deviceWaiting.verificationUri })}
+              </NoteRow>
+            </>
+          )}
+          {/*
+            令牌表单**默认收起**:可见性只有 `signIn.patOpen` 一个真源
+            (与弹窗的 `PatSignInAction` 是同一个布尔量 —— 用户点这里,或企业 CTA 顶开它)。
+          */}
+          <ActionRow
+            label={t('settings.account.patToggle')}
+            hint={t('settings.account.patToggle.hint')}
+            actionLabel={signIn.patOpen
+              ? t('settings.account.patHide')
+              : t('settings.account.patShow')}
+            onAction={signIn.onTogglePat}
+          />
+          {signIn.patOpen ? (
+            /*
+             * 整块就是一个 `<form>`:提交处理器直接接状态机的 `onSubmit`
+             * (与弹窗的 `PatSignInForm` 同结构 —— 那里也是把块包在 form 里),
+             * 于是「按回车」与「点登录」走同一条路,两个输入框里回车都算提交。
+             */
+            <form className="gw-plugin-settings-form" onSubmit={signIn.onSubmit}>
+              <LiveInputRow
+                id="gw-plugin-settings-account-endpoint"
+                label={t('settings.account.endpoint')}
+                hint={t('settings.account.endpoint.hint')}
+                value={signIn.endpoint}
+                placeholder="github.example.com"
+                disabled={signIn.busy}
+                onChange={signIn.onEndpointInput}
+              />
+              <LiveInputRow
+                id="gw-plugin-settings-account-token"
+                label={t('settings.account.token')}
+                hint={t('settings.account.token.hint')}
+                value={signIn.pat}
+                type="password"
+                disabled={signIn.busy}
+                inputRef={signIn.patInputRef}
+                onChange={signIn.onPatInput}
+              />
+              <ActionRow
+                label={t('settings.account.tokenSignIn')}
+                actionLabel={t('settings.account.signInAction')}
+                disabled={signIn.busy}
+                submit={true}
+              />
+            </form>
+          ) : null}
         </>
+      ) : null}
+
+      {/* 结果行:端点 + 令牌那条链路自己给的文案与语气(与弹窗同一份)。 */}
+      {signIn.status === null ? null : (
+        <NoteRow>
+          <span className={`gw-plugin-settings-status gw-plugin-settings-status-${signIn.statusKind}`}>
+            {signIn.status}
+          </span>
+        </NoteRow>
       )}
-
-      <TextRow
-        id="gw-settings-account-endpoint"
-        label={t('settings.account.endpoint')}
-        hint={t('settings.account.endpoint.hint')}
-        value={endpoint}
-        placeholder="github.example.com"
-        disabled={busy}
-        onCommit={onEndpointCommit}
-      />
-      <ActionRow
-        label={t('settings.account.enterpriseSignIn')}
-        actionLabel={t('settings.account.signInAction')}
-        disabled={busy}
-        onAction={signInWithToken}
-      />
-
-      <TextRow
-        id="gw-settings-account-token"
-        label={t('settings.account.token')}
-        hint={t('settings.account.token.hint')}
-        value={token}
-        disabled={busy}
-        onCommit={onTokenCommit}
-      />
-      <ActionRow
-        label={t('settings.account.tokenSignIn')}
-        actionLabel={t('settings.account.signInAction')}
-        disabled={busy}
-        onAction={signInWithToken}
-      />
-
-      {/* 一次性反馈:设备码失败与 PAT 失败共用一行(两者不会同时是新的)。 */}
-      <FlashNote message={failure ?? deviceFailure} />
-      {loadFailed ? <p className="gw-settings-gerror" role="status">{t('settings.account.loadFailed')}</p> : null}
+      {deviceFailure === null ? null : (
+        <p className="gw-plugin-settings-gerror" role="status">{deviceFailure}</p>
+      )}
+      {loadFailed ? (
+        <p className="gw-plugin-settings-gerror" role="status">{t('settings.account.loadFailed')}</p>
+      ) : null}
     </SettingsGroup>
   );
 }

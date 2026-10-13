@@ -32,7 +32,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { ChangeEventHandler, ReactNode } from 'react';
 import { Switch } from '@deepseek-ai/dsh-client-ui-primitives';
 
 /**
@@ -42,8 +42,8 @@ import { Switch } from '@deepseek-ai/dsh-client-ui-primitives';
  */
 export function SettingsGroup(props: { readonly id: string; readonly title: string; readonly children: ReactNode }): ReactNode {
   return (
-    <section className="gw-settings-group" aria-labelledby={props.id}>
-      <h3 className="gw-settings-grouptitle" id={props.id}>{props.title}</h3>
+    <section className="gw-plugin-settings-group" aria-labelledby={props.id}>
+      <h3 className="gw-plugin-settings-grouptitle" id={props.id}>{props.title}</h3>
       {props.children}
     </section>
   );
@@ -63,10 +63,10 @@ export function SwitchRow(props: {
   readonly onChange: (value: boolean) => void;
 }): ReactNode {
   return (
-    <div className="gw-settings-row">
-      <div className="gw-settings-rowtext">
-        <span className="gw-settings-rowlabel" id={props.id}>{props.label}</span>
-        {props.hint === undefined ? null : <span className="gw-settings-rowhint">{props.hint}</span>}
+    <div className="gw-plugin-settings-row">
+      <div className="gw-plugin-settings-rowtext">
+        <span className="gw-plugin-settings-rowlabel" id={props.id}>{props.label}</span>
+        {props.hint === undefined ? null : <span className="gw-plugin-settings-rowhint">{props.hint}</span>}
       </div>
       <Switch
         checked={props.checked}
@@ -103,14 +103,14 @@ export function SelectRow<V extends string>(props: {
     onPick(event.target.value as V);
   }, [onPick]);
   return (
-    <div className="gw-settings-row">
-      <div className="gw-settings-rowtext">
-        <label className="gw-settings-rowlabel" htmlFor={selectId}>{props.label}</label>
-        {props.hint === undefined ? null : <span className="gw-settings-rowhint">{props.hint}</span>}
+    <div className="gw-plugin-settings-row">
+      <div className="gw-plugin-settings-rowtext">
+        <label className="gw-plugin-settings-rowlabel" htmlFor={selectId}>{props.label}</label>
+        {props.hint === undefined ? null : <span className="gw-plugin-settings-rowhint">{props.hint}</span>}
       </div>
       <select
         id={selectId}
-        className="gw-settings-select"
+        className="gw-plugin-settings-select"
         value={props.value}
         disabled={props.disabled ?? false}
         onChange={onChange}
@@ -164,12 +164,12 @@ export function TextRow(props: {
   }, [commit]);
 
   return (
-    <div className="gw-settings-row gw-settings-rowwrap">
-      <label className="gw-settings-rowlabel" htmlFor={inputId}>{props.label}</label>
-      {props.hint === undefined ? null : <span className="gw-settings-rowhint">{props.hint}</span>}
+    <div className="gw-plugin-settings-row gw-plugin-settings-rowwrap">
+      <label className="gw-plugin-settings-rowlabel" htmlFor={inputId}>{props.label}</label>
+      {props.hint === undefined ? null : <span className="gw-plugin-settings-rowhint">{props.hint}</span>}
       <input
         id={inputId}
-        className="gw-settings-input"
+        className="gw-plugin-settings-input"
         type="text"
         placeholder={props.placeholder}
         aria-invalid={props.invalid !== undefined || undefined}
@@ -180,7 +180,47 @@ export function TextRow(props: {
         onBlur={onBlur}
         onKeyDown={onKeyDown}
       />
-      {props.invalid === undefined ? null : <span className="gw-settings-gerror" role="status">{props.invalid}</span>}
+      {props.invalid === undefined ? null : <span className="gw-plugin-settings-gerror" role="status">{props.invalid}</span>}
+    </div>
+  );
+}
+
+/**
+ * 一行「标签在上 + 输入框」,但**逐键提交**(`onChange` 直接交给调用方)。
+ *
+ * 与 {@link TextRow} 的区别只在「什么时候写」:
+ *  - `TextRow` = 失焦 / 回车才提交(偏好的持久化写入,不该每键一次);
+ *  - 本组件 = 每次键入都交给调用方 —— 给**调用方自己持有草稿**的场景用
+ *    (典型:账号那套企业端点 / 令牌状态机,它的 `patInputRef` / `onPatInput`
+ *    与偏好弹窗共用,改成本地草稿会多出第二份真源)。
+ * @param props - 文案、值、输入类型、ref 与逐键回调。
+ * @returns 那一行。
+ */
+export function LiveInputRow(props: {
+  readonly id: string;
+  readonly label: string;
+  readonly hint?: string;
+  readonly value: string;
+  readonly placeholder?: string;
+  readonly type?: 'text' | 'password';
+  readonly disabled?: boolean;
+  readonly inputRef?: (element: HTMLInputElement | null) => void;
+  readonly onChange: ChangeEventHandler<HTMLInputElement>;
+}): ReactNode {
+  return (
+    <div className="gw-plugin-settings-row gw-plugin-settings-rowwrap">
+      <label className="gw-plugin-settings-rowlabel" htmlFor={props.id}>{props.label}</label>
+      {props.hint === undefined ? null : <span className="gw-plugin-settings-rowhint">{props.hint}</span>}
+      <input
+        id={props.id}
+        ref={props.inputRef}
+        className="gw-plugin-settings-input"
+        type={props.type ?? 'text'}
+        placeholder={props.placeholder}
+        disabled={props.disabled ?? false}
+        value={props.value}
+        onChange={props.onChange}
+      />
     </div>
   );
 }
@@ -243,12 +283,12 @@ export function NumberRow(props: {
   }, [commit]);
 
   return (
-    <div className="gw-settings-row gw-settings-rowwrap">
-      <label className="gw-settings-rowlabel" htmlFor={inputId}>{props.label}</label>
-      <span className="gw-settings-rowhint">{props.hint}</span>
+    <div className="gw-plugin-settings-row gw-plugin-settings-rowwrap">
+      <label className="gw-plugin-settings-rowlabel" htmlFor={inputId}>{props.label}</label>
+      <span className="gw-plugin-settings-rowhint">{props.hint}</span>
       <input
         id={inputId}
-        className="gw-settings-input gw-settings-input-number"
+        className="gw-plugin-settings-input gw-plugin-settings-input-number"
         type="text"
         inputMode="numeric"
         aria-invalid={invalid || undefined}
@@ -259,7 +299,7 @@ export function NumberRow(props: {
         onBlur={onBlur}
         onKeyDown={onKeyDown}
       />
-      {invalid ? <span className="gw-settings-gerror" role="status">{props.invalid}</span> : null}
+      {invalid ? <span className="gw-plugin-settings-gerror" role="status">{props.invalid}</span> : null}
     </div>
   );
 }
@@ -274,17 +314,25 @@ export function ActionRow(props: {
   readonly hint?: string;
   readonly actionLabel: string;
   readonly disabled?: boolean;
-  readonly onAction: () => void;
+  /**
+   * 渲染成 `type="submit"`(默认 `button`)。
+   *
+   * 为什么需要:账号那套「端点 + 令牌」的表单与偏好弹窗同结构 —— 它交给状态机的
+   * `onSubmit` 是**表单提交**处理器(`FormEvent`),用 `type="button"` + `onClick` 接不上;
+   * 而且 `submit` 顺带把「在输入框里按回车」也接好了(与弹窗逐字同行为)。
+   */
+  readonly submit?: boolean;
+  readonly onAction?: () => void;
 }): ReactNode {
   return (
-    <div className="gw-settings-row">
-      <div className="gw-settings-rowtext">
-        <span className="gw-settings-rowlabel">{props.label}</span>
-        {props.hint === undefined ? null : <span className="gw-settings-rowhint">{props.hint}</span>}
+    <div className="gw-plugin-settings-row">
+      <div className="gw-plugin-settings-rowtext">
+        <span className="gw-plugin-settings-rowlabel">{props.label}</span>
+        {props.hint === undefined ? null : <span className="gw-plugin-settings-rowhint">{props.hint}</span>}
       </div>
       <button
-        type="button"
-        className="gw-settings-button"
+        type={props.submit === true ? 'submit' : 'button'}
+        className="gw-plugin-settings-button"
         disabled={props.disabled ?? false}
         onClick={props.onAction}
       >
@@ -300,7 +348,7 @@ export function ActionRow(props: {
  * @returns 那一行。
  */
 export function NoteRow(props: { readonly children: ReactNode }): ReactNode {
-  return <p className="gw-settings-note">{props.children}</p>;
+  return <p className="gw-plugin-settings-note">{props.children}</p>;
 }
 
 /**
@@ -321,5 +369,5 @@ export function FlashNote(props: { readonly message: string | null }): ReactNode
     timer.current = setTimeout(() => { setShown(null); }, 6000);
     return () => { if (timer.current !== undefined) { clearTimeout(timer.current); } };
   }, [message]);
-  return shown === null ? null : <p className="gw-settings-gerror" role="status">{shown}</p>;
+  return shown === null ? null : <p className="gw-plugin-settings-gerror" role="status">{shown}</p>;
 }

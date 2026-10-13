@@ -102,4 +102,8 @@ export const DICT_EN = {
   'settings.notifications.test.action': 'Send',
   'settings.notifications.sent': '{n} sent this session.',
   'settings.account.signInAction': 'Sign in',
+  'settings.account.patToggle': 'Token sign-in',
+  'settings.account.patToggle.hint': 'Enterprise hosts sign in with a token (the device flow only works on github.com).',
+  'settings.account.patShow': 'Sign in with a PAT',
+  'settings.account.patHide': 'Hide token form',
 } satisfies Record<DictKey, string>;
