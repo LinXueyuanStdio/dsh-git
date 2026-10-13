@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+### 兼容
+
+- 端到端部署测试已在 `@deepseek-ai/dsh@0.2.0-rc.2` 上通过([run](https://github.com/LinXueyuanStdio/dsh-git/actions/runs/38338206897))。
+
 ## [1.1.1] - 2026-10-12
 
 ### 修复
