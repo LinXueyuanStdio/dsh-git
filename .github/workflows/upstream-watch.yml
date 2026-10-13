@@ -98,8 +98,23 @@ jobs:
           node-version: 22
           cache: npm
 
+      # 这一步**重试**:`dugite`(devDependency,git 二进制的包装)的 postinstall 要去
+      # GitHub Releases 拉一份归档,实测 2026-10-12 偶发 500(`Got 500 trying to
+      # download archive, aborting...`)—— 那是第三方抖动,不是本仓库的问题,却会把
+      # 整轮巡检打红。重试只包住这一步,别的步骤照旧一次定生死(`npm ci` 每次会先删
+      # `node_modules`,所以重试不会踩到半份依赖)。
       - name: 安装依赖
-        run: npm ci
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if npm ci; then break; fi
+            if [ "$attempt" = 3 ]; then
+              echo "::error::npm ci 连续 3 次失败"
+              exit 1
+            fi
+            echo "::warning::npm ci 第 $attempt 次失败(多为 dugite 下载抖动),15 秒后重试"
+            sleep 15
+          done
 
       # 判据逻辑自身的自检:不联网、毫秒级。版本比较错一位的表现是**安静**的
       # (要么「每次都报变了」,要么「永远报没变」),所以先钉住它再谈别的。
@@ -143,11 +158,15 @@ jobs:
               changed=false
             fi
           fi
-          # 同理:还挂着一张这个版本的失败 issue ⇒ 已知会红,不必再烧 40 分钟。
+          # 同理:还挂着一张**点名这个版本**的 issue ⇒ 已知不会有好结果,不必再烧 40 分钟。
+          # 两种 issue 都要拦住:「验红」与「验证绿了却没建成 PR」的流程故障(见末尾兜底步)。
+          # 所以匹配的是「标题里含 `@deepseek-ai/dsh@<版本> `」而不是整串相等 —— 两者
+          # 前缀相同、后缀不同,一条判据盖住两处。**收尾那个空格是必需的**:少了它
+          # `0.2.0-rc.2` 会连 `0.2.0-rc.21` 的 issue 一起匹配上。
           if [ "$changed" = true ] && [ "$FORCE" != true ]; then
-            title="[upstream-watch] @deepseek-ai/dsh@$target 在新宿主上验证失败"
-            if [ "$(gh issue list --state open --limit 100 --json title --jq "[.[] | select(.title == \"$title\")] | length")" != 0 ]; then
-              echo "::notice::已有一张 $target 的失败 issue 开着,跳过(修完用 force 重验)"
+            key="@deepseek-ai/dsh@$target "
+            if [ "$(gh issue list --state open --limit 100 --json title --jq "[.[] | select(.title | contains(\"$key\"))] | length")" != 0 ]; then
+              echo "::notice::已有一张点名 $target 的 issue 开着,跳过(修完用 force 重验)"
               changed=false
             fi
           fi
@@ -270,6 +289,53 @@ jobs:
             gh issue comment "$issue" --body-file artifacts/upstream-watch/body.md
           else
             gh issue create --title "$title" --body-file artifacts/upstream-watch/body.md
+          fi
+
+      # ── 兜底:红在「还没跑到判据」或「判据绿了却没记下来」时必须留痕 ──────────
+      #
+      # e2e 判红有它自己的 issue(上面两步)。除此之外的红此前**什么痕迹都不留**:
+      # 装依赖被第三方 500 打回、构建/发布物检查红、以及 **PR 没建成**。最后一种
+      # 实测于 2026-10:仓库设置里「Allow GitHub Actions to create and approve pull
+      # requests」关着,`gh pr create` 直接报
+      #   pull request create failed: GraphQL: GitHub Actions is not permitted to
+      #   create or approve pull requests (createPullRequest)
+      # ⇒ job 红、无 issue;而记账那一步只落在 runner 上,**基线 `verified` 永远不前进**
+      # ⇒ 下一个 4 小时又把同一个版本从头验一遍。这正是「没在跟进上游更新」的那种沉默的红。
+      # 所以这里补一张 issue:红要红得有人看得懂。
+      #
+      # 条件里的 `e2e.outcome != 'failure'`:判红那一路上面已经开过 issue,不重复;
+      # e2e 因前面步骤先红而**压根没跑**时 outcome 是 `skipped`,归这里管。
+      - name: 兜底(没跑到判据 / 判据绿了却没记下来)
+        if: failure() && steps.detect.outputs.changed == 'true' && steps.e2e.outcome != 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          target="${{ steps.detect.outputs.target }}"
+          title="[upstream-watch] @deepseek-ai/dsh@$target 巡检流程故障(验证/记账未完成)"
+          body="$RUNNER_TEMP/watch-infra.md"
+          {
+            echo "这一轮盯上了 @deepseek-ai/dsh@${target},但在**验证或记账**这一段就红了 ——"
+            echo "既没跑出结论,也没把基线推进一格。"
+            echo
+            echo "- 运行(哪一步红的一目了然):${RUN_URL}"
+            echo "- 分支:\`chore/upstream-watch-${target}\`(若已推上去,会留下一条没有 PR 的孤儿分支)"
+            echo
+            echo "最常见的一种(2026-10 实测):仓库设置 Settings → Actions → General →"
+            echo "Workflow permissions 里的 **Allow GitHub Actions to create and approve"
+            echo "pull requests** 没勾,\`gh pr create\` 会报 \`GitHub Actions is not permitted"
+            echo "to create or approve pull requests\`。"
+            echo
+            echo "修好后用 workflow_dispatch 勾上 force 重跑一次,验过的版本就会被记进"
+            echo "\`scripts/upstream-baseline.json\`;在那之前,检测会一直把同一个版本当成"
+            echo "「没验过」,每 4 小时重来一遍。"
+          } > "$body"
+          issue="$(gh issue list --state open --limit 100 --json number,title \
+            --jq "[.[] | select(.title == \"$title\")][0].number")"
+          if [ -n "$issue" ] && [ "$issue" != null ]; then
+            gh issue comment "$issue" --body-file "$body"
+          else
+            gh issue create --title "$title" --body-file "$body"
           fi
 
       # 本轮唯一的「给人看」的证据(检测报告 + 正文 + e2e 日志 + 截图),
