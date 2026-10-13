@@ -54,7 +54,7 @@ export const DICT_ZH = {
 
   /* ---------- 设置页:宿主配置表单(自动刷新周期) ---------- */
   'settings.autoSec': 'Pulls 自动刷新周期(秒)',
-  'settings.autoSec.hint': '0 = 关闭自动刷新;留空 = 回到默认值。改完保存后,Pulls 页签下一次刷新按新周期走。',
+  'settings.autoSec.hint': '0 = 关闭自动刷新;留空 = 回到默认值。',
   'settings.autoSec.invalid': '请填 0–600 之间的整数(秒)。',
 
   /* ---------- 设置页:宿主配置表单的外壳文案(宿主 `SettingsFormLabels`) ---------- */
@@ -88,16 +88,16 @@ export const DICT_ZH = {
   /* ---------- 设置页:Git 身份 ---------- */
   'settings.group.git': 'Git',
   'settings.gitName': '姓名',
-  'settings.gitName.hint': '提交时用的作者名(写全局 git config 的 user.name)。',
+  'settings.gitName.hint': '提交时用的作者名(写入全局 Git 配置)。',
   'settings.gitEmail': '邮箱',
-  'settings.gitEmail.hint': '提交时用的作者邮箱(写全局 git config 的 user.email)。',
+  'settings.gitEmail.hint': '提交时用的作者邮箱(写入全局 Git 配置)。',
   'settings.gitBranch': '默认分支',
-  'settings.gitBranch.hint': '新建仓库的初始分支名(写全局 git config 的 init.defaultBranch)。',
+  'settings.gitBranch.hint': '新建仓库的初始分支名(写入全局 Git 配置)。',
 
   /* ---------- 设置页:外观 ---------- */
   'settings.group.appearance': '外观',
   'settings.theme': '主题',
-  'settings.theme.hint': '走宿主的主题服务:宿主自己的设置改了这里会跟着变。',
+  'settings.theme.hint': '跟随宿主主题:宿主设置里改了,这里同步。',
   'settings.theme.light': '浅色',
   'settings.theme.dark': '深色',
   'settings.theme.system': '跟随系统',

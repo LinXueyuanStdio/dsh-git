@@ -156,6 +156,20 @@ export function resolveAccountEndpoint(identity: IAuthIdentity | null): string {
  * @param identity - 当前登录身份。
  * @param emails - `auth/emails` 给的邮箱;空数组 ⇒ 上游表单不渲染下拉。
  */
+/**
+ * 已登录账号的头像地址。
+ *
+ * ⚠️ **单一真源**:镜像 `ui/preferences/accounts.tsx` 的头像走 `Account.avatarURL`
+ * (`models/account.ts:51`),而那条 URL 是本插件**自己拼**的(Desktop 从 `/user` 的
+ * `avatar_url` 拿,我们只拿得到 login)⇒ 设置页的头像行与 `accountsWithEmails` 必须用
+ * **同一个函数**,否则两处显示的头像可能不是同一张(企业实例尤其)。
+ * @param login - 登录名。
+ * @returns 头像图片地址。
+ */
+export function avatarUrlFor(login: string): string {
+  return `https://avatars.githubusercontent.com/${login}`;
+}
+
 export function accountsWithEmails(
   identity: IAuthIdentity,
   emails: ReadonlyArray<IAccountEmail>,
@@ -166,7 +180,7 @@ export function accountsWithEmails(
       resolveAccountEndpoint(identity),
       '',
       emails.map((email) => toDesktopApiMail(email)),
-      `https://avatars.githubusercontent.com/${identity.login}`,
+      avatarUrlFor(identity.login),
       -1,
       identity.login,
     ),

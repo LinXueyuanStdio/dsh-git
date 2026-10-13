@@ -1397,7 +1397,14 @@ html[data-gw-toast-clamp] body > div[role="alert"]:has(> span > .gw-toast-mark){
  * ⚠️ 这段注释里**不许出现反引号**:它整个住在一个 JS 模板字面量里,一个反引号就会把
  * 模板提前结束掉(2026-10-13 实测:105 条 TS1xxx 语法错)。
  * ====================================================================== */
-.gw-settings{display:flex;flex-direction:column;color:var(--dsw-alias-label-primary);font-size:14px;line-height:20px}
+.gw-settings{display:flex;flex-direction:column;color:var(--dsw-alias-label-primary);font-size:14px;line-height:20px;/*
+ * ⚠️ **限宽**(2026-10-13 用户报「配置项 UI 的宽度有问题」):宿主插件详情页的正文最宽
+ * 960px(PluginManagerPage.module.css 的 .page > *),而 dsh-context 的设置卡长在一个
+ * **窄卡**里 —— 照搬它的行结构而不限宽,后果是「标签在最左、控件在最右」之间空出半个屏,
+ * 输入的文本框也拉成 700+px 的一条。所以这里把整列**收窄到 560px**:标签与控件的距离回到
+ * dsh-context 那个观感,输入框也不再无意义地长。
+ */
+max-width:560px}
 .gw-settings-group{display:flex;flex-direction:column}
 /* 分组之间一条细分隔线(第一组不画)。 */
 .gw-settings-group + .gw-settings-group{margin-top:16px;padding-top:16px;border-top:0.5px solid var(--dsw-alias-border-l2)}
@@ -1419,6 +1426,8 @@ html[data-gw-toast-clamp] body > div[role="alert"]:has(> span > .gw-toast-mark){
 .gw-settings-input[aria-invalid=true]{border-color:var(--dsw-alias-state-error-primary)}
 /* 数字输入窄一点(和标签同排时不必占满整行)。 */
 .gw-settings-input-number{width:120px}
+/* 头像(账号行):与镜像 ui/lib/avatar.tsx 那 28px 的圆同尺寸。 */
+.gw-settings-avatar{width:28px;height:28px;border-radius:50%;flex:none;background:var(--dsw-alias-bg-module-platform)}
 /* 枚举行:胶囊下拉(dsh-context 的 .lc-settings-select 同形)。 */
 .gw-settings-select{height:36px;padding:0 14px;border:none;border-radius:18px;background:var(--dsw-alias-bg-module-platform);
   color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;line-height:22px;cursor:pointer}

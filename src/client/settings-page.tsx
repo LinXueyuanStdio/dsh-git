@@ -19,7 +19,11 @@
  * | 通知 | 启用高信号通知 / 发送测试通知 / 已发出条数 | `notify.ts` |
  * | 提示与确认 | 5 个确认开关 | `usePromptsWiring` |
  * | Diff 与无障碍 | diff 勾选标记 / 链接下划线 | `useAccessibilityWiring` |
- * | 插件配置(宿主设置文档) | Pulls 自动刷新周期 | 宿主 `Config`(`autoSec`)+ `SettingsForm` |
+ *
+ * ⚠️ **2026-10-13 用户裁决:删掉「插件配置(宿主设置文档)」那一组与它的【保存】按钮**
+ * (「把不必要的说明文字清理一下」),但 **Pulls 自动刷新周期这一项留着** ——
+ * 它现在是「通用」组里的一整行,提交即写(`editAutoSec` + `save()`,修订栅栏仍由宿主
+ * 表单模型管)。
  *
  * ## 共用的是**接线**,不是 UI
  *
@@ -27,11 +31,11 @@
  * `preferences-pages.tsx` 的「与外壳无关的那一半」里,偏好弹窗与这一页**共用同一份
  * 读写 + 订阅**,所以两处永远不会漂移。这里没有复制任何一条偏好的键名或默认值。
  *
- * ## 为什么「当场生效」的开关不需要「保存」,而 `autoSec` 需要
+ * ## 这一页只有一个「保存」按钮都没有的理由
  *
- * 前者写 localStorage + 广播,消费方同帧重渲染;后者是宿主**配置文档**里的字段,
- * 必须经过宿主的 `SettingsFormModel` 暂存 / 保存。两套写入语义混进同一张表单是本仓
- * 点过名的坑,所以 `autoSec` 自成最后一组、自带保存条。
+ * 每一行提交即生效:localStorage 偏好写 + 广播,全局 git config 直接写,宿主主题走服务;
+ * 唯一的例外是 `autoSec`(宿主**配置文档**里的字段),它由宿主表单模型做修订栅栏,
+ * 但仍然在**提交那一刻**落盘,不需要用户再点一次「保存」。
  *
  * 行的形状(标签左 / 控件右 / 胶囊下拉 / 分组标题 + 细分隔线)与逐条依据见
  * `./settings-rows.tsx` 的文件头。
@@ -41,8 +45,6 @@
 
 import { useCallback, useId, useState } from 'react';
 import type { ReactNode } from 'react';
-import { SettingsForm, SettingsValueField } from '@deepseek-ai/dsh-client-ui-primitives';
-import type { SettingsFormLabels } from '@deepseek-ai/dsh-client-ui-primitives';
 import type { DshGitSettingsProps } from './settings-controller.ts';
 import { SettingsAccountGroup } from './settings-account.tsx';
 import { SettingsAppearanceGroup } from './settings-appearance.tsx';
@@ -56,21 +58,6 @@ import { describeNotificationOutcome } from './notifications-panel.tsx';
 import {
   getNotificationsSent, notificationsSupported, notifyTest, setNotificationsEnabled, useNotificationsEnabled,
 } from './notify.ts';
-
-/**
- * 宿主配置表单的外壳文案(逐条来自本插件的字典)。
- * @param t - 命名空间 `dsh-git` 的翻译函数。
- * @returns 宿主 `SettingsFormLabels`。
- */
-function formLabels(t: DshGitSettingsProps['t']): SettingsFormLabels {
-  return {
-    unavailable: t('settings.form.unavailable'),
-    readOnly: t('settings.form.readOnly'),
-    saveFailed: t('settings.form.saveFailed'),
-    save: t('settings.form.save'),
-    saving: t('settings.form.saving'),
-  };
-}
 
 /**
  * 渲染整页设置(见文件头的分组表)。
@@ -100,15 +87,27 @@ export function DshGitSettingsPage(props: DshGitSettingsProps): ReactNode {
 
   const base = useId();
   const id = (name: string): string => `${base}-${name}`;
-  const disabled = !state.writable;
   /* 依赖必须写成具体成员,不能是 `props`(`react-hooks/exhaustive-deps` 的要求)。 */
-  const { onFontScale, onPreferencesChanged, store } = props;
+  const { onFontScale, onPreferencesChanged, store, editAutoSec, save } = props;
 
   /** 字号那一行的提交:写偏好 + 通知外壳。 */
   const onFontScaleCommit = useCallback((value: number): void => {
     onFontScale(value);
     onPreferencesChanged();
   }, [onFontScale, onPreferencesChanged]);
+  /**
+   * `autoSec` 的当前值:宿主表单快照里的**草稿或已接受文本**(模型自己算的)。
+   * 空串 / 解析不出数字 ⇒ 回落到 `0`(= 关闭,与 schema 的 `.default(0)` 同义)。
+   */
+  const autoSecValue = (() => {
+    const parsed = Number(state.autoSec.text);
+    return Number.isFinite(parsed) ? parsed : 0;
+  })();
+  /** `autoSec` 的提交:**暂存 + 立即落盘**(不再有保存按钮;修订栅栏在模型里)。 */
+  const onAutoSecCommit = useCallback((value: number): void => {
+    editAutoSec(String(value));
+    save();
+  }, [editAutoSec, save]);
   /** 通知开关:写偏好 + 通知外壳。 */
   const onNotificationsChanged = useCallback((value: boolean): void => {
     setNotificationsEnabled(value);
@@ -134,6 +133,26 @@ export function DshGitSettingsPage(props: DshGitSettingsProps): ReactNode {
           max={FONT_SCALE_MAX}
           onCommit={onFontScaleCommit}
         />
+        {/*
+          Pulls 自动刷新周期:宿主 `Config` 里的那个 volatile 字段(`src/index.ts`)。
+          ⚠️ 2026-10-13 起它**不再自带「保存」条** —— 用户裁决「把不必要的说明文字清理一下」:
+          原来那一组顶着「插件配置(宿主设置文档)」的长标题、下面跟一张带保存/放弃的表单,
+          在一页「改完就生效」的设置里既突兀又容易误点。现在它就是一整行,
+          提交时**立即写**(`editAutoSec` 暂存 + `save()` 落盘,修订栅栏仍由宿主表单模型管),
+          写失败时在行下说一句(文案 = `settings.form.saveFailed`)。
+        */}
+        <NumberRow
+          id={id('auto-sec')}
+          label={t('settings.autoSec')}
+          hint={t('settings.autoSec.hint')}
+          invalid={t('settings.autoSec.invalid')}
+          value={autoSecValue}
+          min={0}
+          max={600}
+          disabled={!state.writable}
+          onCommit={onAutoSecCommit}
+        />
+        {state.failed ? <p className="gw-settings-gerror" role="status">{t('settings.form.saveFailed')}</p> : null}
       </SettingsGroup>
 
       <SettingsAccountGroup t={t} store={store} onPreferencesChanged={onPreferencesChanged} />
@@ -209,33 +228,6 @@ export function DshGitSettingsPage(props: DshGitSettingsProps): ReactNode {
         />
       </SettingsGroup>
 
-      {/*
-        ⚠️ **单独一组、自带保存条**:`autoSec` 是宿主**配置文档**里的字段(写 profile 的
-        `cordis.patch.yml`),与上面那些「当场生效」的 localStorage 偏好**不是同一类东西**。
-        把两种写入语义塞进同一张表单是本仓点过名的坑,所以这里只共享页面,不共享表单。
-      */}
-      <SettingsGroup id={id('host-config')} title={t('settings.group.hostConfig')}>
-        <SettingsForm
-          labels={formLabels(t)}
-          state={state}
-          onSave={props.save}
-          onDiscard={props.discard}
-        >
-          <SettingsValueField
-            id="plugin-config-dsh-git-auto-sec"
-            label={t('settings.autoSec')}
-            hint={t('settings.autoSec.hint')}
-            overriddenLabel={t('settings.form.overridden')}
-            resetLabel={t('settings.form.reset')}
-            invalidLabel={t('settings.autoSec.invalid')}
-            numeric={true}
-            disabled={disabled}
-            {...state.autoSec}
-            onEdit={props.editAutoSec}
-            onReset={props.resetAutoSec}
-          />
-        </SettingsForm>
-      </SettingsGroup>
     </div>
   );
 }

@@ -41,7 +41,7 @@ export const DICT_EN = {
 
   /* ---------- settings page: Host configuration form (auto-refresh) ---------- */
   'settings.autoSec': 'Pulls auto-refresh interval (seconds)',
-  'settings.autoSec.hint': '0 disables auto-refresh; blank restores the default. The Pulls tab picks up a saved interval on its next refresh.',
+  'settings.autoSec.hint': '0 disables auto-refresh; blank restores the default.',
   'settings.autoSec.invalid': 'Enter a whole number of seconds between 0 and 600.',
 
   /* ---------- settings page: Host configuration form chrome (Host `SettingsFormLabels`) ---------- */
@@ -75,16 +75,16 @@ export const DICT_EN = {
   /* ---------- settings page: Git identity ---------- */
   'settings.group.git': 'Git',
   'settings.gitName': 'Name',
-  'settings.gitName.hint': 'Author name used for commits (writes user.name in the global git config).',
+  'settings.gitName.hint': 'Author name used for commits (writes the global Git config).',
   'settings.gitEmail': 'Email',
-  'settings.gitEmail.hint': 'Author email used for commits (writes user.email in the global git config).',
+  'settings.gitEmail.hint': 'Author email used for commits (writes the global Git config).',
   'settings.gitBranch': 'Default branch',
-  'settings.gitBranch.hint': 'Initial branch name for new repositories (writes init.defaultBranch in the global git config).',
+  'settings.gitBranch.hint': 'Initial branch name for new repositories (writes the global Git config).',
 
   /* ---------- settings page: appearance ---------- */
   'settings.group.appearance': 'Appearance',
   'settings.theme': 'Theme',
-  'settings.theme.hint': 'Follows the Host theme service, so a change in the Host settings shows up here.',
+  'settings.theme.hint': 'Follows the Host theme; a change in the Host settings shows up here.',
   'settings.theme.light': 'Light',
   'settings.theme.dark': 'Dark',
   'settings.theme.system': 'System',

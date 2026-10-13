@@ -42,7 +42,9 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import type { ReactNode } from 'react';
 import { api } from './api.ts';
+import { getDotComAPIEndpoint } from '../core/desktop/lib/api.ts';
 import type { Translate } from './i18n.ts';
+import { avatarUrlFor } from './account-emails.tsx';
 import { hostAuthOf, startDeviceSignIn, useDeviceSignIn } from './preferences-pages.tsx';
 import type { IDshGitSettingsStoreLike } from './settings-controller.ts';
 import { ActionRow, FlashNote, NoteRow, SettingsGroup, TextRow } from './settings-rows.tsx';
@@ -174,13 +176,33 @@ export function SettingsAccountGroup(props: {
 
   return (
     <SettingsGroup id="gw-settings-account" title={t('settings.group.account')}>
-      {/* 只读的身份行:登录态的唯一真源是 store 快照,这一行不带控件。 */}
+      {/*
+        只读的身份行:登录态的唯一真源是 store 快照,这一行不带控件。
+
+        ⭐ **头像**(2026-10-13 用户反馈「账户部分缺失了信息,应该有头像的」):
+        地址来自 `avatarUrlFor(login)`(`./account-emails.tsx`),与镜像 `Accounts` 页
+        (`ui/preferences/accounts.tsx:86-101` 的 `Avatar` + `Account.avatarURL`)用的是
+        **同一个函数** —— 两处显示的头像因此必然一致(企业实例尤其)。
+        `alt=""`:登录名就在旁边,读屏再念一遍图片是噪音。
+      */}
       <div className="gw-settings-row">
+        {auth === null ? null : (
+          <img className="gw-settings-avatar" src={avatarUrlFor(auth.login)} alt="" />
+        )}
         <div className="gw-settings-rowtext">
-          <span className="gw-settings-rowlabel">{t('settings.account.identity')}</span>
-          <span className="gw-settings-rowhint">
+          <span className="gw-settings-rowlabel">
             {auth === null ? t('settings.account.signedOut') : `@${auth.login}`}
           </span>
+          {/*
+            未登录时说清这一行是什么(不然只剩「未登录」两个字);已登录时只在
+            **非 github.com** 的实例上补一句端点 —— dot-com 那种 `https://api.github.com`
+            对用户没有信息量。
+          */}
+          {auth === null
+            ? <span className="gw-settings-rowhint">{t('settings.account.identity')}</span>
+            : auth.endpoint === undefined || auth.endpoint === getDotComAPIEndpoint()
+              ? null
+              : <span className="gw-settings-rowhint">{auth.endpoint}</span>}
         </div>
       </div>
 

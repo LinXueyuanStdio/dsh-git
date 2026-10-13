@@ -201,6 +201,8 @@ export function NumberRow(props: {
   readonly value: number;
   readonly min: number;
   readonly max: number;
+  /** 只读文档(宿主配置文档不可写)时禁掉输入 —— 否则用户敲完才发现写不进去。 */
+  readonly disabled?: boolean;
   readonly onCommit: (value: number) => void;
 }): ReactNode {
   const { value, min, max, onCommit, id: inputId } = props;
@@ -250,6 +252,7 @@ export function NumberRow(props: {
         type="text"
         inputMode="numeric"
         aria-invalid={invalid || undefined}
+        disabled={props.disabled ?? false}
         value={draft}
         onFocus={onFocus}
         onChange={onChange}
