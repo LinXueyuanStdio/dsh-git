@@ -65,6 +65,56 @@ export const DICT_ZH = {
   'settings.form.saving': '保存中…',
   'settings.form.overridden': '已覆盖',
   'settings.form.reset': '恢复默认',
+
+  /* ---------- 设置页:账号 ---------- */
+  'settings.group.account': '账号',
+  'settings.account.identity': '当前账号',
+  'settings.account.signedOut': '未登录',
+  'settings.account.loadFailed': '读取登录态失败:可能连不上 dsh-git 服务(插件未在 host 侧激活?)。',
+  'settings.account.signIn': '登录 GitHub.com',
+  'settings.account.signIn.hint': '用设备码登录:会在浏览器里打开授权页,这里同时给出要填的代码。',
+  'settings.account.signOut': '退出登录',
+  'settings.account.endpoint': '企业实例地址',
+  'settings.account.endpoint.hint': '例:github.example.com 或 https://github.example.com;留空 = github.com。',
+  'settings.account.enterpriseSignIn': '登录 GitHub Enterprise',
+  'settings.account.token': '个人访问令牌(PAT)',
+  'settings.account.token.hint': '细粒度令牌需要 Contents R / Issues RW / Pull requests RW / Actions RW;经典令牌用 repo。',
+  'settings.account.tokenSignIn': '用令牌登录',
+  'settings.account.device.code': '设备码',
+  'settings.account.device.hint': '在浏览器里打开 {uri} 并输入下面的代码(打开的窗口已经带过去了)。',
+  'settings.account.signInFailed': '登录失败:{message}',
+  'settings.account.signedInAs': '已登录 @{login}',
+
+  /* ---------- 设置页:Git 身份 ---------- */
+  'settings.group.git': 'Git',
+  'settings.gitName': '姓名',
+  'settings.gitName.hint': '提交时用的作者名(写全局 git config 的 user.name)。',
+  'settings.gitEmail': '邮箱',
+  'settings.gitEmail.hint': '提交时用的作者邮箱(写全局 git config 的 user.email)。',
+  'settings.gitBranch': '默认分支',
+  'settings.gitBranch.hint': '新建仓库的初始分支名(写全局 git config 的 init.defaultBranch)。',
+
+  /* ---------- 设置页:外观 ---------- */
+  'settings.group.appearance': '外观',
+  'settings.theme': '主题',
+  'settings.theme.hint': '走宿主的主题服务:宿主自己的设置改了这里会跟着变。',
+  'settings.theme.light': '浅色',
+  'settings.theme.dark': '深色',
+  'settings.theme.system': '跟随系统',
+  'settings.tabSize': '标签宽度',
+  'settings.tabSize.hint': 'diff 里一个制表符占几个空格。',
+  'settings.dateFormat': '日期格式',
+  'settings.timeFormat': '时间格式',
+  'settings.numberFormat': '数字格式',
+  'settings.preferAbsoluteDates': '优先显示绝对日期',
+  'settings.preferAbsoluteDates.hint': '关掉则在列表里显示「3 天前」这类相对时间。',
+
+  /* ---------- 设置页:通知(测试行) ---------- */
+  'settings.notifications.test': '测试通知',
+  'settings.notifications.test.hint': '发一条系统通知,验证权限与投递链路。',
+  'settings.notifications.test.action': '发送',
+  'settings.notifications.sent': '本次会话已发出 {n} 条。',
+  'settings.account.signInAction': '登录',
 } satisfies Record<string, string>;
 
 /** 本插件每一种语言都必须**完整**带上的键集(从 {@link DICT_ZH} 推导)。 */

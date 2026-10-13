@@ -486,15 +486,19 @@ function registerHostSettingsCard(ctx: ClientCtx, t: Translate): void {
           return () => { /* 没有席位系统:同上 */ };
         }
         /*
-         * ⚠️ 2026-10-13 起这里**不再**构造仓库清单 / 登录态那份数据面:
-         * 设置页已改成 DSH 宿主风格的行列表(`./settings-page.tsx`),只呈现插件自己的偏好;
-         * 账号与 Git 身份仍在齿轮打开的偏好弹窗里,而弹窗自己拿 store。
-         * ⇒ `storeFor('')` / `bootstrapCardStore` / `pages` 三样一起从这条链路上消失。
+         * 设置页只需要**一颗** store:全局那颗(`storeFor('')`),给【账号】组读登录态、
+         * 做登录 / 退出登录。仓库清单 / Changes / diff 那条数据面不在这里 ——
+         * 那是右侧栏与偏好弹窗的(按 session 键的另一颗 store)。
+         *
+         * ⚠️ 与 2026-10 那张卡片不同:这里**不**预跑 `refreshRepos` / `autodetect`
+         * (那会改用户的仓库清单)。账号组自己按需 `loadAuth()`。
          */
+        const globalStore = storeFor('');
         const card = new DshGitSettingsController(
           configForms.get<IDshGitSettings>(DSH_GIT_NS),
           bumpPreferencesRevision,
           t,
+          globalStore,
         );
         // 只读投影:同一个命名空间的另一个消费方(`pulls-view.tsx` 的自动刷新定时器)
         // 从这里拿值。绑定与卡片同生共死 —— 宿主停止服务该命名空间时,

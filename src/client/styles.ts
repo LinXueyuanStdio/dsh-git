@@ -1379,40 +1379,65 @@ html[data-gw-toast-clamp] body > div[role="alert"]:has(> span > .gw-toast-mark){
 /* ======================================================================
  * 设置页(宿主插件页详情里的那一页)—— **DSH 宿主风格**的行列表。
  *
- * 2026-10-13 用户裁决:那一页不再复用 GitHub Desktop 的 Preferences 页面
- * (preferences-pages.tsx 的 PreferencesPageBody,它自带 #preferences 作用域根与
- * 一整套 Desktop 变量桥),而是**照 dsh-context 的设置卡**重写一遍,和宿主界面统一。
+ * 行/分组的形状照 references/dsh-context 的设置卡(components/settingsCard.tsx
+ * + styles/settings.css),逐条对齐的是:标签在左(14px label-primary)、控件在右、
+ * 行内 gap 8px、行 padding 8px 0;提示 12px tertiary 跟在标签下面;
+ * 分组标题 14px/500,组之间一条 0.5px 的 --dsw-alias-border-l2;
+ * 枚举控件是**胶囊**(36px 高 / 18px 圆角 / --dsw-alias-bg-module-platform);
+ * 文本控件是整行输入框(0.5px --dsw-alias-border-l4 / --dsw-radius-md /
+ * --dsw-alias-bg-layer-3)。
  *
- * 与 dsh-context 的差别只有一处:它用 Tailwind 编译工具类,我们不用
- * (本插件没有 Tailwind 工具链)。所以把它 settings.css 里那几行手写下来,
- * 令牌名逐字沿用 --dsw-alias-*,不新造颜色、不引 --dsw-alias-* 之外的变量。
+ * 与 dsh-context 的差别只有一处:枚举我们用的是**原生 <select>** 而不是宿主 Menu
+ * (宿主自己的 bundle-config 页面也是这么做的) —— 理由写在 settings-rows.tsx 的文件头。
  *
- * ⚠️ 这些类放在**本文件**(而不是 scss/** 的移植面)是刻意的:移植面是
- * GitHub Desktop 的复刻样式,由 scripts/styles.mjs 的作用域根登记表管着;
- * 这一页是**我们自己**的 UI,由本注入源承载 —— 与 .gw-pop 那条同理。
+ * ⚠️ 这些类放在**本文件**(而不是 scss/** 的移植面)是刻意的:移植面是 GitHub Desktop
+ * 的复刻样式,由 scripts/styles.mjs 的作用域根登记表管着;这一页是**我们自己**的 UI,
+ * 由本注入源承载 —— 与 .gw-pop 那条同理。
  *
- * ⚠️ 这段注释里**不许出现反引号**:它整个住在一个 JS 模板字面量里,一个反引号
- * 就会把模板提前结束掉(2026-10-13 实测:105 条 TS1xxx 语法错)。
+ * ⚠️ 这段注释里**不许出现反引号**:它整个住在一个 JS 模板字面量里,一个反引号就会把
+ * 模板提前结束掉(2026-10-13 实测:105 条 TS1xxx 语法错)。
  * ====================================================================== */
 .gw-settings{display:flex;flex-direction:column;color:var(--dsw-alias-label-primary);font-size:14px;line-height:20px}
 .gw-settings-group{display:flex;flex-direction:column}
-/* 分组之间一条细分隔线(第一组不画):与宿主插件页自己的分节节奏同源。 */
+/* 分组之间一条细分隔线(第一组不画)。 */
 .gw-settings-group + .gw-settings-group{margin-top:16px;padding-top:16px;border-top:0.5px solid var(--dsw-alias-border-l2)}
 .gw-settings-grouptitle{margin:0 0 4px;font-size:14px;font-weight:500;line-height:20px;color:var(--dsw-alias-label-primary)}
-.gw-settings-row{display:flex;align-items:center;gap:12px;padding:8px 0}
-/* 标签列:标题在上、提示在下(行内文案不换行到控件那一侧)。 */
+.gw-settings-row{display:flex;align-items:center;gap:8px;padding:8px 0}
+/* 标签列:标题在上、提示在下。 */
 .gw-settings-rowtext{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
 .gw-settings-rowlabel{font-size:14px;font-weight:400;color:var(--dsw-alias-label-primary)}
 .gw-settings-rowhint{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
 /* 带输入的行走**竖排**(标签 + 提示 + 控件 + 错误),宽度压力下不挤成一团。 */
 .gw-settings-rowwrap{flex-direction:column;align-items:stretch;gap:4px}
-.gw-settings-number{box-sizing:border-box;width:96px;padding:6px 12px;border:0.5px solid var(--dsw-alias-border-l4);
+/* 文本 / 数字输入:整行输入框,dsh-context 的 .lc-settings-textarea 同形(换成 input)。 */
+.gw-settings-input{box-sizing:border-box;width:100%;padding:6px 12px;border:0.5px solid var(--dsw-alias-border-l4);
   border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);
   font:inherit;font-size:13px;line-height:1.5}
-.gw-settings-number:focus{outline:none;border-color:var(--dsw-alias-state-business-primary)}
-.gw-settings-number[aria-invalid=true]{border-color:var(--dsw-alias-state-error-primary)}
-/* 行下提示:错误档用 state-error,普通提示走 tertiary(与宿主的 role=status 同形)。 */
+.gw-settings-input:focus{outline:none;border-color:var(--dsw-alias-state-business-primary)}
+.gw-settings-input:disabled{opacity:0.5;cursor:default}
+.gw-settings-input::placeholder{color:var(--dsw-alias-label-tertiary)}
+.gw-settings-input[aria-invalid=true]{border-color:var(--dsw-alias-state-error-primary)}
+/* 数字输入窄一点(和标签同排时不必占满整行)。 */
+.gw-settings-input-number{width:120px}
+/* 枚举行:胶囊下拉(dsh-context 的 .lc-settings-select 同形)。 */
+.gw-settings-select{height:36px;padding:0 14px;border:none;border-radius:18px;background:var(--dsw-alias-bg-module-platform);
+  color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;line-height:22px;cursor:pointer}
+.gw-settings-select:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
+.gw-settings-select:disabled{opacity:0.5;cursor:default}
+/* 动作按钮:与下拉同一套胶囊令牌(「退出登录」「发送测试通知」这类)。 */
+.gw-settings-button{height:36px;padding:0 14px;border:none;border-radius:18px;background:var(--dsw-alias-bg-module-platform);
+  color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;line-height:22px;cursor:pointer}
+.gw-settings-button:hover:enabled{background:var(--dsw-alias-interactive-bg-hover)}
+.gw-settings-button:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
+.gw-settings-button:disabled{opacity:0.5;cursor:default}
+/* 只读提示行(「本次会话已发出 N 条」这类)。 */
+.gw-settings-note{margin:4px 0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
+/* 行下错误 / 一次性反馈。 */
 .gw-settings-gerror{font-size:12px;line-height:1.5;color:var(--dsw-alias-state-error-primary)}
+/* 账号卡片那一行(头像 + 登录名)是**只读信息**,不需要控件。 */
+.gw-settings-identity{font-size:14px;color:var(--dsw-alias-label-primary)}
+.gw-settings-identity b{font-weight:600}
+
 `;
 
 /** 注入样式(幂等)。 */

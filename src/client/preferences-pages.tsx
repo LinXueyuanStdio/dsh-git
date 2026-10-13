@@ -386,6 +386,27 @@ export interface IPreferencesStore {
   toast(message: string, kind?: 'ok' | 'err'): void;
 }
 
+/**
+ * `useDeviceSignIn` **真正用到**的那几个 store 成员(窄接口)。
+ *
+ * 为什么不让它收 {@link IPreferencesStore}:设备码这条链路只做三件事 ——
+ * `setAuth` / `loadRemoteRepos` / `toast`(见本文件轮询成功那一段),与「仓库管理」
+ * 那三条无关。收窄之后:
+ *  - 偏好弹窗照旧传完整 store(宽对象赋给窄形参,天然成立);
+ *  - 宿主插件页的【账号】组也能直接用它 —— 那一侧拿到的 store 面
+ *    (`IDshGitSettingsStoreLike`)刻意**不带**仓库管理三条,否则就要写一次
+ *    `as unknown as`(2026-10-13 实测:第一版就是那么写的)。
+ * @see useDeviceSignIn
+ */
+export interface IDeviceSignInStore {
+  /** 设备码登录成功后写入登录态(`store.ts` 的 `setAuth`)。 */
+  setAuth(state: AuthStatePayload): void;
+  /** 登录态变化后刷新远端仓库清单(`store.ts` 的 `loadRemoteRepos`)。 */
+  loadRemoteRepos(force?: boolean): Promise<void>;
+  /** 轻提示(`store.ts` 的 `toast`)。 */
+  toast(message: string, kind?: 'ok' | 'err'): void;
+}
+
 /** 仓库清单里的最小一项(与 `store.ts` 的 `RepoEntry` 结构兼容)。 */
 export interface IPreferencesRepoEntry {
   readonly path: string;
@@ -621,7 +642,7 @@ export function startDeviceSignIn(
  * @returns 状态与四个写动作(全是具名成员,供组件写成 `onClick={device.start}`)。
  */
 export function useDeviceSignIn(
-  store: IPreferencesStore,
+  store: IDeviceSignInStore,
   startDeviceSignIn: StartDeviceSignIn,
 ): IDeviceSignIn {
   const [state, setState] = useState<DeviceFlowState>({ kind: 'idle' });

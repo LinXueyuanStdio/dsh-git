@@ -41,6 +41,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives';
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store';
 import type { Translate } from './i18n.ts';
+import type { AuthStatePayload } from './api.ts';
 import { fontScaleStore, setFontScale, type IPreferenceSource } from './prefs-bus.ts';
 
 /**
@@ -98,6 +99,33 @@ export interface IDshGitSettings {
   readonly autoSec?: number;
 }
 
+/**
+ * 【账号】组要的那一面 store(结构化类型,不是 `GitStore` 的别名)。
+ *
+ * 只声明**真正用到的**成员(与 `IPreferencesStore` 同一手法:窄接口让「谁改了这几个方法」
+ * 立刻在编译期报错)。真身是 `src/client/store.ts` 的 `GitStore` ——
+ * 它在 `index.ts` 里被传进来,而那张类型不需要认识整个 store。
+ *
+ * ⚠️ `subscribe` / `snapshot` 是**登录态的读面**:设置页要跟着别处的登录/登出一起变
+ * (设备码轮询成功、弹窗里登录),所以不能只在挂载时拍一张快照。
+ */
+export interface IDshGitSettingsStoreLike {
+  /** 订阅 store 的变化。 */
+  subscribe(listener: () => void): () => void;
+  /** 当前快照(**同一引用必须一直返回到真的变了** —— `useSyncExternalStore` 的硬要求)。 */
+  snapshot(): { readonly auth: AuthStatePayload | null };
+  /** 读一次登录态(`auth/state` 路由)。 */
+  loadAuth(): Promise<void>;
+  /** 登录成功后写入登录态。 */
+  setAuth(state: AuthStatePayload): void;
+  /** 刷新远端仓库清单。 */
+  loadRemoteRepos(force?: boolean): Promise<void>;
+  /** 轻提示。 */
+  toast(message: string, kind?: 'ok' | 'err'): void;
+  /** 退出登录。 */
+  logout(): Promise<void>;
+}
+
 /** 这一页渲染的宿主表单状态。 */
 export interface IDshGitSettingsState extends SettingsFormShell {
   /** Pulls 自动刷新周期(秒)。 */
@@ -146,6 +174,14 @@ export interface IDshGitSettingsFace extends SettingsFormActions {
   resetAutoSec: () => void;
   /** 写 `fontScale`(px;`0` = 跟随宿主)。 */
   readonly onFontScale: (value: number) => void;
+  /**
+   * 本插件的**全局 store** —— 给【账号】组用(读登录态、登录成功后 `setAuth` /
+   * `loadRemoteRepos` / `toast`、退出登录)。
+   *
+   * ⚠️ 它**不是**仓库清单 / Changes 那条数据面(那份数据今天只有右侧栏与弹窗在读,
+   * 走的是按 session 键的**另一颗** store)。设置页只用它做登录态与账号动作。
+   */
+  readonly store: IDshGitSettingsStoreLike;
   /**
    * **设置页那一侧的「偏好变了」**。
    *
@@ -197,6 +233,13 @@ export class DshGitSettingsController {
   private readonly onPreferencesChanged: (() => void) | undefined;
   /** 文案函数(命名空间 `dsh-git`)。 */
   private readonly t: Translate;
+  /**
+   * 全局 store(见 {@link IDshGitSettingsFace.store})。
+   *
+   * ⚠️ 名字带 `Account` 是为了与上面那个 `store`(**表单模型绑出来的快照**)区分开 ——
+   * 两个都叫 store 会撞在一起(实测 TS2300)。
+   */
+  private readonly accountStore: IDshGitSettingsStoreLike;
   /** 注入面的**唯一**实例(`inject()` 的返回值;见那里的注释)。 */
   private face: IDshGitSettingsFace | undefined;
 
@@ -204,16 +247,19 @@ export class DshGitSettingsController {
    * @param scope - `dsh-git` 命名空间绑定的设置表单面。
    * @param onPreferencesChanged - 设置页那一侧的「偏好变了」回调。
    * @param t - 文案函数(命名空间 `dsh-git`);见 {@link IDshGitSettingsFace.t}。
+   * @param store - 全局 store;见 {@link IDshGitSettingsFace.store}。
    */
   public constructor(
     scope: SettingsFormScope<IDshGitSettings>,
     onPreferencesChanged: (() => void) | undefined,
     t: Translate,
+    store: IDshGitSettingsStoreLike,
   ) {
     this.form = new SettingsFormModel(scope, [settingsNumberField('autoSec')]);
     this.store = this.form.bind(() => this.projection());
     this.onPreferencesChanged = onPreferencesChanged;
     this.t = t;
+    this.accountStore = store;
   }
 
   private projection(): IDshGitSettingsState {
@@ -242,6 +288,7 @@ export class DshGitSettingsController {
       resetAutoSec: () => { actions.resetField('autoSec'); },
       onFontScale: (value: number) => { setFontScale(value); },
       onPreferencesChanged: this.onPreferencesChanged ?? (() => { /* 没有发送点:什么都不做 */ }),
+      store: this.accountStore,
       hooks: {
         dshGitSettings: this.store,
         fontScaleValue: fontScaleStore,
