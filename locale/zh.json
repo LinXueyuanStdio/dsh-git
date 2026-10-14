@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Git 工作台 (dsh-git)",
+    "title": "Git",
     "description": "在官方右侧栏里管理本地 git 仓库:多仓库下拉 + Changes / History + Code / Issues / PR / Actions 远端页签。"
   }
 }

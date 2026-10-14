@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Git Workbench (dsh-git)",
+    "title": "Git",
     "description": "Manage local git repositories from the official right sidebar: a multi-repo picker, Changes / History, and the Code / Issues / PR / Actions remote tabs."
   }
 }
