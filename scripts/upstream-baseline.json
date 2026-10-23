@@ -2,9 +2,9 @@
   "$comment": "上游发布监视的状态。verified = 最后一次通过端到端部署测试的上游版本(由 .github/workflows/upstream-watch.yml 写);lastFailure = 最后一次红。人可以让它失效(把 verified 删掉)以强制重验一次。",
   "lane": "next",
   "verified": {
-    "version": "0.2.0-rc.2",
-    "at": "2026-10-13T02:47:02.436Z",
-    "runUrl": "https://github.com/LinXueyuanStdio/dsh-git/actions/runs/38338206897"
+    "version": "0.2.1-rc.2",
+    "at": "2026-10-23T06:19:53Z",
+    "runUrl": null
   },
   "lastFailure": null,
   "history": [
@@ -12,6 +12,12 @@
       "version": "0.2.0-rc.2",
       "at": "2026-10-13T02:47:02.436Z",
       "runUrl": "https://github.com/LinXueyuanStdio/dsh-git/actions/runs/38338206897",
+      "outcome": "green"
+    },
+    {
+      "version": "0.2.1-rc.2",
+      "at": "2026-10-23T06:19:53Z",
+      "runUrl": null,
       "outcome": "green"
     }
   ]

@@ -884,7 +884,10 @@ await page.waitForTimeout(12_000);
  * `git` tab、`Add ▾` 一个都点不到。而且**不止一个门**:
  *   1. `预览版说明`(`继续`)—— 2026-10-07 实测:点它时宿主可能报
  *      「暂时无法保存确认状态」,但**确认值落盘要几秒**,别点一次就下结论;
- *   2. `添加一个 API Key 开始使用`(`稍后配置`)—— 前一个门过了才会出现。
+ *   2. `添加一个 API Key 开始使用` —— 0.2.0 的正文按钮是 `稍后配置`,**0.2.1 改掉了**:
+ *      正文只剩 `添加 API Key` / `登录`,退出走标题栏右上角的 `关闭`(`Close`)图标。
+ *      2026-10-17 CI 实测:旧判据只认 `稍后配置`,于是这个门一次都没被点过,
+ *      后面 `添加工作区` 的点击全被 mask 吞掉 —— 表现是「工作区没加上」(issue #3/#4)。
  *
  * 所以不写「点一次 + 固定等 1.5 秒」,改成:轮询式地看到哪个点哪个,直到没有可见的门
  * (或到轮数上限),每点一个都留一张图。
@@ -895,17 +898,22 @@ async function passModalGates(rounds = 4) {
   for (let round = 1; round <= rounds; round += 1) {
     let clickedAnyone = false;
     /*
-     * ⚠️ 文案**按语言变**(CI 的 runner 是 en-US):中文 `继续`/`稍后配置`,
-     * 英文 `Continue`/`Configure later`。用锚定正则覆盖两种,否则在英文界面上会
+     * ⚠️ 文案**按语言变**(CI 的 runner 是 en-US):中文 `继续`/`稍后配置`/`关闭`,
+     * 英文 `Continue`/`Configure later`/`Close`。用锚定正则覆盖两种,否则在英文界面上会
      * 误判成「启动时没有模态门」,而弹窗其实还在把后面的点击全吃掉(2026-10-07 CI 实测)。
      * 锚定是必须的:`Save and continue` 也含 "continue",不锚定会点到它。
+     *
+     * ⚠️ `关闭` 必须**限定在 dialog 内**点:页面上还有别的 `Close`(toast 的关闭按钮),
+     * 按名字全局找会点到不相干的那个,而门纹丝不动。
      */
     const gates = [
-      { title: '继续 / Continue', pattern: /^(继续|Continue)$/, slug: 'continue' },
-      { title: '稍后配置 / Configure later', pattern: /^(稍后配置|Configure later)$/, slug: 'configure-later' },
+      { title: '继续 / Continue', pattern: /^(继续|Continue)$/, slug: 'continue', scope: 'page' },
+      { title: '稍后配置 / Configure later', pattern: /^(稍后配置|Configure later)$/, slug: 'configure-later', scope: 'page' },
+      { title: '关闭引导弹窗 / Close', pattern: /^(关闭|Close)$/, slug: 'close-onboarding', scope: 'dialog' },
     ];
     for (const gate of gates) {
-      const button = page.getByRole('button', { name: gate.pattern }).first();
+      const root = gate.scope === 'dialog' ? page.getByRole('dialog') : page;
+      const button = root.getByRole('button', { name: gate.pattern }).first();
       if (!(await button.isVisible().catch(() => false))) {
         continue;
       }
@@ -920,7 +928,10 @@ async function passModalGates(rounds = 4) {
       return true;
     }
   }
-  warn('模态门点了 4 轮还没消失 —— 后面的 UI 动作会被它吃掉');
+  const openDialogs = await page.evaluate(() => [...document.querySelectorAll('[role="dialog"]')]
+    .map((el) => (el.getAttribute('aria-label') ?? el.textContent ?? '').trim().slice(0, 40)));
+  warn(`模态门点了 ${rounds} 轮还没消失 —— 后面的 UI 动作会被它吃掉;还开着的弹窗:${openDialogs.join(' | ') || '(无)'}`);
+  await shot('modal-stuck');
   return false;
 }
 await passModalGates();
@@ -1485,12 +1496,18 @@ await shot('commit-message');
  * 现场见 artifacts/e2e/12-commit-clicked.png)。
  *
  * 所以:先 Escape 关掉可能已经打开的菜单,再按**完整文案**点左边那一半。
+ *
+ * ⚠️ **`到 <分支>` 这一段可以不存在**:`changes-view.tsx:3624` 的
+ * `branch = status === null || detached || unborn ? '' : status.branch`(上游同义),
+ * 而 `--skip-push` 模式的仓库是 `git init` 出来的 **unborn** 仓库 ⇒ 按钮文案就是
+ * 「提交 N 个文件」,锚死的旧正则一个都匹配不上(2026-10-23 本机实测)。
+ * 带分支时仍然以「到 」或行尾收口,不会误点右半边那颗 `⌄`。
  */
 await page.keyboard.press('Escape').catch(() => { /* 没有菜单 */ });
 await page.waitForTimeout(400);
 const clickedCommit = await clickFirst([
-  () => page.getByRole('button', { name: /^(提交 \d+ 个文件到 |Commit \d+ files? to )/ }),
-  () => page.getByText(/^(提交 \d+ 个文件到 |Commit \d+ files? to )/).first(),
+  () => page.getByRole('button', { name: /^(提交 \d+ 个文件(?:到 |$)|Commit \d+ files?(?: to |$))/ }),
+  () => page.getByText(/^(提交 \d+ 个文件(?:到 |$)|Commit \d+ files?(?: to |$))/).first(),
 ], 10_000);
 if (!clickedCommit) {
   await dumpControls('点不到提交按钮时');
