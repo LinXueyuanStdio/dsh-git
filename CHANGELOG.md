@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-10-23
+
 ### 升级
 
 - **在 `@deepseek-ai/dsh@0.2.1-rc.2` 上通过端到端部署测试**(基线 `0.2.0-rc.2` → `0.2.1-rc.2`)。
@@ -205,7 +207,8 @@
 - 远端页签以 GitHub 为准；本地**未推送**的提交在 Code 树里看不到对应文件。
 - 暂存是**文件级**的（M1），没有 hunk 级暂存。
 
-[Unreleased]: https://github.com/LinXueyuanStdio/dsh-git/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/LinXueyuanStdio/dsh-git/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/LinXueyuanStdio/dsh-git/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/LinXueyuanStdio/dsh-git/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/LinXueyuanStdio/dsh-git/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/LinXueyuanStdio/dsh-git/compare/v1.0.0...v1.1.0
