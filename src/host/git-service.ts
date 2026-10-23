@@ -119,10 +119,107 @@ export class GitServiceError extends Error {
   }
 }
 
+/**
+ * `detail` 的字符上限(信封体积契约)。
+ *
+ * 与 `git-runner.ts` 的 `OUTPUT_CAP_BYTES` **不是**同一个东西:那个管「收集多少」,
+ * 这个管「往 HTTP 信封里放多少」。
+ */
+const DETAIL_LIMIT = 2000;
+
+/**
+ * git 的**传输进度行**与它自己的样板行 —— 它们不是「原因」。
+ *
+ * 逐条对着真 git 的 stderr 写(`git push --progress` 的头部):
+ * ```
+ * Enumerating objects: 100, done.
+ * Counting objects:   1% (1/100)\r…\rCounting objects: 100% (100/100), done.
+ * Delta compression using up to 8 threads
+ * Compressing objects: …  /  Writing objects: …
+ * Total 77 (delta 14), reused 0 (delta 0), pack-reused 0 (from 0)
+ * remote: Resolving deltas: 100% (14/14), completed with 11 local objects.
+ * To https://github.com/o/r.git
+ * ```
+ * 这一串是 2026-10-14 那份真捕获里**逐行**点出来的(没有一行是猜的)。
+ * `To <url>` 也在这里:它是「推到哪里」,不是「为什么失败」。
+ */
+const TRANSFER_NOISE_RE =
+  /^(?:(?:Enumerating|Counting|Compressing|Writing) objects:|Delta compression using up to |remote: (?:Enumerating|Counting|Compressing|Writing) objects:|remote: Resolving deltas:|Total \d+ \(delta |To )/;
+
+/**
+ * 从 git 的 stderr 里挑出**原因那一行**(不是第一条非空行)。
+ *
+ * ## 为什么不能取第一条非空行(2026-10-14 的真缺陷)
+ *
+ * 我们在 `push`/`fetch`/`pull` 上固定加了 `--progress`(见 `core/git-argv.ts` 的
+ * `pushArgv`),于是 git 把**整段传输进度刷在最前面**、把原因写在**最后几行**。
+ * 旧的「第一条非空行」取到的正是进度 ⇒ 信封变成
+ * `推送失败:Enumerating objects: 100, done.`,而用户真正需要的那句
+ * (`! [remote rejected] …`)被留在了 `detail` 的尾部 —— 又被 {@link truncateTail}
+ * 之前的「保头部」截断扔掉。用户 2026-10-14 报的就是这一条。
+ *
+ * ## 判据(只看形状)
+ *
+ * 1. 逐行取 `\r` **之后**的文本:git 用 `\r` 原地覆写同一行,`\n` 之前的最后一段
+ *    才是这行最终显示的内容(`\r` 段本身全是进度);
+ * 2. 丢掉 {@link TRANSFER_NOISE_RE} 命中的进度/样板行;
+ * 3. 剩下的**第一条**就是原因。
+ *
+ * ⚠️ 为什么是「第一条」而不是「最后一条」:git 收尾三行是
+ * `! [remote rejected] <ref> (<reason>)` → `error: failed to push some refs to '<url>'`,
+ * **最后一条是样板**(不携带任何原因),而第一条常常正是远端自己的话
+ * (`remote: error: GH006: …`、`remote: 这个仓库不接受这次推送:…`)。
+ * 这条取舍同时保住了 A5–A8 那几档**改动前后逐字相同**的 message(探针读数)。
+ *
+ * @param stderr - git 的原始 stderr(**截断之前**的那一份:原因不许因为截断而丢)。
+ * @returns 原因那一行(已 trim);一行可用都没有时回 `''`。
+ */
+export function reasonLineOf(stderr: string): string {
+  for (const rawLine of stderr.split('\n')) {
+    const line = rawLine.slice(rawLine.lastIndexOf('\r') + 1).trim();
+    if (line === '' || TRANSFER_NOISE_RE.test(line)) {
+      continue;
+    }
+    return line;
+  }
+  return '';
+}
+
+/**
+ * 取文本的**末尾** `limit` 个字符;真的裁了就在**最前面**标注裁了多少。
+ *
+ * ⚠️ **必须保尾**(2026-10-14 修):git 把进度写在前面、把原因写在最后,所以保头部
+ * 等于把真因整段扔掉。用户那次真失败的 stderr 长 **9452** 字符、拒绝行在第 **9246**
+ * 字符处 ⇒ 旧的 `slice(0, 2000)` **一个字节**都没碰到它,弹窗里只剩进度。
+ * 上游是同一个方向:`references/desktop/app/src/lib/git/push-terminal-chunk.ts:21-40`
+ * 的滚动缓冲超限时**从头丢**(它留尾部)。
+ *
+ * 标注的理由与 {@link commandLineOf} 的 `…(命令过长,已截断)` 是同一条纪律:
+ * **截断必须标注**,不许让读者以为已经看完了。
+ *
+ * ⚠️ 这一行会**原样出现在弹窗的 `<pre>` 里**,所以措辞里不许出现「未知错误」
+ * (`docs/probes/push-failure-detail-probe.mjs` 的 `C-ALL` 把那一句当否定式判据)。
+ *
+ * @param text - 原始文本(调用方给已经 trim 过的更稳)。
+ * @param limit - 保留的**末尾**字符数。
+ */
+function truncateTail(text: string, limit: number): string {
+  if (text.length <= limit) {
+    return text;
+  }
+  const dropped = text.length - limit;
+  return `…(宿主只保留了末尾 ${limit} 字符:前面 ${dropped} 字符已截断)\n${text.slice(dropped)}`;
+}
+
 /** git 的 stderr → 可操作的中文提示 + 稳定错误码。 */
 export function classifyGitFailure(stderr: string, context: string): GitServiceError {
   const s = stderr.toLowerCase();
-  const detail = stderr.trim().slice(0, 2000);
+  /*
+   * `reason` 从**截断之前**的 stderr 上取:原因那一行永远不该因为信封体积而被丢掉
+   * (它同时也保证 `message` 与 `detail` 各自独立成立)。
+   */
+  const reason = reasonLineOf(stderr);
+  const detail = truncateTail(stderr.trim(), DETAIL_LIMIT);
   if (/authentication failed|could not read username|terminal prompts disabled|permission denied \(publickey\)/.test(s)) {
     return new GitServiceError('auth-failed', `${context}需要 GitHub 凭据:请在 ⚙ 设置里登录或填 Token。`, detail);
   }
@@ -142,6 +239,46 @@ export function classifyGitFailure(stderr: string, context: string): GitServiceE
     return new GitServiceError('operation-in-progress', `${context}失败:仓库里有进行中的操作,请先完成或中止。`, detail);
   }
   /*
+   * 远端拒绝「创建 / 更新 workflow 文件」。
+   *
+   * ## 为什么这条规则必须存在(2026-10-14 用户报的真失败)
+   *
+   * 那次推送的**真因**是 GitHub 回的这一行:
+   * ```
+   *  ! [remote rejected] main -> main (refusing to allow a GitHub App to create or
+   *    update workflow `.github/workflows/ci.yml` without `workflows` permission)
+   * ```
+   * 旧版分类器**一条规则都不匹配**它 ⇒ 落 `internal`,而 `message` 又取 stderr 的第一行
+   * (进度)⇒ 弹窗上写的是 `推送失败:Enumerating objects: 100, done.`,原因一个字节都没有。
+   *
+   * ## 两种措辞都要认,因为两种都会在生产里出现
+   *
+   * | 措辞 | 谁产出 | 上游有没有 |
+   * |---|---|---|
+   * | `an OAuth App … without \`workflow\` scope` | OAuth App 令牌 | ✅ 上游只认这一种(`references/desktop/app/src/ui/dispatcher/error-handlers.ts:382-383` 的 `rejectedPathRe`) |
+   * | `a GitHub App … without \`workflows\` permission` | **GitHub App 令牌** | ❌ 上游没有(它的凭据是**它自己**的 OAuth App) |
+   *
+   * ⚠️ 宿主注入给 git 的正是**第二种**(`auth.ts` 的 `credentialEnv()` 走 App 令牌),
+   * 所以这条规则在生产里承重;第一种保留是为了 OAuth 令牌那条路(也照上游判据)。
+   * 客户端那条同源正则(`bits.tsx` 的 `WORKFLOW_SCOPE_RE`)也**同时**认这两种。
+   *
+   * 提示里的三条出路都由**判据本身**给得出(是权限模型,不是猜的网络问题):
+   * GitHub App 开 Workflows、PAT 加 `workflow` scope、或改走 SSH 远端。
+   */
+  const workflowRejected =
+    /refusing to allow (?:an? )?(?:OAuth|GitHub) App to create or update workflow `([^`]+)` without (?:`workflow` scope|`workflows` permission)/.exec(stderr);
+  if (workflowRejected !== null) {
+    const file = workflowRejected[1] ?? '';
+    return new GitServiceError(
+      'git-failed',
+      `${context}被拒绝:这份凭据没有改动工作流文件的权限${file === '' ? '' : `(${file})`}。`
+      + 'GitHub 对 `.github/workflows/**` 的写入要求额外授权:GitHub App 要在 App 设置里打开'
+      + ' Workflows(Read and write)并重新授权,Personal Access Token 要带 `workflow` scope;'
+      + '把远端换成 SSH 地址则不受这条限制。',
+      detail,
+    );
+  }
+  /*
    * libcurl 的 HTTP/2 帧层错误。
    *
    * 为什么要单独认它(而不是让它掉进兜底):它是一条**有标准解法**的网络层失败
@@ -151,23 +288,21 @@ export function classifyGitFailure(stderr: string, context: string): GitServiceE
    *
    * ⚠️ **可操作性提示的判据是 stderr 本身**(`/http2/i` + 「framing layer」),
    * 判据不成立时一句都不提 —— 用户的要求是「别编:只在确定判据成立时才提示」。
-   * ⚠️ 边界:`docs/probes/push-failure-detail-probe.mjs` 的 A11 档**本地造不出来**
+   * ⚠️ 边界:`docs/probes/push-failure-detail-probe.mjs` 的 A13 档**本地造不出来**
    * (试过:本地 TCP 服务回 `101 Switching Protocols` + 垃圾字节 ⇒ git 只是**挂住**
    * 直到超时、stderr 为空)。所以这条规则只有「把 libcurl 那句原文喂进分类器」这一级判据,
    * 真句子只有带 HTTP/2 的真远端/代理能产出。
    */
   if (/http2 framing layer|error in the http2|http\/2/.test(s)) {
-    const first = detail.split('\n').find((line) => line.trim() !== '') ?? '';
     return new GitServiceError(
       'git-failed',
-      `${context}失败:HTTP/2 连接中途断了(${first === '' ? 'libcurl 报 HTTP/2 帧层错误' : first})。`
+      `${context}失败:HTTP/2 连接中途断了(${reason === '' ? 'libcurl 报 HTTP/2 帧层错误' : reason})。`
       + '这条是 libcurl 的帧层报错,常见解法是把 git 走 HTTP/1.1:'
       + 'git config --global http.version HTTP/1.1,然后重试。',
       detail,
     );
   }
-  const first = detail.split('\n').find((line) => line.trim() !== '') ?? '未知错误';
-  return new GitServiceError('internal', `${context}失败:${first}`, detail);
+  return new GitServiceError('internal', `${context}失败:${reason === '' ? '未知错误' : reason}`, detail);
 }
 
 /**

@@ -1205,10 +1205,12 @@ export class GitStore implements Pick<MirrorGitStore, 'setShowCoAuthoredBy' | 's
    *    且拼接处会**丢词界**(`第一行第二行`),这是「静默地毁掉证据」;
    *  - 因此这里把 detail 的多行**用一个空格**并成一段:落进 toast 后**读到的就是屏幕上
    *    那一行**,可复算、可断言(`docs/probes/fail-toast-detail-probe.mjs` 逐字比对);
-   *  - **不加长度上限、不加截断标记**:detail 在宿主侧已经有硬上限
-   *    (`git-service.ts` 的 `stderr.trim().slice(0, 2000)`),客户端再截一刀只会让
-   *    「截了多少」变成第二个需要标注的事实;本仓的先例是**截断必须标注**
-   *    (`commandLineOf()` 的 `…(命令过长,已截断)`),而这里选择**不截**,所以不需要标记。
+   *  - **不加第二刀、不加第二个截断标记**:`detail` 在宿主侧已经有硬上限
+   *    (`git-service.ts` 的 `truncateTail(stderr, 2000)` —— **保留尾部**,真裁了就在
+   *    `detail` 的第一行标出裁掉多少字符)。客户端再截一刀只会让「截了多少」变成第二个
+   *    需要标注的事实;本仓的先例是**截断必须标注**
+   *    (`commandLineOf()` 的 `…(命令过长,已截断)`),而这一刀**已经**由宿主标注了,
+   *    所以这里选择**不截**,也就不需要再补标记。
    *    代价如实记账:2000 字符会撑出一条很高的横幅(7 秒后消失)。
    *  - 需要**可滚、可选中、可复制**的长文时,正确落点是**弹窗**(推送失败 /
    *    生成失败的 `<pre>`,见 `bits.tsx` 与 `pushFailure` / `generateFailure`),

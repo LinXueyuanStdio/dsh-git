@@ -105,13 +105,31 @@ export function ConfirmDialog(props: {
 export type PushFailureKind = 'needs-pull' | 'workflow-scope' | 'generic';
 
 /**
- * 上游 `ui/dispatcher/error-handlers.ts:382-383` 的 `rejectedPathRe`,**逐字**。
- * 唯一的区别:上游跑在 `error.message` 上(那是 dugite 拼的整段输出),
- * 这里跑在 `error.detail` 上 —— 宿主的 `message` 是本地化过的中文短句,
- * git 原始 stderr 在 `detail`(`git-service.ts:83` 的 `truncate(stderr, 2000)`)。
+ * 「远端拒绝改动工作流文件」那一行 —— 上游 `ui/dispatcher/error-handlers.ts:382-383`
+ * 的 `rejectedPathRe` **加上第二种措辞**。
+ *
+ * ## 为什么不能逐字照抄上游那一条(2026-10-14 的真缺陷)
+ *
+ * 上游那条正则只认 **`an OAuth App` + `` `workflow` scope ``** —— 因为 GitHub Desktop
+ * 的凭据是**它自己的 OAuth App**。本插件注入给 git 的是宿主登录的那一枚令牌,生产实测是
+ * **GitHub App 用户令牌**(`ghu_`),GitHub 回的措辞因此是
+ * ``a GitHub App … without `workflows` permission`` ⇒ 逐字照抄的那条正则**永不命中**,
+ * 第三档弹窗永远不出现(用户 2026-10-14 那次推送失败就是它:信封落 `internal`,
+ * `message` 还是进度行 `Enumerating objects: 100, done.`)。
+ *
+ * 所以这里认**两种措辞**;捕获组仍然是路径(上游 `:421` 的 `match[1]`)。
+ * 宿主那条同源规则(`git-service.ts` 的 `classifyGitFailure`)也同时认这两种。
+ *
+ * 另一个区别:上游跑在 `error.message` 上(dugite 拼的整段输出),这里跑在
+ * `error.detail` 上 —— 宿主 `message` 是本地化过的中文短句,git 原始 stderr 在 `detail`
+ * (`git-service.ts` 的 `truncateTail(stderr, 2000)` **保留尾部**;拒绝行本来就在尾部,
+ * 所以它一定在这 2000 字符里)。行首那个空格在**上游**是必须的(git 缩进了那一行);
+ * 这里写成 `^ ?`(空格可选),因为 `detail` 是宿主 `trim()` 过的,而**首行就是拒绝行**的
+ * 情形(手喂夹具、极短 stderr)会被 trim 掉那个空格。生产里首行是传输进度,空格一直在,
+ * 所以这条放宽容的只是「判据不该依赖一个空格」,不是新的匹配面。
  */
 const WORKFLOW_SCOPE_RE =
-  /^ ! \[remote rejected\] .*? -> .*? \(refusing to allow an OAuth App to create or update workflow `(.*?)` without `workflow` scope\)/m;
+  /^ ?! \[remote rejected\] .*? -> .*? \(refusing to allow (?:an? )?(?:OAuth|GitHub) App to create or update workflow `(.*?)` without (?:`workflow` scope|`workflows` permission)\)/m;
 
 /** 从推送失败的 stderr 里取出被拒的工作流文件路径(上游 `:421` 的 `match[1]`)。 */
 export function workflowRejectedPathOf(error: GitError): string | null {
@@ -138,13 +156,14 @@ export function pushFailureKindOf(error: GitError): PushFailureKind {
 
 /**
  * 宿主在 **git 的 stderr 为空**时写进 `message` 的占位符
- * (`src/host/git-service.ts:102`:`detail.split('\n').find(...) ?? '未知错误'`)。
+ * (`src/host/git-service.ts`:`classifyGitFailure` 的 `reason === '' ? '未知错误'`,
+ * 而 `reason` 来自 `reasonLineOf(stderr)` —— 一行可用输出都没有时才回空串)。
  *
  * 用户报的缺陷就是它:「推送失败居中弹窗里,出现未知错误」——弹窗把宿主的占位符
  * **当原因播了出去**,而宿主其实一个原因都没拿到。它**不是**原因,所以不许出现在正文里
  * (用户追加要求:「不许出现「未知错误」这种占位符」「应该给出详细的错误信息」)。
  *
- * 为什么在**客户端**补偿而不是改宿主:占位符的产出点在 `src/host/**`,本轮不在授权范围内
+ * 为什么在**客户端**补偿而不是改宿主:占位符的产出点在 `src/host/**`,那两轮不在授权范围内
  * (`docs/push-failure-surfaces.md` §3 已登记宿主契约不变)。
  * **退役条件**:宿主的 `classifyGitFailure` 不再用占位符(例如改成上游 `core.ts:172` 那种
  * `Unknown error (exit code N)`,或干脆把「stderr 为空」单独给一个码)时,这个常量与
@@ -152,11 +171,10 @@ export function pushFailureKindOf(error: GitError): PushFailureKind {
  *
  * ⚠️ **判据是这个字面量本身**。理论上 git 的 stderr 也可能带这三个字(自建 hook 可以随便打中文),
  * 那种情况的后果仅仅是:我们跳过 `message`、只播 `detail` —— 而宿主那句 `message` 的正文**就是**
- * stderr 的第一行(`git-service.ts:102`),所以证据一个字都不会丢,只是少一行重复。
+ * stderr 里第一条非进度行(`reasonLineOf`),所以证据一个字都不会丢,只是少一行重复。
  *
- * ⚠️ **行号是读数、不是契约**:`src/host/git-service.ts` 在 2026-10-06 深夜**正被另一条泳道改写**
- * (本轮实测 mtime 23:53;`:98` 是它在上一版的位置)。判据锚在**表达式**上
- * (`detail.split('\n').find(非空行) ?? '未知错误'`),行号漂移不影响这个常量。
+ * ⚠️ **行号是读数、不是契约**:`src/host/git-service.ts` 反复被别的泳道改写。
+ * 判据锚在**表达式**上(`reasonLineOf(stderr)` 为空时回 `'未知错误'`),行号漂移不影响这个常量。
  */
 const HOST_PLACEHOLDER = '未知错误';
 
@@ -305,9 +323,10 @@ export function PushFailureDialog(props: {
               要推送工作流文件,GitHub 需要额外授权。
             </p>
             <p>
-              本插件使用 Personal Access Token 登录,不能在这里追加 scope:
-              请到 GitHub 重新签发一个带 <code>workflow</code> scope 的 Token,
-              再回到设置里重新登录。
+              工作流文件的写入权限**不能在推送时追加**,只能提前给这枚令牌配上:
+              GitHub App 要在 App 设置里打开 Workflows(Read and write)并重新授权,
+              Personal Access Token 要带 <code>workflow</code> scope 并重新登录;
+              把远端换成 SSH 地址则不受这条限制。
             </p>
           </>
         )}

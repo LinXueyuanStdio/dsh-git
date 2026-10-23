@@ -15,6 +15,21 @@
   同时补上 `--skip-push` 模式(unborn 仓库、提交按钮文案没有「到 <分支>」)的匹配。
   插件本身不需要改:浏览器半的构建戳、设置命名空间、右侧栏 tab、路由与推送链在 0.2.1 上全部通过。
 
+### 修复
+
+- **推送失败时,弹窗不再把 git 的进度输出当成失败原因。** 改前宿主的 `detail` 只保留 stderr
+  **开头** 2000 字符,而 `git push --progress` 把整段传输进度刷在最前面、把真正的原因写在最后几行
+  ⇒ 弹窗正文只有 `推送失败:Enumerating objects: 100, done.`,真因一个字节都没带进来。
+  现在:①`detail` **保尾部**,真裁了就在首行标注裁掉多少字符;②`message` 取 stderr 里**第一条非进度行**
+  (远端自己的话),不再取进度行;③新增一条分类:远端拒绝改动工作流文件
+  (`refusing to allow … to create or update workflow …`)。
+- **「远端拒绝改动工作流文件」现在会弹「推送被拒绝」,而且两种措辞都认。** 上游 GitHub Desktop
+  只认 ``an OAuth App … without `workflow` scope``(它的 git 凭据是它自己的 OAuth App),而本插件的
+  git 凭据是 **GitHub App 令牌**,GitHub 回的是 ``a GitHub App … without `workflows` permission`` ——
+  改前这条措辞既不匹配宿主的分类规则、也不匹配客户端那条照抄上游的正则,于是落进通用档,
+  用户看不出这是权限问题。弹窗里的出路也改成两种凭据都覆盖:GitHub App 打开
+  `Workflows(Read and write)` / Personal Access Token 带 `workflow` scope / 或把远端改成 SSH 地址。
+
 ## [1.2.0] - 2026-10-13
 
 ### 变更

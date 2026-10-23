@@ -20,11 +20,20 @@ export type GitErrorCode =
   | 'timeout'
   /**
    * 一条 git 命令失败了,但 `classifyGitFailure` 的几条已知模式都不匹配
-   * (`git-service.ts:511` 的 `git show <rev>:<path>` 就是这种)。
+   * (`git-service.ts` 的 `git show <rev>:<path>` 就是这种)。
    *
    * 为什么不是折成 `'internal'`:界面按 `error.code !== 'internal'` 决定要不要把
    * git 原始 stderr 附在提示后面(`store.ts` 的 `fail()`),折成 internal 等于把
    * 唯一有用的诊断信息丢掉。它是 `'internal'` 的**更具体**版本,不是新语义。
+   *
+   * ⚠️ **它不止上面那一种产地**(2026-10 起的两次追加,都在 `git-service.ts` 里):
+   * `classifyGitFailure` 有两条**匹配上了、但语义仍属「一般 git 失败」**的规则也回它 ——
+   * libcurl 的 HTTP/2 帧层错误,以及远端拒绝改动 workflow 文件的权限错误。它们各自
+   * 有专属中文 `message`(带下一步),所以**不需要**在 `GitErrorCode` 联合里各占一员;
+   * 界面侧也不按码分派这两档(推送失败弹窗的第三档判据是 `detail` 上的正则)。
+   * `store.ts` 的 `fail()` 现在对**任何**码都附 `detail` 与 `错误码:<code>`,所以
+   * 上面那条「按 `code !== 'internal'` 决定附不附 detail」是**历史**依据,现状见该方法的
+   * JSDoc。
    */
   | 'git-failed'
   | 'internal';
