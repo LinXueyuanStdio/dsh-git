@@ -8,6 +8,7 @@
 ### 兼容
 
 - 端到端部署测试已在 `@deepseek-ai/dsh@0.2.1-rc.3` 上通过([run](https://github.com/LinXueyuanStdio/dsh-git/actions/runs/39925930568))。
+- 端到端部署测试已在 `@deepseek-ai/dsh@0.2.1-rc.5` 上通过([run](https://github.com/LinXueyuanStdio/dsh-git/actions/runs/40911503738))。
 
 ## [1.2.1] - 2026-10-23
 
